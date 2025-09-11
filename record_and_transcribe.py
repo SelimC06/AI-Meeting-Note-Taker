@@ -1,4 +1,4 @@
-import sounddevice as sd
+import soundcard as sc
 import soundfile as sf
 from faster_whisper import WhisperModel
 from pathlib import Path
@@ -7,43 +7,50 @@ from threading import Event
 
 _stop = Event()
 
+def _mono(x):
+    if x.ndim == 1: 
+        x = x[:, None]
+    return x.mean(axis=1, keepdims=True).astype(np.float32, copy=False)
+
 def check(out_dir="transcript_"):
-    seconds = 2
-    sample_rate = 16000
-    channels = 1
     out_wav = out_dir + ".wav"
     out_txt = out_dir + ".txt"
     model_name = "base.en"
 
-    block_ms = 30
+    sample_rate = 48000
+    block_ms = 100
     frames_per_block = int(sample_rate * block_ms / 1000)
 
     chunks = []
     _stop.clear()
-    # Record
-    #while not _stop.is_set():
-    #    audio = sd.rec(int(seconds*sample_rate), samplerate=sample_rate,
-    #                channels=channels, dtype="float32")
-    #    sd.wait()
-    #    if _stop.is_set(): break
-    #    chunks.append(audio.copy())
-    with sd.InputStream(samplerate=sample_rate,
-                    channels=channels,
-                    dtype="float32",
-                    blocksize=frames_per_block,
-                    latency='low') as stream:
+
+    mic = sc.default_microphone()
+    spk = sc.default_speaker()
+    loopback = sc.get_microphone(spk.name, include_loopback=True)
+    
+    with mic.recorder(samplerate=sample_rate, blocksize=frames_per_block) as mic_rec, \
+        loopback.recorder(samplerate=sample_rate, blocksize=frames_per_block) as sys_rec:
+
         while not _stop.is_set():
-            data, overflowed = stream.read(frames_per_block)
-            if overflowed:
-                print("Input overflow")   # optional heads-up
-            chunks.append(data.copy())
+            mic_block = mic_rec.record(frames_per_block) if mic_rec else None
+            sys_block = sys_rec.record(frames_per_block) if sys_rec else None
+
+            if (mic_block is None or mic_block.size == 0) and (sys_block is None or sys_block.size == 0):
+                continue
+
+            mix = None
+            if mic_block is not None:
+                mix = _mono(mic_block)
+            if sys_block is not None:
+                sys_mono = _mono(sys_block)
+                mix = sys_mono if mix is None else (mix + sys_mono)
+
+            chunks.append(np.clip(mix, -1.0, 1.0).copy())
 
     if not chunks:
         return None
     
     full = np.concatenate(chunks, axis = 0)
-
-    sd.wait()
     sf.write(out_wav, full, sample_rate)
     print(f"Saved: {out_wav}")
 

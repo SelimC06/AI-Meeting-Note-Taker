@@ -44,18 +44,21 @@ def deletePanel():
 play_button_image = ImageTk.PhotoImage(Image.open("image/play_button.png").resize((85,65), Image.LANCZOS))
 pause_button_image = ImageTk.PhotoImage(Image.open("image/pause_image.png").resize((65,65), Image.LANCZOS))
 reset_button_image = ImageTk.PhotoImage(Image.open("image/reset_image.png").resize((80, 80), Image.LANCZOS))
+oneNote_button_image = ImageTk.PhotoImage(Image.open("image/OneNote.png").resize((65,65), Image.LANCZOS))
 
 button_play = tkinter.Button(
     root, image=play_button_image,)
 button_pause = tkinter.Button(
     root, image = pause_button_image)
 button_reset = tkinter.Button(
-    root, image=reset_button_image
-)
+    root, image=reset_button_image)
+button_oneNote = tkinter.Button(
+    root, image = oneNote_button_image)
 
 button_play.place(x=375, y=10, width = 65, height = 65)
 button_pause.place(x=375, y=80, width = 65, height = 65)
 button_reset.place(x=375, y=150, width = 65, height = 65)
+button_oneNote.place(x=375, y=220, width = 65, height = 65)
 
 # Button Functions
 running = False
