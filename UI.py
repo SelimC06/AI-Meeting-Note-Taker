@@ -2,9 +2,8 @@ import tkinter
 from tkinter import ttk
 from pathlib import Path
 from PIL import Image, ImageTk
-import record_and_transcribe
+import LLaVA_summarize
 import ffmpeg_transcribe
-import summarize_llama
 import threading
 
 # Main Panel
@@ -66,27 +65,18 @@ running = False
 video_path = "capture.mkv"
 transcript_prefix = "transcripts/run" 
 
-def AI_worker(raw_txt_path):
-    final_path = Path(("transcripts/final_transcript_long.txt")).read_text(encoding="utf-8")
-    final_md = summarize_llama.complete(raw_txt_path, final_path)
-
+def AI_worker(raw_txt_path, frame_paths):
+    final_md = LLaVA_summarize.complete(
+        raw_txt_path, 
+        out_path="transcripts/final_transcript_long.txt",
+        frame_paths = frame_paths
+    )
     def update_ui():
         deletePanel()
         text.insert("end", final_md)
         button_play.config(state="normal", relief="raised")
         button_pause.config(state="normal", relief="raised")
     root.after(0, update_ui)
-
-def _worker():
-    raw_txt_path = record_and_transcribe.check(out_dir="transcript")
-    def finish():
-        global running
-        button_pause.config(relief="sunken")
-        button_play.config(relief="raised")
-        running = False
-        if raw_txt_path:
-            threading.Thread(target=AI_worker, args=(raw_txt_path,),daemon=True).start()
-    root.after(0, finish)
     
 def press_play():
     global running
@@ -98,15 +88,21 @@ def press_play():
     # threading.Thread(target=_worker, daemon=True).start()
     ffmpeg_transcribe.start_screen_recording_ffmpeg(
         out_path = video_path,
-        seperate_tracks=True
+        separate_tracks=True
     )
 
 def stop_and_process():
     global running
     try:
-        raw_txt_path = ffmpeg_transcribe.stop_recording_and_transcribe(
+        raw_txt_path, frames = ffmpeg_transcribe.stop_recording_and_transcribe(
             video_path=video_path,
-            transcript_prefix=transcript_prefix
+            transcript_prefix=transcript_prefix,
+            separate_tracks=True,
+            extract_frames_after=True,     # 👈 turn on frames
+            frames_mode="uniform",         # or "scene"
+            every_n_seconds=20,            # tune as you like
+            max_frames=10,                  # keep it small for LLaVA
+            scale_width=1280,
         )
     except Exception as e:
         raw_txt_path = None
@@ -116,7 +112,7 @@ def stop_and_process():
         root.after(0, show_err)
 
     if raw_txt_path:
-        threading.Thread(target=AI_worker, args=(raw_txt_path,), daemon=True).start()
+        threading.Thread(target=AI_worker, args=(raw_txt_path, frames), daemon=True).start()
     else:
         def restore():
             button_play.config(state="normal", relief="raised")
