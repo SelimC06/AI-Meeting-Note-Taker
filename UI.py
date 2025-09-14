@@ -3,6 +3,7 @@ from tkinter import ttk
 from pathlib import Path
 from PIL import Image, ImageTk
 import record_and_transcribe
+import ffmpeg_transcribe
 import summarize_llama
 import threading
 
@@ -62,7 +63,8 @@ button_oneNote.place(x=375, y=220, width = 65, height = 65)
 
 # Button Functions
 running = False
-worker  = None
+video_path = "capture.mkv"
+transcript_prefix = "transcripts/run" 
 
 def AI_worker(raw_txt_path):
     final_path = Path(("transcripts/final_transcript_long.txt")).read_text(encoding="utf-8")
@@ -93,14 +95,42 @@ def press_play():
     running = True
     button_play.config(relief="sunken", state="disabled")
     button_pause.config(state="active", relief="raised")
-    threading.Thread(target=_worker, daemon=True).start()
+    # threading.Thread(target=_worker, daemon=True).start()
+    ffmpeg_transcribe.start_screen_recording_ffmpeg(
+        out_path = video_path,
+        seperate_tracks=True
+    )
+
+def stop_and_process():
+    global running
+    try:
+        raw_txt_path = ffmpeg_transcribe.stop_recording_and_transcribe(
+            video_path=video_path,
+            transcript_prefix=transcript_prefix
+        )
+    except Exception as e:
+        raw_txt_path = None
+        def show_err():
+            deletePanel()
+            text.insert("end", f"Error during stop/transcribe: {e}")
+        root.after(0, show_err)
+
+    if raw_txt_path:
+        threading.Thread(target=AI_worker, args=(raw_txt_path,), daemon=True).start()
+    else:
+        def restore():
+            button_play.config(state="normal", relief="raised")
+            button_pause.config(state="normal", relief="raised")
+        root.after(0, restore)
+
+    running = False
 
 def press_pause():
     if not running:
         return
     button_pause.config(relief="sunken", state="disabled")
     button_play.config(relief="raised", state="active")
-    record_and_transcribe.close()
+    threading.Thread(target=stop_and_process, daemon=True).start()
 
 def press_reset():
     if running:
