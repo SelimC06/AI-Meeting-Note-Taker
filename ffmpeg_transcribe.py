@@ -106,7 +106,7 @@ def extract_frames(
 def extract_keyframes_scene(
     video_path: str,
     out_dir: str = "frames_scene",
-    scene_threshold: float = 0.35,  # 0.2..0.5 typical
+    scene_threshold: float = 0.35,
     scale_width: int | None = 1280,
     image_ext: str = "png",
     quality: int = 2,
