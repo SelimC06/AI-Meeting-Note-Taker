@@ -5,7 +5,7 @@ declare global {
     windowControls?: {
       minimize: () => void;
       close: () => void;
-      toggleRail: () => void;
+      toggleRail: () => Promise<boolean>;
       getRailState: () => Promise<boolean>;
     };
   }
@@ -88,20 +88,50 @@ function PillButton() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    window.windowControls?.getRailState?.().then(v => {
-      if (typeof v === "boolean") setOn(v);
-    });
+    let cancelled = false;
+
+    const init = async () => {
+      try {
+        const v = await window.windowControls?.getRailState?.();
+        console.log("[init] getRailState() →", v);
+        if (!cancelled && typeof v === "boolean"){
+          setOn(v);
+        }
+      } catch (e) {
+        console.warn("[PillButton] getRailState (init) failed:", e);
+      }
+    };
+
+    init();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleClick = async () => {
     if (busy) return;
     setBusy(true);
-    await window.windowControls?.toggleRail?.();
-    setTimeout(async () => {
-      const v = await window.windowControls?.getRailState?.();
-      if (typeof v === "boolean") setOn(v);
-    }, 150);
-    setBusy(false);
+    try{
+      console.log("[click] before toggleRail, on =", on);
+      const toggled = await window.windowControls?.toggleRail?.();
+
+      if (typeof toggled === "boolean"){
+        setOn(toggled);
+      } else {
+        const v = await window.windowControls?.getRailState?.();
+        console.log("[click] fallback getRailState() →", v);
+        if (typeof v === "boolean") {
+          setOn(v);
+        } else {
+          setOn(prev => !prev);
+        }
+      }
+      
+    } catch (e) {
+      console.error("[PillButton] toggle/getRailState failed:", e);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -115,7 +145,10 @@ function PillButton() {
         text-xs font-semibold
         shadow
         focus:outline-none focus:ring-2 focus:ring-white/20
-        ${on ? "bg-blue-600 text-white hover:bg-blue-500" : "bg-neutral-600 text-white hover:bg-neutral-500"}
+        [-webkit-app-region:no-drag]
+        ${on
+          ? "bg-blue-600 text-white hover:bg-blue-500"
+          : "bg-neutral-600 text-white hover:bg-neutral-500"}
       `}
     >
       {on ? "Stop" : "Start"}

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, screen, ipcMain } from 'electron';
+import { app, BrowserWindow, screen, ipcMain, desktopCapturer } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -49,7 +49,8 @@ function createRailWindow() {
         alwaysOnTop: true,
         titleBarStyle: 'hidden',
         webPreferences: {
-        contextIsolation: true,
+            preload: path.join(__dirname, "preload.js"),
+            contextIsolation: true,
         },
     });
 
@@ -60,35 +61,52 @@ function createRailWindow() {
         positionRail(mainWindow);
         railWindow.show();
     });
+
+    railWindow.webContents.openDevTools({ mode: "detach" });
 }
 
 function showRail() {
-  if (railWindow && !railWindow.isDestroyed()) {
-    railWindow.show();
-    mainWindow?.webContents.send('rail:getState', true);
-    return;
-  }
-  createRailWindow();
+    if (railWindow && !railWindow.isDestroyed()) {
+        railWindow.show();
+        mainWindow?.webContents.send('rail:getState', true);
+        return true;
+    }
+    createRailWindow();
+    return true;
 }
 
 function hideRail() {
-  if (railWindow && !railWindow.isDestroyed()) {
-    railWindow.destroy();      // close it entirely
-    railWindow = null;
-  }
-  mainWindow?.webContents.send('rail:getState', false);
+    if (railWindow && !railWindow.isDestroyed()) {
+        railWindow.destroy();
+        railWindow = null;
+    }
+    mainWindow?.webContents.send('rail:getState', false);
+    return false;
 }
 
 ipcMain.handle('rail:toggle', () => {
-  if (railWindow && !railWindow.isDestroyed() && railWindow.isVisible()) {
-    hideRail();
-  } else {
-    showRail();
-  }
+    if (railWindow && !railWindow.isDestroyed() && railWindow.isVisible()) {
+        return hideRail();
+    } else {
+        return showRail();
+    }
 });
 ipcMain.handle('rail:getState', () => {
-  return !!(railWindow && !railWindow.isDestroyed() && railWindow.isVisible());
+    return !!(railWindow && !railWindow.isDestroyed() && railWindow.isVisible());
 });
+
+ipcMain.handle("list-capture-sources", async (_event, types = ["screen", "window"]) => {
+    const sources = await desktopCapturer.getSources({
+        types,
+        thumbnailSize: { width: 0, height: 0 }, // we only need ids & names
+    });
+
+    return sources.map((s) => ({
+        id: s.id,
+        name: s.name,
+    }));
+});
+
 
 function createWindow() {
     mainWindow = new BrowserWindow({
