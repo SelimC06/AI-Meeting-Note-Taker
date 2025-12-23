@@ -5,6 +5,15 @@ import Pause from "./components/Pause";
 import Play from "./components/Play"
 import { useThreeTrackSegments } from './hooks/useThreeTrackSegments';
 
+type ProcessResponse = {
+  notes: string;
+  video_path: string;
+  session: string;
+};
+
+const BACKEND_URL =
+  import.meta.env.VITE_MEETING_API_URL ?? "http://localhost:8000";
+
 export default function RailApp() {
     const { status, record, pause, resume, stop } = useThreeTrackSegments();
 
@@ -22,6 +31,30 @@ export default function RailApp() {
                 systemAudio: blobs.systemAudio?.size,
                 micAudio: blobs.micAudio?.size,
             });
+
+            const formData = new FormData();
+            if (blobs.screen) {
+                formData.append("screen", blobs.screen, "screen.webm");
+            }
+            if (blobs.systemAudio) {
+                formData.append("system", blobs.systemAudio, "system.webm");
+            }
+            if (blobs.micAudio) {
+                formData.append("mic", blobs.micAudio, "mic.webm");
+            }
+
+            const resp = await fetch(`${BACKEND_URL}/process`, {
+            method: "POST",
+            body: formData,
+            });
+
+            if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(`Backend error ${resp.status}: ${text}`);
+            }
+
+            const data = (await resp.json()) as ProcessResponse;
+            console.log("[Rail] backend /process result:", data);
         }
         } catch (err) {
             console.error("record/stop error", err);

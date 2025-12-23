@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import type { MainPage } from "../App";
 
 declare global {
   interface Window {
@@ -11,13 +12,18 @@ declare global {
   }
 }
 
-export default function TitleBar() {
+interface Props {
+  onChangePage: (page: MainPage) => void;
+}
+
+export default function TitleBar({ onChangePage }: Props) {
   return (
     <div
       className="h-10 flex items-center justify-between bg-neutral-800/70 text-neutral-200 select-none [-webkit-app-region:drag]"
     >
       {/* Drag region on the left */}
-      <div className="flex items-center gap-2 px-3 text-xs opacity-80">
+      <div className="flex items-center gap-2 px-3 text-xs opacity-80 [-webkit-app-region:no-drag] cursor-pointer"
+        onClick={() => onChangePage("dashboard")}>
         {/* optional app icon / name */}
         <div className="w-2 h-2 rounded-full bg-emerald-400/80"></div>
         <span className="font-bold">Meeting Note Taker</span>
