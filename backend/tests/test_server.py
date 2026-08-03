@@ -201,3 +201,91 @@ def test_sessions_returns_newest_first(client, monkeypatch):
 
     sessions = client.get("/sessions").json()
     assert [s["id"] for s in sessions] == list(reversed(ids))
+
+
+def test_chat_returns_404_for_unknown_session(client: TestClient):
+    resp = client.post("/chat/does-not-exist", json={"message": "hi", "history": []})
+    assert resp.status_code == 404
+
+
+def test_chat_streams_reply_for_known_session(client: TestClient, monkeypatch):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc123",
+        "created_at": "2026-08-03T00:00:00+00:00",
+        "title": "Test Meeting",
+        "notes": "# Test Meeting\n- discussed things",
+        "video_path": "x/final.webm",
+    })
+
+    def fake_stream_chat_reply(notes, message, history, **kwargs):
+        assert "discussed things" in notes
+        assert message == "what did we discuss?"
+        assert history == []
+        yield "We "
+        yield "discussed things."
+
+    monkeypatch.setattr(server_module, "assert_ollama_up", lambda: None)
+    monkeypatch.setattr(server_module, "stream_chat_reply", fake_stream_chat_reply)
+
+    resp = client.post("/chat/abc123", json={"message": "what did we discuss?", "history": []})
+    assert resp.status_code == 200
+    assert resp.text == "We discussed things."
+
+
+def test_chat_passes_history_through(client: TestClient, monkeypatch):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc123",
+        "created_at": "2026-08-03T00:00:00+00:00",
+        "title": "Test Meeting",
+        "notes": "notes",
+        "video_path": "x",
+    })
+
+    captured = {}
+
+    def fake_stream_chat_reply(notes, message, history, **kwargs):
+        captured["history"] = history
+        yield "ok"
+
+    monkeypatch.setattr(server_module, "assert_ollama_up", lambda: None)
+    monkeypatch.setattr(server_module, "stream_chat_reply", fake_stream_chat_reply)
+
+    resp = client.post(
+        "/chat/abc123",
+        json={
+            "message": "follow-up question",
+            "history": [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    assert captured["history"] == [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+    ]
+
+
+def test_chat_returns_503_when_ollama_unreachable(client: TestClient, monkeypatch):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc123",
+        "created_at": "2026-08-03T00:00:00+00:00",
+        "title": "Test Meeting",
+        "notes": "notes",
+        "video_path": "x",
+    })
+
+    def raise_unreachable():
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(server_module, "assert_ollama_up", raise_unreachable)
+
+    resp = client.post("/chat/abc123", json={"message": "hi", "history": []})
+    assert resp.status_code == 503

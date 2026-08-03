@@ -14,12 +14,17 @@ function formatRelativeTime(iso: string): string {
   return `${diffDay}d ago`;
 }
 
-const YourActivityPage: React.FC = () => {
+interface Props {
+  active: boolean;
+}
+
+const YourActivityPage: React.FC<Props> = ({ active }) => {
   const [sessions, setSessions] = useState<Session[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
     getSessions()
       .then((data) => {
@@ -31,7 +36,7 @@ const YourActivityPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [active]);
 
   const selected = sessions?.find((s) => s.id === selectedId) ?? null;
 

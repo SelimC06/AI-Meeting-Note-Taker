@@ -10,6 +10,17 @@ let railWindow = null;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
+function disableZoom(webContents) {
+    webContents.on('before-input-event', (event, input) => {
+        if (input.control && ['=', '-', '0', '+'].includes(input.key)) {
+            event.preventDefault();
+        }
+    });
+    if (typeof webContents.setVisualZoomLevelLimits === 'function') {
+        webContents.setVisualZoomLevelLimits(1, 1).catch(() => {});
+    }
+}
+
 function resolveRailFile() {
     const prod = path.join(app.getAppPath() + '/dist-react/rail.html');
     if (fs.existsSync(prod)) return prod;
@@ -55,6 +66,7 @@ function createRailWindow() {
     });
 
     railWindow.on('closed', () => (railWindow = null));
+    disableZoom(railWindow.webContents);
     railWindow.loadFile(resolveRailFile());
 
     railWindow.webContents.on('did-finish-load', () => {
@@ -121,6 +133,7 @@ function createWindow() {
             preload: path.join(__dirname, 'preload.js')
         }
     });
+    disableZoom(mainWindow.webContents);
     mainWindow.loadFile(path.join(app.getAppPath() + '/dist-react/index.html'));
 
     mainWindow.once("ready-to-show", () => {

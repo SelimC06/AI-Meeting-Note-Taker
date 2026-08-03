@@ -1,10 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { getSessions, type Session } from "../api";
 
-const YourActivity: React.FC = () => {
+interface Props {
+  active: boolean;
+}
+
+const YourActivity: React.FC<Props> = ({ active }) => {
   const [sessions, setSessions] = useState<Session[] | null>(null);
 
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
     getSessions()
       .then((data) => {
@@ -16,7 +21,7 @@ const YourActivity: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [active]);
 
   const count = sessions?.length ?? 0;
   const mostRecentTitle = sessions?.[0]?.title;

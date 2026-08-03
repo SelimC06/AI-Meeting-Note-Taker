@@ -13,24 +13,33 @@ function App() {
       <div className="h-full flex items-center justify-center">
       <div className="h-[450px] w-[800px] rounded-sm border border-line bg-void overflow-hidden flex flex-col">
         <TitleBar page={page} onChangePage={setPage}/>
-        <main className="flex-1 min-h-0 overflow-hidden [-webkit-app-region:no-drag]">
-          {page === "dashboard" && (
-            <div key="dashboard" className="h-full animate-page-in">
-              <DashboardCards onChangePage={setPage}/>
-            </div>
-          )}
+        <main className="flex-1 min-h-0 overflow-hidden [-webkit-app-region:no-drag] relative">
+          <div
+            className={
+              "absolute inset-0 h-full transition-opacity duration-150 " +
+              (page === "dashboard" ? "opacity-100" : "opacity-0 pointer-events-none")
+            }
+          >
+            <DashboardCards onChangePage={setPage} active={page === "dashboard"}/>
+          </div>
 
-          {page === "activity" && (
-            <div key="activity" className="h-full animate-page-in">
-              <YourActivityPage />
-            </div>
-          )}
+          <div
+            className={
+              "absolute inset-0 h-full transition-opacity duration-150 " +
+              (page === "activity" ? "opacity-100" : "opacity-0 pointer-events-none")
+            }
+          >
+            <YourActivityPage active={page === "activity"}/>
+          </div>
 
-          {page === "health" && (
-            <div key="health" className="h-full animate-page-in">
-              <HealthPage />
-            </div>
-          )}
+          <div
+            className={
+              "absolute inset-0 h-full transition-opacity duration-150 " +
+              (page === "health" ? "opacity-100" : "opacity-0 pointer-events-none")
+            }
+          >
+            <HealthPage />
+          </div>
         </main>
         </div>
       </div>

@@ -9,9 +9,10 @@ import Chat from "./Chat";
 
 interface Props {
   onChangePage: (page: MainPage) => void;
+  active: boolean;
 }
 
-const DashboardCards: React.FC<Props> = ({ onChangePage }) => {
+const DashboardCards: React.FC<Props> = ({ onChangePage, active }) => {
   return (
     <>
         <div className="px-6 py-4 flex flex-row gap-4">
@@ -19,7 +20,7 @@ const DashboardCards: React.FC<Props> = ({ onChangePage }) => {
             onClick={() => onChangePage("activity")}
             className="cursor-pointer"
           >
-            <YourActivity />
+            <YourActivity active={active}/>
           </div>
           <div
             onClick={() => onChangePage("health")}
@@ -30,7 +31,7 @@ const DashboardCards: React.FC<Props> = ({ onChangePage }) => {
             <Status />
         </div>
         <div className="px-6 py-4 flex flex-row gap-4">
-          <Chat />
+          <Chat active={active}/>
         </div>
     </>
   );

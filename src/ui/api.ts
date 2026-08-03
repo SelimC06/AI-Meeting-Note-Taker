@@ -25,3 +25,32 @@ export async function checkHealth(): Promise<boolean> {
     return false;
   }
 }
+
+export type ChatTurn = { role: "user" | "assistant"; content: string };
+
+export async function* streamChatReply(
+  sessionId: string,
+  message: string,
+  history: ChatTurn[],
+  signal?: AbortSignal
+): AsyncGenerator<string> {
+  const resp = await fetch(`${BACKEND_URL}/chat/${sessionId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, history }),
+    signal,
+  });
+
+  if (!resp.ok || !resp.body) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`Chat request failed: ${resp.status}${text ? ` ${text}` : ""}`);
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    yield decoder.decode(value, { stream: true });
+  }
+}

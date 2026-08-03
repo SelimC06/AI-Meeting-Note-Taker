@@ -1,9 +1,11 @@
 from __future__ import annotations
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import StreamingResponse
 from .audit import AuditMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.types import Scope, Receive, Send
 from pathlib import Path
+from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, timezone
 import shutil
@@ -25,7 +27,23 @@ try:
 except Exception:
     llava_complete = None
 
+try:
+    from .chat import assert_ollama_up, stream_chat_reply
+except Exception:
+    assert_ollama_up = None
+    stream_chat_reply = None
+
 app = FastAPI()
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: List[ChatMessage] = []
 
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000,http://127.0.0.1:8000")
 
@@ -187,6 +205,33 @@ def debug_ollama():
 @app.get("/sessions")
 def sessions():
     return sorted(load_sessions(STORE), key=lambda r: r.get("created_at", ""), reverse=True)
+
+@app.post("/chat/{session_id}")
+def chat(session_id: str, body: ChatRequest):
+    if stream_chat_reply is None or assert_ollama_up is None:
+        raise HTTPException(503, "Chat is unavailable on this server")
+
+    matching = [s for s in load_sessions(STORE) if s.get("id") == session_id]
+    if not matching:
+        raise HTTPException(404, "Session not found")
+    session_record = matching[0]
+
+    try:
+        assert_ollama_up()
+    except Exception as e:
+        raise HTTPException(503, f"Local model unavailable: {e}")
+
+    history = [{"role": m.role, "content": m.content} for m in body.history]
+
+    def token_stream():
+        try:
+            for chunk in stream_chat_reply(session_record["notes"], body.message, history):
+                yield chunk
+        except Exception as e:
+            log(f"chat stream failed: {e}")
+            yield f"\n[error: {e}]"
+
+    return StreamingResponse(token_stream(), media_type="text/plain")
 
 @app.post("/process")
 async def process(
