@@ -17,6 +17,28 @@ def client(tmp_path, monkeypatch):
     return TestClient(app)
 
 
+def test_main_binds_to_localhost_only(monkeypatch):
+    captured = {}
+
+    def fake_run(app_arg, **kwargs):
+        captured["app"] = app_arg
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(server_module.uvicorn, "run", fake_run)
+    server_module.main()
+
+    assert captured["app"] is server_module.app
+    assert captured["kwargs"]["host"] == "127.0.0.1"
+
+
+def test_google_auth_routes_removed(client: TestClient):
+    resp = client.get("/auth/google/login")
+    assert resp.status_code == 404
+
+    resp = client.get("/auth/me")
+    assert resp.status_code == 404
+
+
 def _tiny_webm_bytes() -> bytes:
     # Not a real playable video; ffprobe_ok will reject it, which is fine —
     # this test exercises the "no valid screen video" 400 path plus confirms
@@ -289,3 +311,34 @@ def test_chat_returns_503_when_ollama_unreachable(client: TestClient, monkeypatc
 
     resp = client.post("/chat/abc123", json={"message": "hi", "history": []})
     assert resp.status_code == 503
+
+
+def test_debug_ollama_route_removed(client: TestClient):
+    resp = client.get("/debug/ollama")
+    assert resp.status_code == 404
+
+
+def test_process_rejects_oversized_upload_by_content_length(client, monkeypatch):
+    monkeypatch.setattr(server_module, "MAX_UPLOAD_BYTES", 10)  # tiny cap for the test
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x" * 1000), "video/webm")},
+    )
+    assert resp.status_code == 413
+
+
+def test_process_413_response_includes_cors_header(client, monkeypatch):
+    """
+    Regression test: the 413 short-circuit from MaxUploadSizeMiddleware must
+    still carry CORS headers, otherwise the browser blocks the response
+    entirely and the frontend only sees a generic network error instead of
+    the 413 status.
+    """
+    monkeypatch.setattr(server_module, "MAX_UPLOAD_BYTES", 10)  # tiny cap for the test
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x" * 1000), "video/webm")},
+        headers={"Origin": "http://localhost:5173"},
+    )
+    assert resp.status_code == 413
+    assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"

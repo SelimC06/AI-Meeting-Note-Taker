@@ -2,6 +2,16 @@
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
+## Running the backend
+
+Start the FastAPI backend with:
+
+```
+cd backend && python -m app.server
+```
+
+This runs the `if __name__ == "__main__":` guard in `backend/app/server.py`, which calls `main()` and binds the server to `127.0.0.1` only (port `8000` by default, override with the `PORT` env var). Prefer this over hand-typing `uvicorn app.server:app --reload --port 8000`, since that command does not enforce the localhost-only bind.
+
 Currently, two official plugins are available:
 
 - [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh

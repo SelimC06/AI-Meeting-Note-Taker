@@ -4,6 +4,8 @@ from fastapi.responses import StreamingResponse
 from .audit import AuditMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.types import Scope, Receive, Send
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import PlainTextResponse
 from pathlib import Path
 from pydantic import BaseModel
 from typing import Optional, List
@@ -13,8 +15,8 @@ import subprocess
 import tempfile
 import uuid
 import os
+import uvicorn
 
-from .auth import router as auth_routher
 from .sessions_store import extract_title, load_sessions, append_session
 
 try:
@@ -49,6 +51,22 @@ ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://loc
 
 ORIGINS = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
 
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "2048"))
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+
+
+class MaxUploadSizeMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.method == "POST" and request.url.path == "/process":
+            content_length = request.headers.get("content-length")
+            if content_length is not None and int(content_length) > MAX_UPLOAD_BYTES:
+                return PlainTextResponse(
+                    f"Upload too large (max {MAX_UPLOAD_MB} MB)", status_code=413
+                )
+        return await call_next(request)
+
+
+app.add_middleware(MaxUploadSizeMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ORIGINS,  # ["http://localhost:1420", "http://localhost:5173", "tauri://localhost"]
@@ -178,8 +196,6 @@ def mux_video_audio(video: Path, audio: Optional[Path], out_path: Path) -> Path:
         raise RuntimeError(p.stderr[-1200:] if p.stderr else "mux failed")
     return out_path
 
-app.include_router(auth_routher)
-
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -191,16 +207,6 @@ def healthz():
 @app.get("/")
 def root():
     return {"service": "meeting-api", "ok": True}
-
-@app.get("/debug/ollama")
-def debug_ollama():
-    import os, requests
-    base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    try:
-        r = requests.get(f"{base}/api/tags", timeout=3)
-        return {"ok": True, "base": base, "models": [m["name"] for m in r.json().get("models", [])]}
-    except Exception as e:
-        return {"ok": False, "base": base, "error": str(e)}
 
 @app.get("/sessions")
 def sessions():
@@ -365,3 +371,11 @@ async def process(
         "video_path": str(final_path),
         "session": session.name,
     }
+
+
+def main() -> None:
+    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("PORT", "8000")))
+
+
+if __name__ == "__main__":
+    main()

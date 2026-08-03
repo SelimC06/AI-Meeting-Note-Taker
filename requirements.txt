@@ -1,8 +1,6 @@
 fastapi
 uvicorn[standard]
 python-multipart
-httpx
-python-jose
 faster-whisper
 pillow
 ollama

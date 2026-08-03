@@ -5,11 +5,6 @@ from typing import Callable
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
-try:
-    from .auth import SESSIONS
-except Exception:
-    SESSIONS = {}
-
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 LOG_PATH = LOG_DIR / "audit.jsonl"
@@ -30,12 +25,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
         rid = request.headers.get("x-request-id") or str(uuid.uuid4())
         request.state.request_id = rid
 
-        sid = request.cookies.get("session_id")
-        actor = "anonymous"
-        if sid:
-            s = SESSIONS.get(sid)
-            if s:
-                actor = s.get("email") or s.get("name") or actor
+        actor = "local"
 
         entry = {
             "ts": int(time.time()*1000),
