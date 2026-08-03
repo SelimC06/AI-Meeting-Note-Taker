@@ -92,7 +92,7 @@ export default function RailApp() {
         <div className="h-full w-full overflow-hidden rounded-[999px] bg-void border border-signal/40 flex flex-col items-center gap-3 py-4 select-none">
             <Record onClick={handleRecordClick} isRecording={isRecording}/>
 
-            <div className="h-px w-[42px] bg-[rgba(145,145,145,0.3)]" />
+            <div className="h-px w-[42px] bg-line" />
 
             <Pause onClick={handlePauseClick} disabled={!isRecording}/>
             <Play onClick={handlePlayClick} disabled={!isPaused}/>

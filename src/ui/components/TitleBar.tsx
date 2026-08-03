@@ -95,8 +95,8 @@ function ToolButton({
       title={label}
       aria-label={label}
       className={
-        "h-10 w-12 grid place-items-center hover:bg-line focus:outline-none focus:ring-2 focus:ring-signal " +
-        (danger ? "hover:bg-red-500/80 hover:text-void" : "")
+        "h-10 w-12 grid place-items-center focus:outline-none focus:ring-2 focus:ring-signal " +
+        (danger ? "hover:bg-red-500/80 hover:text-void" : "hover:bg-line")
       }
     >
       {children}
