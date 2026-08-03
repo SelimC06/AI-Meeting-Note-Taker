@@ -22,3 +22,7 @@ dist-react
 *.njsproj
 *.sln
 *.sw?
+
+# Backend runtime data
+backend/app/uploads/
+backend/.pytest_cache/

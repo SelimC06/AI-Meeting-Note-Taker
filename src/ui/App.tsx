@@ -11,19 +11,25 @@ function App() {
   return (
     <>
       <div className="h-full flex items-center justify-center">
-      <div className="h-[450px] w-[800px] rounded-2xl border-2 border-gray bg-neutral-900/90 overflow-hidden shadow-xl flex flex-col">
-        <TitleBar onChangePage={setPage}/>
-        <main className="flex-1 min-h-0 [-webkit-app-region:no-drag]">
+      <div className="h-[450px] w-[800px] rounded-sm border border-line bg-void overflow-hidden flex flex-col">
+        <TitleBar page={page} onChangePage={setPage}/>
+        <main className="flex-1 min-h-0 overflow-hidden [-webkit-app-region:no-drag]">
           {page === "dashboard" && (
-            <DashboardCards onChangePage={setPage}/>
+            <div key="dashboard" className="h-full animate-page-in">
+              <DashboardCards onChangePage={setPage}/>
+            </div>
           )}
 
           {page === "activity" && (
-            <YourActivityPage />
+            <div key="activity" className="h-full animate-page-in">
+              <YourActivityPage />
+            </div>
           )}
 
           {page === "health" && (
-            <HealthPage />
+            <div key="health" className="h-full animate-page-in">
+              <HealthPage />
+            </div>
           )}
         </main>
         </div>

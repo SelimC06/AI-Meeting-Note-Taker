@@ -84,16 +84,11 @@ def complete(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt, **({"images": images} if images else {})},
     ]
-    options={
-        "temperature": float(temperature),
-        "num_predict": int(num_predict),
-        "num_ctx": int(num_ctx),
-    }
     options = {
         "temperature": float(temperature),
         "num_predict": int(num_predict),
         "num_ctx": int(num_ctx),
-        "num_gpu": 0, 
+        "num_gpu": 0,
     }
 
     if stream:

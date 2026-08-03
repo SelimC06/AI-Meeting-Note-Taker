@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.types import Scope, Receive, Send
 from pathlib import Path
 from typing import Optional, List
+from datetime import datetime, timezone
 import shutil
 import subprocess
 import tempfile
@@ -12,6 +13,7 @@ import uuid
 import os
 
 from .auth import router as auth_routher
+from .sessions_store import extract_title, load_sessions, append_session
 
 try:
     from .ffmpeg_transcribe import stop_recording_and_transcribe  # type: ignore
@@ -182,6 +184,10 @@ def debug_ollama():
     except Exception as e:
         return {"ok": False, "base": base, "error": str(e)}
 
+@app.get("/sessions")
+def sessions():
+    return sorted(load_sessions(STORE), key=lambda r: r.get("created_at", ""), reverse=True)
+
 @app.post("/process")
 async def process(
     screen: UploadFile | None = File(None),   # required logically, but optional type so 422 doesn't fire
@@ -241,6 +247,7 @@ async def process(
 
     notes: str = ""
     # 5) (optional) run your pipeline if available
+    txt_path: Optional[str] = None
     if stop_recording_and_transcribe is not None:
         # Use your helper on the final muxed video; request frames & transcript
         txt_path, _ = stop_recording_and_transcribe(
@@ -258,25 +265,26 @@ async def process(
             max_frames=3,
         )
 
-    try:
-        if llava_complete is None:
-            raise RuntimeError("llava_complete import is None (summarizer missing)")
-            
-        notes = llava_complete(
-            raw_txt_path=txt_path,
-            out_path=str(session / "notes.md"),
-            frame_paths= selected_paths,
-            max_images=min(3, len(selected_paths)),
-            max_image_px=1280,
-            jpeg_quality=80,
-            max_chars=12000,
-            stream=False,
-            num_ctx=8192,
-            num_predict=800,
-            temperature=0.3,
-        )
-    except Exception as e:
-        log(f"pipeline failed, returning stub notes: {e}")
+    if txt_path is not None:
+        try:
+            if llava_complete is None:
+                raise RuntimeError("llava_complete import is None (summarizer missing)")
+
+            notes = llava_complete(
+                raw_txt_path=txt_path,
+                out_path=str(session / "notes.md"),
+                frame_paths=selected_paths,
+                max_images=min(3, len(selected_paths)),
+                max_image_px=1280,
+                jpeg_quality=80,
+                max_chars=12000,
+                stream=False,
+                num_ctx=8192,
+                num_predict=800,
+                temperature=0.3,
+            )
+        except Exception as e:
+            log(f"pipeline failed, returning stub notes: {e}")
 
     if not notes:
         try:
@@ -297,6 +305,15 @@ async def process(
                 "# Key Points\n- Uploaded, mixed and muxed successfully.\n"
                 f"- Final file: {final_path.name}\n"
             )
+
+    record = {
+        "id": session.name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "title": extract_title(notes),
+        "notes": notes,
+        "video_path": str(final_path),
+    }
+    append_session(STORE, record)
 
     return {
         "notes": notes,

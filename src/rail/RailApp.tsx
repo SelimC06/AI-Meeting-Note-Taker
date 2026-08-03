@@ -1,4 +1,5 @@
 //import React from "react";
+import { useEffect, useState } from "react";
 import './rail.css';
 import Record from "./components/Record";
 import Pause from "./components/Pause";
@@ -16,6 +17,14 @@ const BACKEND_URL =
 
 export default function RailApp() {
     const { status, record, pause, resume, stop } = useThreeTrackSegments();
+
+    const [resultFlash, setResultFlash] = useState<"success" | "error" | null>(null);
+
+    useEffect(() => {
+        if (resultFlash === null) return;
+        const timer = setTimeout(() => setResultFlash(null), 2000);
+        return () => clearTimeout(timer);
+    }, [resultFlash]);
 
     const isRecording = status === "recording";
     const isPaused = status === "paused";
@@ -43,18 +52,24 @@ export default function RailApp() {
                 formData.append("mic", blobs.micAudio, "mic.webm");
             }
 
-            const resp = await fetch(`${BACKEND_URL}/process`, {
-            method: "POST",
-            body: formData,
-            });
+            try {
+                const resp = await fetch(`${BACKEND_URL}/process`, {
+                    method: "POST",
+                    body: formData,
+                });
 
-            if (!resp.ok) {
-            const text = await resp.text();
-            throw new Error(`Backend error ${resp.status}: ${text}`);
+                if (!resp.ok) {
+                    const text = await resp.text();
+                    throw new Error(`Backend error ${resp.status}: ${text}`);
+                }
+
+                const data = (await resp.json()) as ProcessResponse;
+                console.log("[Rail] backend /process result:", data);
+                setResultFlash("success");
+            } catch (err) {
+                console.error("/process failed", err);
+                setResultFlash("error");
             }
-
-            const data = (await resp.json()) as ProcessResponse;
-            console.log("[Rail] backend /process result:", data);
         }
         } catch (err) {
             console.error("record/stop error", err);
@@ -74,7 +89,7 @@ export default function RailApp() {
     };
 
     return (
-        <div className="h-full w-full overflow-hidden rounded-[999px] bg-neutral-900/90 border-2 border-black-300 flex flex-col items-center gap-3 py-4 select-none">
+        <div className="h-full w-full overflow-hidden rounded-[999px] bg-void border border-signal/40 flex flex-col items-center gap-3 py-4 select-none">
             <Record onClick={handleRecordClick} isRecording={isRecording}/>
 
             <div className="h-px w-[42px] bg-[rgba(145,145,145,0.3)]" />
@@ -82,7 +97,16 @@ export default function RailApp() {
             <Pause onClick={handlePauseClick} disabled={!isRecording}/>
             <Play onClick={handlePlayClick} disabled={!isPaused}/>
 
-            <span className="mt-auto h-2.5 w-2.5 rounded-full bg-gray-400 border border-black" />
+            <span
+                className={
+                    "mt-auto h-2.5 w-2.5 rounded-full border border-void transition-colors " +
+                    (resultFlash === "success"
+                        ? "bg-signal"
+                        : resultFlash === "error"
+                        ? "bg-red-500"
+                        : "bg-dim")
+                }
+            />
         </div>
     )
 }

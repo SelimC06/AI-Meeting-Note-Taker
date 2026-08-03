@@ -1,15 +1,46 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
+import { getSessions, type Session } from "../api";
 
 const YourActivity: React.FC = () => {
-    return (
-    <div className="p-4 w-50 bg-zinc-800/55 rounded-xl backdrop-blur-md backdrop-saturate-150 border border-white/12 shadow-[0_8px_32px_rgba(0,0,0,0.25)] text-white">
-      <h2 className="text-lg font-semibold mb-2">Your Activity</h2>
-      <div className="text-xs">
-        <p>• Recent notes</p>
-        <p>• Meetings recorded</p>
+  const [sessions, setSessions] = useState<Session[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getSessions()
+      .then((data) => {
+        if (!cancelled) setSessions(data);
+      })
+      .catch(() => {
+        if (!cancelled) setSessions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const count = sessions?.length ?? 0;
+  const mostRecentTitle = sessions?.[0]?.title;
+
+  return (
+    <div className="p-4 w-50 bg-panel border border-line rounded-sm text-phosphor">
+      <h2 className="text-xs font-semibold mb-2 tracking-wide uppercase text-dim">[ACTIVITY]</h2>
+      <div className="text-xs space-y-1">
+        {sessions === null && (
+          <p className="text-dim">
+            loading<span className="cursor-blink">▌</span>
+          </p>
+        )}
+        {sessions !== null && (
+          <>
+            <p>
+              {count} meeting{count === 1 ? "" : "s"} recorded
+            </p>
+            {mostRecentTitle && <p className="text-dim">latest: {mostRecentTitle}</p>}
+          </>
+        )}
       </div>
     </div>
   );
 };
 
-export default YourActivity
+export default YourActivity;

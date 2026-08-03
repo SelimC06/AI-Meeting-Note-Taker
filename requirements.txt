@@ -6,3 +6,4 @@ python-jose
 faster-whisper
 pillow
 ollama
+pytest

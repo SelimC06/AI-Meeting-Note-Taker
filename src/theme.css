@@ -1,0 +1,61 @@
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/600.css";
+
+@theme {
+  --color-void: #1A1A19;
+  --color-panel: #252420;
+  --color-line: #3D372C;
+  --color-phosphor: #EDE6D6;
+  --color-dim: #A79C87;
+  --color-signal: #EDE6D6;
+  --font-sans: "JetBrains Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-void);
+    color: var(--color-phosphor);
+  }
+}
+
+@keyframes blink-cursor {
+  0%, 49% {
+    opacity: 1;
+  }
+  50%, 100% {
+    opacity: 0;
+  }
+}
+
+.cursor-blink {
+  animation: blink-cursor 1s steps(1, end) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cursor-blink {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-page-in {
+  animation: page-in 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-page-in {
+    animation: none;
+  }
+}
