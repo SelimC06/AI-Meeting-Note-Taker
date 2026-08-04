@@ -48,7 +48,7 @@ function App() {
               (page === "settings" ? "opacity-100" : "opacity-0 pointer-events-none")
             }
           >
-            <SettingsPage />
+            <SettingsPage active={page === "settings"} />
           </div>
         </main>
         </div>

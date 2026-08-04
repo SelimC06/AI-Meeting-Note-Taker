@@ -685,6 +685,185 @@ def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
     assert captured["model_name"] == "medium.en"
 
 
+def test_sessions_excludes_trashed_by_default(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "active1", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Active", "notes": "", "video_path": "", "trashed_at": None,
+    })
+    append_session(server_module.STORE, {
+        "id": "trashed1", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Trashed", "notes": "", "video_path": "", "trashed_at": "2026-08-02T00:00:00+00:00",
+    })
+
+    resp = client.get("/sessions")
+    assert resp.status_code == 200
+    ids = {s["id"] for s in resp.json()}
+    assert ids == {"active1"}
+
+
+def test_sessions_include_trashed_query_param_returns_all(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "active1", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Active", "notes": "", "video_path": "", "trashed_at": None,
+    })
+    append_session(server_module.STORE, {
+        "id": "trashed1", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Trashed", "notes": "", "video_path": "", "trashed_at": "2026-08-02T00:00:00+00:00",
+    })
+
+    resp = client.get("/sessions?include_trashed=true")
+    assert resp.status_code == 200
+    ids = {s["id"] for s in resp.json()}
+    assert ids == {"active1", "trashed1"}
+
+
+def test_rename_session_updates_title(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Old", "notes": "", "video_path": "", "trashed_at": None,
+    })
+
+    resp = client.patch("/sessions/abc", json={"title": "New Title"})
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "New Title"
+
+    sessions = client.get("/sessions").json()
+    assert sessions[0]["title"] == "New Title"
+
+
+def test_rename_session_rejects_empty_title(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Old", "notes": "", "video_path": "", "trashed_at": None,
+    })
+
+    resp = client.patch("/sessions/abc", json={"title": "   "})
+    assert resp.status_code == 400
+
+
+def test_rename_session_404_for_unknown_id(client: TestClient):
+    resp = client.patch("/sessions/does-not-exist", json={"title": "New"})
+    assert resp.status_code == 404
+
+
+def test_trash_session_sets_trashed_at(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "T", "notes": "", "video_path": "", "trashed_at": None,
+    })
+
+    resp = client.post("/sessions/abc/trash")
+    assert resp.status_code == 200
+    assert resp.json()["trashed_at"] is not None
+
+    active = client.get("/sessions").json()
+    assert active == []
+
+
+def test_trash_session_is_idempotent_and_does_not_reset_timestamp(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "T", "notes": "", "video_path": "", "trashed_at": None,
+    })
+
+    first = client.post("/sessions/abc/trash").json()
+    second = client.post("/sessions/abc/trash").json()
+
+    assert first["trashed_at"] == second["trashed_at"]
+
+
+def test_trash_session_404_for_unknown_id(client: TestClient):
+    resp = client.post("/sessions/does-not-exist/trash")
+    assert resp.status_code == 404
+
+
+def test_restore_session_clears_trashed_at(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "T", "notes": "", "video_path": "", "trashed_at": "2026-08-02T00:00:00+00:00",
+    })
+
+    resp = client.post("/sessions/abc/restore")
+    assert resp.status_code == 200
+    assert resp.json()["trashed_at"] is None
+
+    active = client.get("/sessions").json()
+    assert len(active) == 1
+    assert active[0]["id"] == "abc"
+
+
+def test_restore_session_404_for_unknown_id(client: TestClient):
+    resp = client.post("/sessions/does-not-exist/restore")
+    assert resp.status_code == 404
+
+
+def test_delete_session_removes_record_and_folder(client: TestClient):
+    from app.sessions_store import append_session
+
+    session_dir = server_module.STORE / "abc"
+    session_dir.mkdir()
+    (session_dir / "final.webm").write_bytes(b"video")
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "T", "notes": "", "video_path": str(session_dir / "final.webm"), "trashed_at": None,
+    })
+
+    resp = client.delete("/sessions/abc")
+    assert resp.status_code == 200
+
+    assert client.get("/sessions?include_trashed=true").json() == []
+    assert not session_dir.exists()
+
+
+def test_delete_session_404_for_unknown_id(client: TestClient):
+    resp = client.delete("/sessions/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_delete_session_works_on_a_trashed_session(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "T", "notes": "", "video_path": "", "trashed_at": "2026-08-02T00:00:00+00:00",
+    })
+
+    resp = client.delete("/sessions/abc")
+    assert resp.status_code == 200
+    assert client.get("/sessions?include_trashed=true").json() == []
+
+
+def test_purge_expired_trash_wired_to_live_store(client: TestClient):
+    from datetime import datetime, timedelta, timezone
+    from app.sessions_store import append_session
+
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    append_session(server_module.STORE, {
+        "id": "old", "created_at": "2026-01-01T00:00:00+00:00",
+        "title": "Old", "notes": "", "video_path": "", "trashed_at": old_ts,
+    })
+
+    purged = server_module.purge_expired_trash(server_module.STORE)
+
+    assert purged == 1
+    assert server_module.load_sessions(server_module.STORE) == []
+
+
 def test_chat_uses_configured_ollama_model(client: TestClient, monkeypatch):
     from app.sessions_store import append_session
     import app.server as server_module
@@ -711,3 +890,95 @@ def test_chat_uses_configured_ollama_model(client: TestClient, monkeypatch):
     resp = client.post("/chat/abc123", json={"message": "hi", "history": []})
     assert resp.status_code == 200
     assert captured["model"] == "llama3.1:8b"
+
+
+def test_export_notes_returns_markdown_attachment(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Sprint Planning", "notes": "# Sprint Planning\n- point one",
+        "video_path": "", "trashed_at": None,
+    })
+
+    resp = client.get("/sessions/abc/export/notes")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/markdown")
+    assert "attachment" in resp.headers["content-disposition"]
+    assert "sprint-planning" in resp.headers["content-disposition"].lower()
+    assert resp.text == "# Sprint Planning\n- point one"
+
+
+def test_export_notes_404_for_unknown_id(client: TestClient):
+    resp = client.get("/sessions/does-not-exist/export/notes")
+    assert resp.status_code == 404
+
+
+def test_export_zip_contains_final_webm_and_notes(client: TestClient):
+    import zipfile
+    import io as io_module
+    from app.sessions_store import append_session
+
+    session_dir = server_module.STORE / "abc"
+    session_dir.mkdir()
+    (session_dir / "final.webm").write_bytes(b"fake video bytes")
+    (session_dir / "transcript_1.txt").write_text("hello", encoding="utf-8")
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "My Meeting", "notes": "# notes here",
+        "video_path": str(session_dir / "final.webm"), "trashed_at": None,
+    })
+
+    resp = client.get("/sessions/abc/export/zip")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+    assert "attachment" in resp.headers["content-disposition"]
+    assert "my-meeting" in resp.headers["content-disposition"].lower()
+
+    zf = zipfile.ZipFile(io_module.BytesIO(resp.content))
+    names = set(zf.namelist())
+    assert "final.webm" in names
+    assert "notes.md" in names
+    assert "transcript_1.txt" in names
+    assert zf.read("notes.md").decode("utf-8") == "# notes here"
+
+
+def test_export_zip_404_for_unknown_id(client: TestClient):
+    resp = client.get("/sessions/does-not-exist/export/zip")
+    assert resp.status_code == 404
+
+
+def test_export_zip_404_when_session_folder_missing(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "T", "notes": "notes", "video_path": "", "trashed_at": None,
+    })
+    # No folder created on disk for "abc".
+
+    resp = client.get("/sessions/abc/export/zip")
+    assert resp.status_code == 404
+
+
+def test_storage_usage_returns_counts_and_bytes(client: TestClient):
+    from app.sessions_store import append_session
+
+    session_dir = server_module.STORE / "abc"
+    session_dir.mkdir()
+    (session_dir / "final.webm").write_bytes(b"x" * 100)
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "T", "notes": "", "video_path": "", "trashed_at": None,
+    })
+
+    resp = client.get("/storage/usage")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["session_count"] == 1
+    assert body["trashed_count"] == 0
+    assert body["used_bytes"] >= 100
+    assert body["free_bytes"] > 0
+    assert body["total_bytes"] > 0

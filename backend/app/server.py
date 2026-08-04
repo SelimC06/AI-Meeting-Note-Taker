@@ -1,6 +1,6 @@
 from __future__ import annotations
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from .audit import AuditMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.types import Scope, Receive, Send
@@ -10,14 +10,25 @@ from pathlib import Path
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, timezone
+import io
 import shutil
 import subprocess
 import tempfile
 import uuid
 import os
 import uvicorn
+import re
+import zipfile
 
-from .sessions_store import extract_title, load_sessions, append_session
+from .sessions_store import (
+    extract_title,
+    load_sessions,
+    append_session,
+    update_session_fields,
+    remove_session_permanently,
+    purge_expired_trash,
+    compute_storage_usage,
+)
 from .settings_store import (
     WHISPER_MODEL_CHOICES,
     WHISPER_MODEL_VALUES,
@@ -91,6 +102,7 @@ SETTINGS_PATH = ROOT / "settings.json"
 _settings = load_settings(SETTINGS_PATH, ROOT / "uploads")
 STORE = Path(_settings["storage_dir"])
 STORE.mkdir(parents=True, exist_ok=True)
+purge_expired_trash(STORE)
 WHISPER_MODEL = _settings["whisper_model"]
 OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
 
@@ -228,8 +240,60 @@ def root():
     return {"service": "meeting-api", "ok": True}
 
 @app.get("/sessions")
-def sessions():
-    return sorted(load_sessions(STORE), key=lambda r: r.get("created_at", ""), reverse=True)
+def sessions(include_trashed: bool = False):
+    store = STORE
+    all_sessions = load_sessions(store)
+    if not include_trashed:
+        all_sessions = [s for s in all_sessions if not s.get("trashed_at")]
+    return sorted(all_sessions, key=lambda r: r.get("created_at", ""), reverse=True)
+
+
+class SessionRename(BaseModel):
+    title: str
+
+
+@app.patch("/sessions/{session_id}")
+def rename_session(session_id: str, body: SessionRename):
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(400, "Title cannot be empty")
+    store = STORE
+    ok = update_session_fields(store, session_id, title=title)
+    if not ok:
+        raise HTTPException(404, "Session not found")
+    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
+    return matching[0]
+
+
+@app.post("/sessions/{session_id}/trash")
+def trash_session(session_id: str):
+    store = STORE
+    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
+    if not matching:
+        raise HTTPException(404, "Session not found")
+    if not matching[0].get("trashed_at"):
+        update_session_fields(store, session_id, trashed_at=datetime.now(timezone.utc).isoformat())
+    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
+    return matching[0]
+
+
+@app.post("/sessions/{session_id}/restore")
+def restore_session(session_id: str):
+    store = STORE
+    ok = update_session_fields(store, session_id, trashed_at=None)
+    if not ok:
+        raise HTTPException(404, "Session not found")
+    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
+    return matching[0]
+
+
+@app.delete("/sessions/{session_id}")
+def delete_session(session_id: str):
+    store = STORE
+    ok = remove_session_permanently(store, session_id)
+    if not ok:
+        raise HTTPException(404, "Session not found")
+    return {"ok": True}
 
 
 class SettingsUpdate(BaseModel):
@@ -295,6 +359,11 @@ def patch_settings(body: SettingsUpdate):
     OLLAMA_CHAT_MODEL = settings["ollama_chat_model"]
 
     return {**settings, "whisper_model_choices": WHISPER_MODEL_CHOICES}
+
+
+@app.get("/storage/usage")
+def storage_usage():
+    return compute_storage_usage(STORE)
 
 
 def _extract_ollama_model_names(list_response) -> List[str]:
@@ -497,6 +566,7 @@ async def process(
         "title": extract_title(notes),
         "notes": notes,
         "video_path": str(final_path),
+        "trashed_at": None,
     }
     append_session(store, record)
 
@@ -505,6 +575,66 @@ async def process(
         "video_path": str(final_path),
         "session": session.name,
     }
+
+
+def _slugify_filename(name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower()
+    return slug or "session"
+
+
+@app.get("/sessions/{session_id}/export/notes")
+def export_session_notes(session_id: str):
+    store = STORE
+    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
+    if not matching:
+        raise HTTPException(404, "Session not found")
+    record = matching[0]
+    notes = record.get("notes", "")
+    filename = _slugify_filename(record.get("title") or "session") + ".md"
+    return Response(
+        content=notes,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/sessions/{session_id}/export/zip")
+def export_session_zip(session_id: str):
+    store = STORE
+    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
+    if not matching:
+        raise HTTPException(404, "Session not found")
+    record = matching[0]
+    session_dir = store / session_id
+    if not session_dir.exists():
+        raise HTTPException(404, "Session files not found")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        final_webm = session_dir / "final.webm"
+        if final_webm.exists():
+            zf.write(final_webm, arcname="final.webm")
+
+        notes_md = session_dir / "notes.md"
+        if notes_md.exists():
+            zf.write(notes_md, arcname="notes.md")
+        else:
+            zf.writestr("notes.md", record.get("notes", ""))
+
+        for transcript in sorted(session_dir.glob("transcript_*.txt")):
+            zf.write(transcript, arcname=transcript.name)
+
+        frames_dir = session_dir / "frames"
+        if frames_dir.is_dir():
+            for frame in sorted(frames_dir.glob("*.png")):
+                zf.write(frame, arcname=f"frames/{frame.name}")
+
+    filename = _slugify_filename(record.get("title") or "session") + ".zip"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def main() -> None:

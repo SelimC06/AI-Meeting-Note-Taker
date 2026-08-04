@@ -4,13 +4,17 @@ export type Session = {
   title: string;
   notes: string;
   video_path: string;
+  trashed_at: string | null;
 };
 
 export const BACKEND_URL =
   import.meta.env.VITE_MEETING_API_URL ?? "http://localhost:8000";
 
-export async function getSessions(): Promise<Session[]> {
-  const resp = await fetch(`${BACKEND_URL}/sessions`);
+export async function getSessions(includeTrashed = false): Promise<Session[]> {
+  const url = includeTrashed
+    ? `${BACKEND_URL}/sessions?include_trashed=true`
+    : `${BACKEND_URL}/sessions`;
+  const resp = await fetch(url);
   if (!resp.ok) {
     throw new Error(`Failed to load sessions: ${resp.status}`);
   }
@@ -128,4 +132,64 @@ export async function getOllamaModels(): Promise<OllamaModelsResult> {
   } catch (e) {
     return { ok: false, models: [], error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+export async function renameSession(id: string, title: string): Promise<Session> {
+  const resp = await fetch(`${BACKEND_URL}/sessions/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(text || `Failed to rename session: ${resp.status}`);
+  }
+  return (await resp.json()) as Session;
+}
+
+export async function trashSession(id: string): Promise<Session> {
+  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/trash`, { method: "POST" });
+  if (!resp.ok) {
+    throw new Error(`Failed to trash session: ${resp.status}`);
+  }
+  return (await resp.json()) as Session;
+}
+
+export async function restoreSession(id: string): Promise<Session> {
+  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/restore`, { method: "POST" });
+  if (!resp.ok) {
+    throw new Error(`Failed to restore session: ${resp.status}`);
+  }
+  return (await resp.json()) as Session;
+}
+
+export async function deleteSessionForever(id: string): Promise<void> {
+  const resp = await fetch(`${BACKEND_URL}/sessions/${id}`, { method: "DELETE" });
+  if (!resp.ok) {
+    throw new Error(`Failed to delete session: ${resp.status}`);
+  }
+}
+
+export function exportSessionNotesUrl(id: string): string {
+  return `${BACKEND_URL}/sessions/${id}/export/notes`;
+}
+
+export function exportSessionZipUrl(id: string): string {
+  return `${BACKEND_URL}/sessions/${id}/export/zip`;
+}
+
+export type StorageUsage = {
+  used_bytes: number;
+  free_bytes: number;
+  total_bytes: number;
+  session_count: number;
+  trashed_count: number;
+};
+
+export async function getStorageUsage(): Promise<StorageUsage> {
+  const resp = await fetch(`${BACKEND_URL}/storage/usage`);
+  if (!resp.ok) {
+    throw new Error(`Failed to load storage usage: ${resp.status}`);
+  }
+  return (await resp.json()) as StorageUsage;
 }

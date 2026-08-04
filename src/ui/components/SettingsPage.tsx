@@ -4,10 +4,26 @@ import {
   getSettings,
   updateSettings,
   getOllamaModels,
+  getStorageUsage,
+  getSessions,
+  deleteSessionForever,
   type Settings,
+  type StorageUsage,
 } from "../api";
 
-export default function SettingsPage() {
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = n / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+export default function SettingsPage({ active }: { active: boolean }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -22,6 +38,10 @@ export default function SettingsPage() {
   const [whisperError, setWhisperError] = useState<string | null>(null);
   const [ollamaSaveError, setOllamaSaveError] = useState<string | null>(null);
 
+  const [usage, setUsage] = useState<StorageUsage | null>(null);
+  const [usageError, setUsageError] = useState<string | null>(null);
+  const [emptyingTrash, setEmptyingTrash] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     getSettings()
@@ -35,6 +55,35 @@ export default function SettingsPage() {
       cancelled = true;
     };
   }, []);
+
+  const loadUsage = () => {
+    getStorageUsage()
+      .then((u) => {
+        setUsage(u);
+        setUsageError(null);
+      })
+      .catch((e) => setUsageError(e instanceof Error ? e.message : String(e)));
+  };
+
+  useEffect(() => {
+    if (!active) return;
+    loadUsage();
+  }, [active]);
+
+  const handleEmptyTrash = async () => {
+    setEmptyingTrash(true);
+    try {
+      const trashed = (await getSessions(true)).filter((s) => s.trashed_at);
+      for (const s of trashed) {
+        await deleteSessionForever(s.id);
+      }
+      loadUsage();
+    } catch (e) {
+      setUsageError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setEmptyingTrash(false);
+    }
+  };
 
   const loadOllamaModels = () => {
     setOllamaLoading(true);
@@ -163,6 +212,47 @@ export default function SettingsPage() {
         {storageError && (
           <p className="text-xs text-red-400">{storageError}</p>
         )}
+      </div>
+
+      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
+        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+          storage usage
+        </h2>
+        {usageError && <p className="text-xs text-red-400">{usageError}</p>}
+        {!usageError && usage && (
+          <>
+            <p className="text-xs text-phosphor">
+              {formatBytes(usage.used_bytes)} used across {usage.session_count} session
+              {usage.session_count === 1 ? "" : "s"}
+            </p>
+            <p
+              className={
+                "text-xs " +
+                (usage.total_bytes > 0 &&
+                (usage.free_bytes < 5 * 1024 ** 3 || usage.free_bytes / usage.total_bytes < 0.1)
+                  ? "text-red-400"
+                  : "text-dim")
+              }
+            >
+              {formatBytes(usage.free_bytes)} free on disk
+            </p>
+            {usage.trashed_count > 0 && (
+              <div className="flex items-center gap-2">
+                <p className="text-xs text-dim">
+                  {usage.trashed_count} session{usage.trashed_count === 1 ? "" : "s"} in trash
+                </p>
+                <button
+                  onClick={handleEmptyTrash}
+                  disabled={emptyingTrash}
+                  className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus:ring-2 focus:ring-signal disabled:opacity-50"
+                >
+                  {emptyingTrash ? "Emptying..." : "Empty Trash"}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+        {!usageError && !usage && <p className="text-xs text-dim">Loading storage usage...</p>}
       </div>
 
       <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
