@@ -24,6 +24,7 @@ function disableZoom(webContents) {
 function resolveRailFile() {
     const prod = path.join(app.getAppPath() + '/dist-react/rail.html');
     if (fs.existsSync(prod)) return prod;
+    throw new Error(`rail.html not found at ${prod} - run "npm run build" first`);
 }
 
 function positionRail(relativeTo) {
@@ -67,14 +68,26 @@ function createRailWindow() {
 
     railWindow.on('closed', () => (railWindow = null));
     disableZoom(railWindow.webContents);
-    railWindow.loadFile(resolveRailFile());
+
+    let railFile;
+    try {
+        railFile = resolveRailFile();
+    } catch (err) {
+        console.error('[rail]', err.message);
+        railWindow.destroy();
+        railWindow = null;
+        return;
+    }
+    railWindow.loadFile(railFile);
 
     railWindow.webContents.on('did-finish-load', () => {
         positionRail(mainWindow);
         railWindow.show();
     });
 
-    railWindow.webContents.openDevTools({ mode: "detach" });
+    if (!app.isPackaged) {
+        railWindow.webContents.openDevTools({ mode: "detach" });
+    }
 }
 
 function showRail() {
@@ -137,7 +150,9 @@ function createWindow() {
     mainWindow.loadFile(path.join(app.getAppPath() + '/dist-react/index.html'));
 
     mainWindow.once("ready-to-show", () => {
-        mainWindow.webContents.openDevTools({ mode: "detach" });
+        if (!app.isPackaged) {
+            mainWindow.webContents.openDevTools({ mode: "detach" });
+        }
         mainWindow.focus();
     });
 

@@ -6,12 +6,6 @@ import Pause from "./components/Pause";
 import Play from "./components/Play"
 import { useThreeTrackSegments } from './hooks/useThreeTrackSegments';
 
-type ProcessResponse = {
-  notes: string;
-  video_path: string;
-  session: string;
-};
-
 const BACKEND_URL =
   import.meta.env.VITE_MEETING_API_URL ?? "http://localhost:8000";
 
@@ -19,6 +13,7 @@ export default function RailApp() {
     const { status, record, pause, resume, stop } = useThreeTrackSegments();
 
     const [resultFlash, setResultFlash] = useState<"success" | "error" | null>(null);
+    const [isProcessing, setIsProcessing] = useState(false);
 
     useEffect(() => {
         if (resultFlash === null) return;
@@ -30,16 +25,13 @@ export default function RailApp() {
     const isPaused = status === "paused";
 
     const handleRecordClick = async () => {
+        if (isProcessing) return;
+
         try {
             if (status === "idle") {
                 await record();
         } else if (status === "recording" || status === "paused") {
                 const blobs = await stop();
-                console.log("stop() finished. Blobs:", {
-                screen: blobs.screen?.size,
-                systemAudio: blobs.systemAudio?.size,
-                micAudio: blobs.micAudio?.size,
-            });
 
             const formData = new FormData();
             if (blobs.screen) {
@@ -52,6 +44,7 @@ export default function RailApp() {
                 formData.append("mic", blobs.micAudio, "mic.webm");
             }
 
+            setIsProcessing(true);
             try {
                 const resp = await fetch(`${BACKEND_URL}/process`, {
                     method: "POST",
@@ -63,12 +56,12 @@ export default function RailApp() {
                     throw new Error(`Backend error ${resp.status}: ${text}`);
                 }
 
-                const data = (await resp.json()) as ProcessResponse;
-                console.log("[Rail] backend /process result:", data);
                 setResultFlash("success");
             } catch (err) {
                 console.error("/process failed", err);
                 setResultFlash("error");
+            } finally {
+                setIsProcessing(false);
             }
         }
         } catch (err) {
@@ -90,7 +83,7 @@ export default function RailApp() {
 
     return (
         <div className="h-full w-full overflow-hidden rounded-[999px] bg-void border border-signal/40 flex flex-col items-center gap-3 py-4 select-none">
-            <Record onClick={handleRecordClick} isRecording={isRecording}/>
+            <Record onClick={handleRecordClick} isRecording={isRecording} disabled={isProcessing}/>
 
             <div className="h-px w-[42px] bg-line" />
 
@@ -98,9 +91,12 @@ export default function RailApp() {
             <Play onClick={handlePlayClick} disabled={!isPaused}/>
 
             <span
+                title={isProcessing ? "Processing recording…" : undefined}
                 className={
                     "mt-auto h-2.5 w-2.5 rounded-full border border-void transition-colors " +
-                    (resultFlash === "success"
+                    (isProcessing
+                        ? "bg-amber-400 animate-pulse"
+                        : resultFlash === "success"
                         ? "bg-signal"
                         : resultFlash === "error"
                         ? "bg-red-500"

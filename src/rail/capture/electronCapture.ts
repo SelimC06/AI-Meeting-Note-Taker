@@ -1,5 +1,25 @@
 // src/capture/electronCapture.ts
-const isElectron = !!(window as any).electronAPI;
+
+declare global {
+  interface Window {
+    electronAPI?: {
+      listCaptureSources: (types?: string[]) => Promise<{ id: string; name: string }[]>;
+      pickPrimaryScreenId: () => Promise<string | null>;
+    };
+  }
+}
+
+// Chromium/Electron's `mandatory` desktop-capture constraints aren't part of
+// the standard MediaTrackConstraints type in lib.dom.d.ts.
+type ChromeDesktopCaptureConstraints = {
+  mandatory: {
+    chromeMediaSource: "desktop";
+    chromeMediaSourceId: string;
+    maxFrameRate?: number;
+  };
+};
+
+const isElectron = !!window.electronAPI;
 
 export type ElectronCaptureOptions = {
   sourceId?: string;          // if omitted, we'll pick the primary screen
@@ -18,29 +38,31 @@ export async function startElectronCapture(opts: ElectronCaptureOptions = {}): P
   if (!isElectron) throw new Error("Not running in Electron.");
 
   const withSystemAudio = opts.withSystemAudio !== false;
-  const sourceId = opts.sourceId || (await (window as any).electronAPI!.pickPrimaryScreenId());
+  const sourceId = opts.sourceId || (await window.electronAPI!.pickPrimaryScreenId());
   if (!sourceId) throw new Error("No capture source selected.");
   const fps = opts.videoFrameRate ?? 30;
 
   // Chromium/Electron desktop capture constraints
-  const videoConstraints: MediaTrackConstraints = {
+  const videoConstraints: ChromeDesktopCaptureConstraints = {
     mandatory: {
       chromeMediaSource: "desktop",
       chromeMediaSourceId: sourceId,
       maxFrameRate: fps,
     },
-  }as any;
+  };
 
   // When withSystemAudio=true, we ask for the desktop's loopback audio
-  const systemAudioConstraints: MediaTrackConstraints | boolean = withSystemAudio
-    ? ({ mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId: sourceId } } as any)
+  const systemAudioConstraints: ChromeDesktopCaptureConstraints | boolean = withSystemAudio
+    ? { mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId: sourceId } }
     : false;
 
-  // One getUserMedia for both video and (system) audio
+  // One getUserMedia for both video and (system) audio; cast at this single
+  // call site since MediaStreamConstraints has no slot for Chromium's
+  // non-standard `mandatory` shape.
   const screenAndSystem = await navigator.mediaDevices.getUserMedia({
     video: videoConstraints,
     audio: systemAudioConstraints,
-  } as any);
+  } as unknown as MediaStreamConstraints);
 
   const screen = new MediaStream(screenAndSystem.getVideoTracks());
 

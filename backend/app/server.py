@@ -197,11 +197,8 @@ def mux_video_audio(video: Path, audio: Optional[Path], out_path: Path) -> Path:
     return out_path
 
 @app.get("/health")
-def health():
-    return {"ok": True}
-
 @app.get("/healthz")
-def healthz():
+def health():
     return {"ok": True}
 
 @app.get("/")
@@ -285,7 +282,7 @@ async def process(
     if frames:
         k = min(2, len(frames))
         n = len(frames)
-        idxs = [round((i + 1) / (k + 1) * (n - 1)) for i in range(k)]  # ~20%,50%,80%
+        idxs = sorted({round((i + 1) / (k + 1) * (n - 1)) for i in range(k)})  # ~20%,50%,80%, deduped
 
         frames_dir = session / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)

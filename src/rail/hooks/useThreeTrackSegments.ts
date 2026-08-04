@@ -45,15 +45,7 @@ export function useThreeTrackSegments() {
 
     try {
       // Get streams (Electron: screen+system+mic; Browser: screen+mic, no system)
-      console.log("useThreeTrackSegments.record() starting");
-      console.log("window.electronAPI present?", !!(window as any).electronAPI);
-
       const streams = await getSeparateCapture();
-      console.log("Streams from getSeparateCapture:", {
-        screen: !!streams.screen,
-        system: !!streams.system,
-        mic: !!streams.mic,
-      });
       streamsRef.current = streams;
 
       const screenRec = streams.screen ? getVideoRecorder(streams.screen) : undefined;

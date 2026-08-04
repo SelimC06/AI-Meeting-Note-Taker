@@ -38,12 +38,13 @@ class AuditMiddleware(BaseHTTPMiddleware):
         }
     
         start_ns = time.perf_counter_ns()
+        status_code = 500
 
         try:
             resp = await call_next(request)
             status_code = resp.status_code
         except Exception as e:
-            entry.update({"status": 500, "error": repr(e)})
+            entry.update({"error": repr(e)})
             raise
         finally:
             duration_ms = round((time.perf_counter_ns() - start_ns) / 1_000_000, 2)

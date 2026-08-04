@@ -395,3 +395,48 @@ def test_process_413_response_includes_cors_header(client, monkeypatch):
     )
     assert resp.status_code == 413
     assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+def test_healthz_alias_matches_health(client: TestClient):
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+
+def test_process_dedupes_frame_indices_for_small_frame_count(client, monkeypatch):
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    # n=2 frames: pre-fix idxs would be [round(1/3*1), round(2/3*1)] = [0, 1] here,
+    # which already doesn't collide -- use n where both picks land on the same
+    # index (n=1: (n-1)=0 for every i) to exercise the dedup path.
+    resp = client.post(
+        "/process",
+        files=[
+            ("screen", ("screen.webm", io.BytesIO(b"x"), "video/webm")),
+            ("frames", ("frame0.png", io.BytesIO(b"f0"), "image/png")),
+        ],
+    )
+    assert resp.status_code == 200
+
+    frames_dir = None
+    for p in server_module.STORE.iterdir():
+        candidate = p / "frames"
+        if candidate.is_dir():
+            frames_dir = candidate
+            break
+    assert frames_dir is not None
+    saved = sorted(frames_dir.glob("frame_*.png"))
+    assert len(saved) == 1

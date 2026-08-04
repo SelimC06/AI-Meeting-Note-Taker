@@ -1,7 +1,7 @@
 // src/capture/capture.ts
 import { startElectronCapture } from "./electronCapture";
 
-const isElectron = !!(window as any).electronAPI;
+const isElectron = !!window.electronAPI;
 
 export type CaptureStreams = {
   screen?: MediaStream;
