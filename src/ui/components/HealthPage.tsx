@@ -1,10 +1,6 @@
 import React from "react";
 
 const HealthPage: React.FC = () => {
-    const cpuUsage = 37;  // %
-    const ramUsage = 62;
-    const overall = Math.round((cpuUsage + ramUsage) / 2);
-
     return(
         <>
             <div className="h-full flex flex-col px-6 py-4 gap-3 text-phosphor">
@@ -20,21 +16,20 @@ const HealthPage: React.FC = () => {
                         <div>
                             <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">cpu usage</h2>
                             <p className="text-2xl font-semibold text-signal">
-                                {cpuUsage}%
+                                --
                             </p>
                             <p className="text-xs text-dim">
-                                lower is better while recording. consider closing heavy apps if
-                                this regularly exceeds ~80%.
+                                live monitoring isn't wired up yet.
                             </p>
                         </div>
 
                         <div>
                             <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">memory usage</h2>
                             <p className="text-2xl font-semibold text-signal">
-                                {ramUsage}%
+                                --
                             </p>
                             <p className="text-xs text-dim">
-                                high memory usage can affect transcription speed.
+                                live monitoring isn't wired up yet.
                             </p>
                         </div>
                     </div>
@@ -46,7 +41,7 @@ const HealthPage: React.FC = () => {
                                     <div className="text-center text-dim text-ms">
                                         overall load
                                     <div className="text-5xl font-semibold text-signal mt-1">
-                                        {overall}%
+                                        --
                                 </div>
                             </div>
                         </div>

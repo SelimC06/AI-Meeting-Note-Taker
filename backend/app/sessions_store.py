@@ -1,10 +1,13 @@
 from __future__ import annotations
 import json
 import os
+import threading
 from pathlib import Path
 from typing import List
 
 SESSIONS_INDEX_FILENAME = "sessions_index.json"
+
+_APPEND_LOCK = threading.Lock()
 
 
 def extract_title(notes: str) -> str:
@@ -45,12 +48,18 @@ def append_session(store_dir: Path, record: dict) -> None:
     same directory and then swapped into place with os.replace(), so a crash
     or power loss mid-write leaves the previous (intact) index untouched
     instead of leaving a truncated/corrupt file behind.
+
+    The whole read-modify-write is serialized by a module-level lock, so
+    concurrent callers within this process can't both read the same list
+    before either writes, which would otherwise silently drop one of the
+    two appended records.
     """
-    sessions = load_sessions(store_dir)
-    sessions.append(record)
-    final_path = _index_path(store_dir)
-    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
-    tmp_path.write_text(
-        json.dumps(sessions, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    os.replace(tmp_path, final_path)
+    with _APPEND_LOCK:
+        sessions = load_sessions(store_dir)
+        sessions.append(record)
+        final_path = _index_path(store_dir)
+        tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+        tmp_path.write_text(
+            json.dumps(sessions, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        os.replace(tmp_path, final_path)

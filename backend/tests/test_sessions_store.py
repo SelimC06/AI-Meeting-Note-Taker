@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -107,3 +108,28 @@ def test_append_session_preserves_old_index_if_replace_fails(
     # The real index file must be untouched by the failed write.
     assert (tmp_path / "sessions_index.json").read_text(encoding="utf-8") == original_content
     assert load_sessions(tmp_path) == [record1]
+
+
+def test_append_session_concurrent_writes_do_not_lose_records(tmp_path: Path):
+    n = 20
+    barrier = threading.Barrier(n)
+
+    def append_one(i: int) -> None:
+        barrier.wait()
+        append_session(tmp_path, {
+            "id": f"s{i}",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "title": f"t{i}",
+            "notes": "",
+            "video_path": "",
+        })
+
+    threads = [threading.Thread(target=append_one, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    sessions = load_sessions(tmp_path)
+    assert len(sessions) == n
+    assert {s["id"] for s in sessions} == {f"s{i}" for i in range(n)}

@@ -101,11 +101,11 @@ def test_process_skips_summarization_when_no_transcript(client, monkeypatch, cap
     assigned inside the (skipped) `if stop_recording_and_transcribe is not None:`
     branch in the pre-fix code, this raises UnboundLocalError -- which is
     *also* swallowed by the same `except Exception` and logged as
-    "pipeline failed, returning stub notes: ...". So even this scenario's
+    "summarization failed, falling back to raw transcript: ...". So even this scenario's
     HTTP response (200, stub notes) is identical pre-fix and post-fix.
 
     The only observable difference between the two code paths is therefore
-    the log output: pre-fix logs a "pipeline failed" message (from the caught
+    the log output: pre-fix logs a "summarization failed" message (from the caught
     UnboundLocalError); post-fix never enters the try block at all, so no
     such message is logged, and the llava_complete stub is never invoked
     either way (the crash in pre-fix happens while evaluating the argument,
@@ -147,12 +147,65 @@ def test_process_skips_summarization_when_no_transcript(client, monkeypatch, cap
     # llava_complete should not be invoked...
     assert llava_calls == []
 
-    # ...and no "pipeline failed" log line (which the pre-fix
+    # ...and no "summarization failed" log line (which the pre-fix
     # UnboundLocalError-on-txt_path would have produced via the
     # `except Exception` handler) should have been emitted.
     captured = capsys.readouterr()
-    assert "pipeline failed" not in captured.out
+    assert "summarization failed" not in captured.out
     assert "txt_path" not in captured.out
+
+
+def test_process_reuses_existing_transcript_when_summarization_fails(client, monkeypatch, tmp_path):
+    import sys
+    import types
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    transcript_path = tmp_path / "transcript_.txt"
+    transcript_path.write_text("hello from existing transcript", encoding="utf-8")
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        return str(transcript_path), []
+
+    def failing_llava_complete(**kwargs):
+        raise RuntimeError("llava down")
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", failing_llava_complete)
+
+    # If the code regresses to re-running Whisper on the full video instead
+    # of reusing the transcript already on disk, fail loudly here rather
+    # than silently falling back to stub notes (which the HTTP response
+    # alone wouldn't distinguish from the fixed behavior).
+    fake_module = types.ModuleType("faster_whisper")
+
+    class ExplodingWhisperModel:
+        def __init__(self, *a, **kw):
+            raise AssertionError(
+                "faster_whisper.WhisperModel should not be constructed when "
+                "an existing transcript is already available"
+            )
+
+    fake_module.WhisperModel = ExplodingWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "hello from existing transcript" in body["notes"]
 
 
 def test_sessions_empty_when_no_index(client: TestClient):

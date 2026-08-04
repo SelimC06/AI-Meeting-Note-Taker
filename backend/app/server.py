@@ -307,7 +307,6 @@ async def process(
             model_name="tiny.en",
             separate_tracks=False,
             extract_frames_after=True,
-            frames_mode="uniform",
             frames_out_dir=str(session / "frames"),
             every_n_seconds=5.0,
             scale_width=960,
@@ -335,7 +334,16 @@ async def process(
                 temperature=0.3,
             )
         except Exception as e:
-            log(f"pipeline failed, returning stub notes: {e}")
+            log(f"summarization failed, falling back to raw transcript: {e}")
+            try:
+                transcript = Path(txt_path).read_text(encoding="utf-8")
+                notes = (
+                    "# Title: Zoom Meeting\n\n"
+                    "# Transcript (auto)\n"
+                    + (transcript[:12000] or "(empty)")
+                )
+            except Exception as read_err:
+                log(f"failed to read existing transcript {txt_path}: {read_err}")
 
     if not notes:
         try:
