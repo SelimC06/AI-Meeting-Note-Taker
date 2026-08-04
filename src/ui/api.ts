@@ -26,6 +26,27 @@ export async function checkHealth(): Promise<boolean> {
   }
 }
 
+export type HealthStatus = {
+  ok: boolean;
+  backend: boolean;
+  ollama: boolean;
+};
+
+export async function getHealthStatus(): Promise<HealthStatus> {
+  try {
+    const resp = await fetch(`${BACKEND_URL}/health`);
+    if (!resp.ok) return { ok: false, backend: false, ollama: false };
+    const data = (await resp.json()) as Partial<HealthStatus>;
+    return {
+      ok: data.ok ?? false,
+      backend: data.backend ?? false,
+      ollama: data.ollama ?? false,
+    };
+  } catch {
+    return { ok: false, backend: false, ollama: false };
+  }
+}
+
 export type ChatTurn = { role: "user" | "assistant"; content: string };
 
 export async function* streamChatReply(

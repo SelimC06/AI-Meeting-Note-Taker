@@ -199,7 +199,15 @@ def mux_video_audio(video: Path, audio: Optional[Path], out_path: Path) -> Path:
 @app.get("/health")
 @app.get("/healthz")
 def health():
-    return {"ok": True}
+    ollama_ok = True
+    try:
+        if assert_ollama_up is not None:
+            assert_ollama_up()
+        else:
+            ollama_ok = False
+    except Exception:
+        ollama_ok = False
+    return {"ok": True, "backend": True, "ollama": ollama_ok}
 
 @app.get("/")
 def root():

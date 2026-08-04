@@ -23,3 +23,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return list[0]?.id ?? null;
   },
 });
+
+contextBridge.exposeInMainWorld("systemAPI", {
+  getStats: async () => {
+    try {
+      return await ipcRenderer.invoke("system:getStats");
+    } catch (e) {
+      console.warn("[preload] getStats failed:", e);
+      return null;
+    }
+  },
+});

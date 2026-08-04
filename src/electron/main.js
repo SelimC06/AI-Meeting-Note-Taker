@@ -1,6 +1,7 @@
 import { app, BrowserWindow, screen, ipcMain, desktopCapturer } from 'electron';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { fileURLToPath } from 'url';
 
 let mainWindow = null;
@@ -158,6 +159,31 @@ function createWindow() {
 
     mainWindow.on('closed', () => (mainWindow = null));
 }
+
+function cpuSnapshot() {
+    return os.cpus().map(c => ({ ...c.times }));
+}
+function cpuPercentFromDelta(prev, curr) {
+    let idleDelta = 0, totalDelta = 0;
+    for (let i = 0; i < curr.length; i++) {
+        const p = prev[i], c = curr[i];
+        const idle = c.idle - p.idle;
+        const total = (c.user - p.user) + (c.nice - p.nice) + (c.sys - p.sys) + (c.irq - p.irq) + idle;
+        idleDelta += idle; totalDelta += total;
+    }
+    if (totalDelta <= 0) return 0;
+    return Math.round((1 - idleDelta / totalDelta) * 100);
+}
+ipcMain.handle('system:getStats', async () => {
+    const before = cpuSnapshot();
+    await new Promise(r => setTimeout(r, 150));
+    const after = cpuSnapshot();
+    const cpuPercent = cpuPercentFromDelta(before, after);
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const memPercent = Math.round(((totalMem - freeMem) / totalMem) * 100);
+    return { cpuPercent, memPercent, totalMemBytes: totalMem, freeMemBytes: freeMem };
+});
 
 ipcMain.handle('win:minimize', () => mainWindow && mainWindow.minimize());
 ipcMain.handle('app:quit', () => {
