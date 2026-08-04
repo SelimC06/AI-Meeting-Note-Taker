@@ -1,4 +1,4 @@
-import { app, BrowserWindow, screen, ipcMain, desktopCapturer } from 'electron';
+import { app, BrowserWindow, screen, ipcMain, desktopCapturer, dialog } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -131,6 +131,15 @@ ipcMain.handle("list-capture-sources", async (_event, types = ["screen", "window
         id: s.id,
         name: s.name,
     }));
+});
+
+ipcMain.handle('dialog:chooseFolder', async () => {
+    if (!mainWindow) return null;
+    const result = await dialog.showOpenDialog(mainWindow, {
+        properties: ['openDirectory'],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
 });
 
 

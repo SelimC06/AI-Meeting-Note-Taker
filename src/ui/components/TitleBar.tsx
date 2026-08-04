@@ -21,6 +21,7 @@ const NAV_ITEMS: { key: MainPage; label: string }[] = [
   { key: "dashboard", label: "dashboard" },
   { key: "activity", label: "activity" },
   { key: "health", label: "health" },
+  { key: "settings", label: "settings" },
 ];
 
 export default function TitleBar({ page, onChangePage }: Props) {

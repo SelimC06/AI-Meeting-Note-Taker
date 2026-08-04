@@ -18,6 +18,14 @@ import os
 import uvicorn
 
 from .sessions_store import extract_title, load_sessions, append_session
+from .settings_store import (
+    WHISPER_MODEL_CHOICES,
+    WHISPER_MODEL_VALUES,
+    StorageMoveError,
+    load_or_init as load_settings,
+    move_storage_dir,
+    save as save_settings,
+)
 
 try:
     from .ffmpeg_transcribe import stop_recording_and_transcribe  # type: ignore
@@ -30,10 +38,11 @@ except Exception:
     llava_complete = None
 
 try:
-    from .chat import assert_ollama_up, stream_chat_reply
+    from .chat import assert_ollama_up, stream_chat_reply, OLLAMA_BASE
 except Exception:
     assert_ollama_up = None
     stream_chat_reply = None
+    OLLAMA_BASE = "http://localhost:11434"
 
 app = FastAPI()
 
@@ -77,8 +86,13 @@ app.add_middleware(
 app.add_middleware(AuditMiddleware)
 
 ROOT = Path(__file__).resolve().parent
-STORE = ROOT / "uploads"
-STORE.mkdir(exist_ok=True)
+SETTINGS_PATH = ROOT / "settings.json"
+
+_settings = load_settings(SETTINGS_PATH, ROOT / "uploads")
+STORE = Path(_settings["storage_dir"])
+STORE.mkdir(parents=True, exist_ok=True)
+WHISPER_MODEL = _settings["whisper_model"]
+OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
 
 def log(msg: str) -> None:
     print(f"[server] {msg}", flush=True)
@@ -217,12 +231,111 @@ def root():
 def sessions():
     return sorted(load_sessions(STORE), key=lambda r: r.get("created_at", ""), reverse=True)
 
+
+class SettingsUpdate(BaseModel):
+    whisper_model: Optional[str] = None
+    storage_dir: Optional[str] = None
+    ollama_chat_model: Optional[str] = None
+
+
+@app.get("/settings")
+def get_settings():
+    # Return the live in-memory globals rather than re-reading settings.json:
+    # if that file is ever deleted/corrupted while the server is running,
+    # re-reading it here would re-seed+persist defaults (e.g. storage_dir
+    # back to ROOT/"uploads") even though STORE still correctly points at
+    # the user's actual chosen folder, causing this endpoint to report the
+    # wrong value and a subsequent PATCH to merge onto the stale re-seed.
+    return {
+        "whisper_model": WHISPER_MODEL,
+        "storage_dir": str(STORE),
+        "ollama_chat_model": OLLAMA_CHAT_MODEL,
+        "whisper_model_choices": WHISPER_MODEL_CHOICES,
+    }
+
+
+@app.patch("/settings")
+def patch_settings(body: SettingsUpdate):
+    global STORE, WHISPER_MODEL, OLLAMA_CHAT_MODEL
+
+    if body.whisper_model is not None and body.whisper_model not in WHISPER_MODEL_VALUES:
+        raise HTTPException(400, f"Invalid whisper_model: {body.whisper_model!r}")
+
+    if body.storage_dir is not None and not Path(body.storage_dir).is_absolute():
+        raise HTTPException(400, "Storage folder must be an absolute path")
+
+    # Build the merge base from the current LIVE globals (not a fresh disk
+    # read via load_settings) so a corrupted/deleted settings.json can't
+    # cause patch_settings to silently merge onto stale re-seeded defaults.
+    # Passing a full dict as `updates` makes save_settings's internal
+    # load_or_init-based merge a no-op on whatever is on disk.
+    updates: dict = {
+        "whisper_model": WHISPER_MODEL,
+        "storage_dir": str(STORE),
+        "ollama_chat_model": OLLAMA_CHAT_MODEL,
+    }
+    if body.whisper_model is not None:
+        updates["whisper_model"] = body.whisper_model
+    if body.ollama_chat_model is not None:
+        updates["ollama_chat_model"] = body.ollama_chat_model
+
+    if body.storage_dir is not None:
+        new_dir = Path(body.storage_dir)
+        try:
+            move_storage_dir(STORE, new_dir)
+        except StorageMoveError as e:
+            raise HTTPException(400, str(e))
+        updates["storage_dir"] = str(new_dir)
+
+    settings = save_settings(SETTINGS_PATH, updates, ROOT / "uploads")
+
+    STORE = Path(settings["storage_dir"])
+    STORE.mkdir(parents=True, exist_ok=True)
+    WHISPER_MODEL = settings["whisper_model"]
+    OLLAMA_CHAT_MODEL = settings["ollama_chat_model"]
+
+    return {**settings, "whisper_model_choices": WHISPER_MODEL_CHOICES}
+
+
+def _extract_ollama_model_names(list_response) -> List[str]:
+    models = (
+        list_response.get("models")
+        if isinstance(list_response, dict)
+        else getattr(list_response, "models", [])
+    )
+    names: List[str] = []
+    for m in models or []:
+        name = (
+            (m.get("model") or m.get("name"))
+            if isinstance(m, dict)
+            else (getattr(m, "model", None) or getattr(m, "name", None))
+        )
+        if name:
+            names.append(name)
+    return names
+
+
+@app.get("/ollama/models")
+def ollama_models():
+    try:
+        import ollama as ollama_pkg
+        client = ollama_pkg.Client(host=OLLAMA_BASE)
+        resp = client.list()
+        return {"ok": True, "models": _extract_ollama_model_names(resp), "error": None}
+    except Exception as e:
+        return {"ok": False, "models": [], "error": str(e)}
+
 @app.post("/chat/{session_id}")
 def chat(session_id: str, body: ChatRequest):
+    # Bind the settings-backed globals once so this request sees one
+    # consistent snapshot even if a PATCH /settings lands mid-request.
+    store = STORE
+    chat_model = OLLAMA_CHAT_MODEL
+
     if stream_chat_reply is None or assert_ollama_up is None:
         raise HTTPException(503, "Chat is unavailable on this server")
 
-    matching = [s for s in load_sessions(STORE) if s.get("id") == session_id]
+    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
     if not matching:
         raise HTTPException(404, "Session not found")
     session_record = matching[0]
@@ -236,7 +349,7 @@ def chat(session_id: str, body: ChatRequest):
 
     def token_stream():
         try:
-            for chunk in stream_chat_reply(session_record["notes"], body.message, history):
+            for chunk in stream_chat_reply(session_record["notes"], body.message, history, model=chat_model):
                 yield chunk
         except Exception as e:
             log(f"chat stream failed: {e}")
@@ -264,7 +377,16 @@ async def process(
       4) mux with video using a safe encoder/container
       5) (optional) run your Whisper+LLaVA pipeline
     """
-    session = STORE / uuid.uuid4().hex
+    # Bind STORE (and WHISPER_MODEL below) to locals once, at the top, so
+    # this request sees one consistent snapshot of settings throughout --
+    # even though transcription can take minutes and a PATCH /settings
+    # changing storage_dir could otherwise land mid-request, causing the
+    # video files to land in the OLD folder while the index entry gets
+    # appended to the NEW folder's index.
+    store = STORE
+    whisper_model = WHISPER_MODEL
+
+    session = store / uuid.uuid4().hex
     session.mkdir(parents=True, exist_ok=True)
     log(f"session: {session}")
 
@@ -309,7 +431,7 @@ async def process(
         txt_path, _ = stop_recording_and_transcribe(
             video_path=str(final_path),
             transcript_prefix=str(session / "transcript_"),
-            model_name="tiny.en",
+            model_name=whisper_model,
             separate_tracks=False,
             extract_frames_after=True,
             frames_out_dir=str(session / "frames"),
@@ -353,8 +475,7 @@ async def process(
     if not notes:
         try:
             from faster_whisper import WhisperModel
-            model_name = os.getenv("WHISPER_MODEL", "tiny.en")
-            model = WhisperModel(model_name, compute_type="int8")  # CPU-friendly
+            model = WhisperModel(whisper_model, compute_type="int8")  # CPU-friendly
             segments, info = model.transcribe(str(final_path), beam_size=1)
             transcript = "\n".join(s.text.strip() for s in segments if s.text)
             notes = (
@@ -377,7 +498,7 @@ async def process(
         "notes": notes,
         "video_path": str(final_path),
     }
-    append_session(STORE, record)
+    append_session(store, record)
 
     return {
         "notes": notes,

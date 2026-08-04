@@ -27,7 +27,7 @@ const YourActivity: React.FC<Props> = ({ active }) => {
   const mostRecentTitle = sessions?.[0]?.title;
 
   return (
-    <div className="p-4 w-50 bg-panel border border-line rounded-sm text-phosphor">
+    <div className="p-4 w-50 h-full bg-panel border border-line rounded-sm text-phosphor transition-all duration-150 hover:-translate-y-0.5 hover:border-signal hover:shadow-[0_0_16px_-4px_var(--color-signal)]">
       <h2 className="text-xs font-semibold mb-2 tracking-wide uppercase text-dim">[ACTIVITY]</h2>
       <div className="text-xs space-y-1">
         {sessions === null && (

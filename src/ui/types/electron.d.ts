@@ -22,5 +22,8 @@ declare global {
     systemAPI?: {
       getStats: () => Promise<SystemStats | null>;
     };
+    settingsAPI?: {
+      chooseFolder: () => Promise<string | null>;
+    };
   }
 }

@@ -75,3 +75,57 @@ export async function* streamChatReply(
     yield decoder.decode(value, { stream: true });
   }
 }
+
+export type WhisperModelChoice = {
+  value: string;
+  label: string;
+  description: string;
+};
+
+export type Settings = {
+  whisper_model: string;
+  storage_dir: string;
+  ollama_chat_model: string;
+  whisper_model_choices: WhisperModelChoice[];
+};
+
+export async function getSettings(): Promise<Settings> {
+  const resp = await fetch(`${BACKEND_URL}/settings`);
+  if (!resp.ok) {
+    throw new Error(`Failed to load settings: ${resp.status}`);
+  }
+  return (await resp.json()) as Settings;
+}
+
+export async function updateSettings(
+  partial: Partial<Pick<Settings, "whisper_model" | "storage_dir" | "ollama_chat_model">>
+): Promise<Settings> {
+  const resp = await fetch(`${BACKEND_URL}/settings`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(partial),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(text || `Failed to update settings: ${resp.status}`);
+  }
+  return (await resp.json()) as Settings;
+}
+
+export type OllamaModelsResult = {
+  ok: boolean;
+  models: string[];
+  error: string | null;
+};
+
+export async function getOllamaModels(): Promise<OllamaModelsResult> {
+  try {
+    const resp = await fetch(`${BACKEND_URL}/ollama/models`);
+    if (!resp.ok) {
+      return { ok: false, models: [], error: `Request failed: ${resp.status}` };
+    }
+    return (await resp.json()) as OllamaModelsResult;
+  } catch (e) {
+    return { ok: false, models: [], error: e instanceof Error ? e.message : String(e) };
+  }
+}

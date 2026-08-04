@@ -34,3 +34,14 @@ contextBridge.exposeInMainWorld("systemAPI", {
     }
   },
 });
+
+contextBridge.exposeInMainWorld("settingsAPI", {
+  chooseFolder: async () => {
+    try {
+      return await ipcRenderer.invoke('dialog:chooseFolder');
+    } catch (e) {
+      console.warn("[preload] chooseFolder failed:", e);
+      return null;
+    }
+  },
+});

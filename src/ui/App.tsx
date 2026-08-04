@@ -2,9 +2,10 @@ import TitleBar from './components/TitleBar';
 import DashboardCards from './components/DashboardCards';
 import HealthPage from './components/HealthPage';
 import YourActivityPage from './components/YourActivityPage';
+import SettingsPage from './components/SettingsPage';
 import { useState } from 'react';
 
-export type MainPage = "dashboard" | "activity" | "health";
+export type MainPage = "dashboard" | "activity" | "health" | "settings";
 
 function App() {
   const [page, setPage] = useState<MainPage>("dashboard");
@@ -39,6 +40,15 @@ function App() {
             }
           >
             <HealthPage />
+          </div>
+
+          <div
+            className={
+              "absolute inset-0 h-full transition-opacity duration-150 " +
+              (page === "settings" ? "opacity-100" : "opacity-0 pointer-events-none")
+            }
+          >
+            <SettingsPage />
           </div>
         </main>
         </div>

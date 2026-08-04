@@ -6,6 +6,7 @@ import YourActivity from "./YourActivity";
 import Health from "./Health";
 import Status from "./Status";
 import Chat from "./Chat";
+import Models from "./Models";
 
 interface Props {
   onChangePage: (page: MainPage) => void;
@@ -32,6 +33,12 @@ const DashboardCards: React.FC<Props> = ({ onChangePage, active }) => {
         </div>
         <div className="px-6 py-4 flex flex-row gap-4">
           <Chat active={active}/>
+          <div
+            onClick={() => onChangePage("settings")}
+            className="cursor-pointer"
+          >
+            <Models active={active}/>
+          </div>
         </div>
     </>
   );

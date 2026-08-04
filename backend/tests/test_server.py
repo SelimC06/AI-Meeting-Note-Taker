@@ -14,6 +14,9 @@ def client(tmp_path, monkeypatch):
     # Redirect uploads to a temp dir so tests don't pollute backend/app/uploads
     monkeypatch.setattr(server_module, "STORE", tmp_path)
     tmp_path.mkdir(exist_ok=True)
+    # Redirect settings.json to a temp file so tests don't pollute/read the
+    # real backend/app/settings.json in this checkout.
+    monkeypatch.setattr(server_module, "SETTINGS_PATH", tmp_path / "settings.json")
     return TestClient(app)
 
 
@@ -440,3 +443,271 @@ def test_process_dedupes_frame_indices_for_small_frame_count(client, monkeypatch
     assert frames_dir is not None
     saved = sorted(frames_dir.glob("frame_*.png"))
     assert len(saved) == 1
+
+
+def test_get_settings_returns_current_values_and_choices(client: TestClient):
+    resp = client.get("/settings")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "whisper_model" in body
+    assert "storage_dir" in body
+    assert "ollama_chat_model" in body
+    values = {c["value"] for c in body["whisper_model_choices"]}
+    assert values == {"tiny.en", "base.en", "small.en", "medium.en"}
+
+
+def test_patch_settings_updates_whisper_model(client: TestClient):
+    resp = client.patch("/settings", json={"whisper_model": "small.en"})
+    assert resp.status_code == 200
+    assert resp.json()["whisper_model"] == "small.en"
+
+    import app.server as server_module
+    assert server_module.WHISPER_MODEL == "small.en"
+
+    # Reflected on a subsequent GET too.
+    resp2 = client.get("/settings")
+    assert resp2.json()["whisper_model"] == "small.en"
+
+
+def test_patch_settings_rejects_invalid_whisper_model(client: TestClient):
+    resp = client.patch("/settings", json={"whisper_model": "not-a-real-model"})
+    assert resp.status_code == 400
+
+
+def test_patch_settings_updates_ollama_chat_model(client: TestClient):
+    resp = client.patch("/settings", json={"ollama_chat_model": "llama3.1:8b"})
+    assert resp.status_code == 200
+    assert resp.json()["ollama_chat_model"] == "llama3.1:8b"
+
+    import app.server as server_module
+    assert server_module.OLLAMA_CHAT_MODEL == "llama3.1:8b"
+
+
+def test_patch_settings_moves_storage_dir(client: TestClient, tmp_path):
+    import app.server as server_module
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc123",
+        "created_at": "2026-08-03T00:00:00+00:00",
+        "title": "Test Meeting",
+        "notes": "notes",
+        "video_path": "x",
+    })
+
+    # Use a sibling directory, not one nested inside STORE (== tmp_path here):
+    # move_storage_dir now refuses destinations nested inside the current
+    # storage dir, so this must be a genuine sibling to exercise a real move.
+    new_dir = tmp_path.parent / f"{tmp_path.name}-new-storage"
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+    assert resp.status_code == 200
+    assert resp.json()["storage_dir"] == str(new_dir)
+
+    assert server_module.STORE == new_dir
+    assert (new_dir / "sessions_index.json").exists()
+
+    # Subsequent /sessions reads from the new location.
+    sessions = client.get("/sessions").json()
+    assert len(sessions) == 1
+    assert sessions[0]["id"] == "abc123"
+
+
+def test_get_settings_reads_live_globals_not_disk_after_settings_file_deleted(client: TestClient):
+    import app.server as server_module
+
+    # Cause settings.json to be created via a request. GET /settings itself
+    # no longer touches disk (that's the fix under test), so use a PATCH,
+    # which still writes through save_settings.
+    client.patch("/settings", json={"whisper_model": "base.en"})
+    assert server_module.SETTINGS_PATH.exists()
+
+    # Push the live globals to non-default values, then delete settings.json
+    # out from under the running server -- simulating it being deleted or
+    # corrupted while the server is up.
+    server_module.WHISPER_MODEL = "small.en"
+    server_module.OLLAMA_CHAT_MODEL = "llama3.1:8b"
+    live_store = server_module.STORE
+    server_module.SETTINGS_PATH.unlink()
+
+    resp = client.get("/settings")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # Must reflect the live in-memory globals, not re-seeded defaults from a
+    # fresh load_or_init() disk read (which would reset storage_dir back to
+    # ROOT/"uploads" and whisper_model/ollama_chat_model to their env-var
+    # defaults).
+    assert body["whisper_model"] == "small.en"
+    assert body["ollama_chat_model"] == "llama3.1:8b"
+    assert body["storage_dir"] == str(live_store)
+
+
+def test_patch_settings_rejects_relative_storage_dir(client: TestClient):
+    import app.server as server_module
+
+    original_store = server_module.STORE
+    resp = client.patch("/settings", json={"storage_dir": "relative/path"})
+    assert resp.status_code == 400
+    assert server_module.STORE == original_store
+
+
+def test_patch_settings_storage_dir_refuses_non_empty_destination(client: TestClient, tmp_path):
+    import app.server as server_module
+
+    new_dir = tmp_path / "occupied"
+    new_dir.mkdir()
+    (new_dir / "leftover.txt").write_text("x", encoding="utf-8")
+
+    original_store = server_module.STORE
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+    assert resp.status_code == 400
+    assert server_module.STORE == original_store
+
+
+def test_ollama_models_returns_installed_models(client: TestClient, monkeypatch):
+    import app.server as server_module
+
+    class FakeOllamaClient:
+        def __init__(self, host):
+            self.host = host
+
+        def list(self):
+            return {"models": [{"model": "llama3.1:8b"}, {"model": "llava:7b-v1.5-q4_K_M"}]}
+
+    class FakeOllamaModule:
+        Client = FakeOllamaClient
+
+    monkeypatch.setitem(__import__("sys").modules, "ollama", FakeOllamaModule())
+
+    resp = client.get("/ollama/models")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["models"] == ["llama3.1:8b", "llava:7b-v1.5-q4_K_M"]
+
+
+def test_ollama_models_reports_unreachable(client: TestClient, monkeypatch):
+    class FailingOllamaClient:
+        def __init__(self, host):
+            pass
+
+        def list(self):
+            raise ConnectionError("connection refused")
+
+    class FailingOllamaModule:
+        Client = FailingOllamaClient
+
+    monkeypatch.setitem(__import__("sys").modules, "ollama", FailingOllamaModule())
+
+    resp = client.get("/ollama/models")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["models"] == []
+    assert "connection refused" in body["error"]
+
+
+def test_process_uses_configured_whisper_model_via_transcribe_helper(client, monkeypatch):
+    import app.server as server_module
+
+    server_module.WHISPER_MODEL = "small.en"
+
+    captured = {}
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        captured["model_name"] = kwargs.get("model_name")
+        return None, []
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 200
+    assert captured["model_name"] == "small.en"
+
+
+def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
+    import sys
+    import types
+    import app.server as server_module
+
+    server_module.WHISPER_MODEL = "medium.en"
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    captured = {}
+
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, compute_type=None):
+            captured["model_name"] = model_name
+
+        def transcribe(self, path, beam_size=1):
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 200
+    assert captured["model_name"] == "medium.en"
+
+
+def test_chat_uses_configured_ollama_model(client: TestClient, monkeypatch):
+    from app.sessions_store import append_session
+    import app.server as server_module
+
+    server_module.OLLAMA_CHAT_MODEL = "llama3.1:8b"
+
+    append_session(server_module.STORE, {
+        "id": "abc123",
+        "created_at": "2026-08-03T00:00:00+00:00",
+        "title": "Test Meeting",
+        "notes": "notes",
+        "video_path": "x",
+    })
+
+    captured = {}
+
+    def fake_stream_chat_reply(notes, message, history, **kwargs):
+        captured["model"] = kwargs.get("model")
+        yield "ok"
+
+    monkeypatch.setattr(server_module, "assert_ollama_up", lambda: None)
+    monkeypatch.setattr(server_module, "stream_chat_reply", fake_stream_chat_reply)
+
+    resp = client.post("/chat/abc123", json={"message": "hi", "history": []})
+    assert resp.status_code == 200
+    assert captured["model"] == "llama3.1:8b"
