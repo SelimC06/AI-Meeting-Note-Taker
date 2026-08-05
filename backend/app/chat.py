@@ -6,7 +6,7 @@ from typing import Iterator, List, Dict
 import ollama
 
 OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://localhost:11434"
-DEFAULT_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:7b-v1.5-q4_K_M")
+DEFAULT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "gemma3:4b")
 
 _client = ollama.Client(host=OLLAMA_BASE)
 

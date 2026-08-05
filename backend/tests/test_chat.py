@@ -124,3 +124,25 @@ def test_assert_ollama_up_calls_client_list(monkeypatch):
     monkeypatch.setattr(chat_module._client, "list", lambda: calls.append(True))
     chat_module.assert_ollama_up()
     assert calls == [True]
+
+
+def test_default_model_reads_ollama_chat_model_env_var(monkeypatch):
+    monkeypatch.setenv("OLLAMA_CHAT_MODEL", "custom-chat-model")
+    import importlib
+    reloaded = importlib.reload(chat_module)
+    try:
+        assert reloaded.DEFAULT_MODEL == "custom-chat-model"
+    finally:
+        monkeypatch.delenv("OLLAMA_CHAT_MODEL", raising=False)
+        importlib.reload(chat_module)  # restore module state for later tests
+
+
+def test_default_model_falls_back_to_gemma_when_env_unset(monkeypatch):
+    monkeypatch.delenv("OLLAMA_CHAT_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_VISION_MODEL", raising=False)
+    import importlib
+    reloaded = importlib.reload(chat_module)
+    try:
+        assert reloaded.DEFAULT_MODEL == "gemma3:4b"
+    finally:
+        importlib.reload(chat_module)

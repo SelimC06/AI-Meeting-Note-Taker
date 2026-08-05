@@ -22,23 +22,23 @@ def test_whisper_model_choices_values_match_set():
 
 def test_default_settings_uses_env_vars(monkeypatch, tmp_path):
     monkeypatch.setenv("WHISPER_MODEL", "small.en")
-    monkeypatch.setenv("OLLAMA_VISION_MODEL", "custom-vision:latest")
+    monkeypatch.setenv("OLLAMA_CHAT_MODEL", "custom-chat:latest")
     storage = tmp_path / "uploads"
     result = default_settings(storage)
     assert result == {
         "whisper_model": "small.en",
         "storage_dir": str(storage),
-        "ollama_chat_model": "custom-vision:latest",
+        "ollama_chat_model": "custom-chat:latest",
     }
 
 
 def test_default_settings_falls_back_without_env_vars(monkeypatch, tmp_path):
     monkeypatch.delenv("WHISPER_MODEL", raising=False)
-    monkeypatch.delenv("OLLAMA_VISION_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_CHAT_MODEL", raising=False)
     storage = tmp_path / "uploads"
     result = default_settings(storage)
     assert result["whisper_model"] == "tiny.en"
-    assert result["ollama_chat_model"] == "llava:7b-v1.5-q4_K_M"
+    assert result["ollama_chat_model"] == "gemma3:4b"
     assert result["storage_dir"] == str(storage)
 
 
