@@ -1,4 +1,4 @@
-import { app, BrowserWindow, screen, ipcMain, desktopCapturer, dialog } from 'electron';
+import { app, BrowserWindow, screen, ipcMain, desktopCapturer, dialog, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -159,6 +159,12 @@ function createWindow() {
         }
     });
     disableZoom(mainWindow.webContents);
+    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+        if (/^https?:\/\//.test(url)) {
+            shell.openExternal(url);
+        }
+        return { action: 'deny' };
+    });
     mainWindow.loadFile(path.join(app.getAppPath() + '/dist-react/index.html'));
 
     mainWindow.once("ready-to-show", () => {

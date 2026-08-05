@@ -5,6 +5,7 @@ import YourActivityPage from './components/YourActivityPage';
 import SettingsPage from './components/SettingsPage';
 import ErrorBoundary from './components/ErrorBoundary';
 import BackendStatusBanner from './components/BackendStatusBanner';
+import OllamaOnboardingGate from './components/OllamaOnboardingGate';
 import { useState } from 'react';
 
 export type MainPage = "dashboard" | "activity" | "health" | "settings";
@@ -26,6 +27,7 @@ function App() {
           >
             <ErrorBoundary resetKey={page}>
               <DashboardCards onChangePage={setPage} active={page === "dashboard"}/>
+              <OllamaOnboardingGate active={page === "dashboard"} />
             </ErrorBoundary>
           </div>
 
