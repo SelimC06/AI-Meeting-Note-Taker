@@ -10,6 +10,17 @@ export function resolveVenvPython(projectRoot, platform = process.platform) {
     return fs.existsSync(pythonPath) ? pythonPath : null;
 }
 
+export function resolveBackendCommand(projectRoot, resourcesPath, isPackaged, platform = process.platform) {
+    if (isPackaged) {
+        const exeName = platform === 'win32' ? 'app-backend.exe' : 'app-backend';
+        const backendDir = path.join(resourcesPath, 'backend');
+        return { command: path.join(backendDir, exeName), args: [], cwd: backendDir };
+    }
+    const pythonExe = resolveVenvPython(projectRoot, platform);
+    if (!pythonExe) return null;
+    return { command: pythonExe, args: ['-m', 'app.server'], cwd: path.join(projectRoot, 'backend') };
+}
+
 let backendProcess = null;
 let backendLogTail = [];
 let intentionalStop = false;

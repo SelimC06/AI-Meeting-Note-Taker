@@ -31,3 +31,14 @@ backend/.pytest_cache/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Vendored build tools (fetched, not checked in)
+vendor/
+
+# PyInstaller build output (produced by npm run build:backend)
+backend-dist
+build/pyinstaller
+backend/app-backend.spec
+
+# electron-builder output (produced by npm run dist)
+release

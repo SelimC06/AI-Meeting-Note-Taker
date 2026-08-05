@@ -1,12 +1,20 @@
 from __future__ import annotations
-import time, uuid, json, re
+import os, time, uuid, json, re
 from pathlib import Path
 from typing import Callable
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
-LOG_DIR = Path(__file__).resolve().parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+# Mirrors server.py's ROOT resolution: when frozen (PyInstaller), this
+# module's source lives inside the bundled archive rather than as a real
+# file on disk, so `Path(__file__).resolve().parent` does not point at an
+# existing directory and a plain mkdir() would raise FileNotFoundError.
+# Falling back to APP_DATA_DIR (set by the launcher) keeps this writable
+# both unfrozen and frozen.
+_app_data_dir_env = os.getenv("APP_DATA_DIR")
+_BASE_DIR = Path(_app_data_dir_env) if _app_data_dir_env else Path(__file__).resolve().parent
+LOG_DIR = _BASE_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_PATH = LOG_DIR / "audit.jsonl"
 
 SENSITIVE_KEYS = {"password","token","code","client_secret","authorization","cookie","sid"}

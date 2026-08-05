@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { resolveVenvPython, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor } from './backend.js';
+import { resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor } from './backend.js';
 import { attemptRecovery, isRecovering } from './backendRecovery.js';
 
 let mainWindow = null;
@@ -211,8 +211,8 @@ let recoveryConfig = null;
 
 app.whenReady().then(async () => {
     const projectRoot = app.getAppPath();
-    const pythonExe = resolveVenvPython(projectRoot);
-    if (!pythonExe) {
+    const backend = resolveBackendCommand(projectRoot, process.resourcesPath, app.isPackaged);
+    if (!backend) {
         dialog.showErrorBox(
             'Backend not set up',
             'Run `npm run setup:backend` first, then relaunch the app.'
@@ -221,13 +221,26 @@ app.whenReady().then(async () => {
         return;
     }
 
-    const backendArgs = ['-m', 'app.server'];
-    const backendCwd = path.join(projectRoot, 'backend');
-    const backendEnv = { ...process.env, PORT: BACKEND_PORT };
-    const backendProcess = startBackend(pythonExe, backendArgs, backendCwd, backendEnv);
+    const backendEnv = {
+        ...process.env,
+        PORT: BACKEND_PORT,
+        ...(app.isPackaged ? {
+            APP_DATA_DIR: app.getPath('userData'),
+            FFMPEG_BIN: path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe'),
+            FFPROBE_BIN: path.join(process.resourcesPath, 'ffmpeg', 'ffprobe.exe'),
+        } : {}),
+    };
+    const backendProcess = startBackend(backend.command, backend.args, backend.cwd, backendEnv);
+
+    // Packaged mode gets a longer timeout: a first launch after install can hit
+    // slower disk I/O and antivirus scanning of freshly-written files, and the
+    // frozen backend's measured cold start (~7.6s) leaves thin margin under 15s.
+    // Dev mode launches an already-installed venv python, which is fast and
+    // doesn't have this risk, so its timeout stays unchanged.
+    const healthTimeoutMs = app.isPackaged ? 30000 : 15000;
 
     try {
-        await waitForHealth(BACKEND_URL, 15000, backendProcess);
+        await waitForHealth(BACKEND_URL, healthTimeoutMs, backendProcess);
     } catch (err) {
         const logTail = getBackendLogTail();
         const detail = logTail
@@ -240,9 +253,9 @@ app.whenReady().then(async () => {
     }
 
     recoveryConfig = {
-        pythonExe,
-        args: backendArgs,
-        cwd: backendCwd,
+        pythonExe: backend.command,
+        args: backend.args,
+        cwd: backend.cwd,
         env: backendEnv,
         backendUrl: BACKEND_URL,
         logDir: path.join(app.getPath('userData'), 'logs'),

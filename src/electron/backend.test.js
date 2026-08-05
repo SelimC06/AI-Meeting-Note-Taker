@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveVenvPython, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, disarmCrashMonitor } from './backend.js';
+import { resolveVenvPython, resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, disarmCrashMonitor } from './backend.js';
 
 function makeTmpProjectRoot() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'backend-test-'));
@@ -40,6 +40,65 @@ test('resolveVenvPython finds .venv/bin/python on posix platforms', () => {
         const pyPath = path.join(binDir, 'python');
         fs.writeFileSync(pyPath, '');
         assert.equal(resolveVenvPython(projectRoot, 'linux'), pyPath);
+    } finally {
+        fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+});
+
+test('resolveBackendCommand returns the frozen exe in packaged mode on win32', () => {
+    const projectRoot = makeTmpProjectRoot();
+    try {
+        const resourcesPath = path.join(projectRoot, 'resources');
+        const result = resolveBackendCommand(projectRoot, resourcesPath, true, 'win32');
+        assert.deepEqual(result, {
+            command: path.join(resourcesPath, 'backend', 'app-backend.exe'),
+            args: [],
+            cwd: path.join(resourcesPath, 'backend'),
+        });
+    } finally {
+        fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+});
+
+test('resolveBackendCommand returns the frozen exe (no .exe suffix) in packaged mode on posix', () => {
+    const projectRoot = makeTmpProjectRoot();
+    try {
+        const resourcesPath = path.join(projectRoot, 'resources');
+        const result = resolveBackendCommand(projectRoot, resourcesPath, true, 'linux');
+        assert.deepEqual(result, {
+            command: path.join(resourcesPath, 'backend', 'app-backend'),
+            args: [],
+            cwd: path.join(resourcesPath, 'backend'),
+        });
+    } finally {
+        fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+});
+
+test('resolveBackendCommand returns the venv python with -m app.server in dev mode', () => {
+    const projectRoot = makeTmpProjectRoot();
+    try {
+        const scriptsDir = path.join(projectRoot, '.venv', 'Scripts');
+        fs.mkdirSync(scriptsDir, { recursive: true });
+        const pyPath = path.join(scriptsDir, 'python.exe');
+        fs.writeFileSync(pyPath, '');
+
+        const result = resolveBackendCommand(projectRoot, path.join(projectRoot, 'resources'), false, 'win32');
+        assert.deepEqual(result, {
+            command: pyPath,
+            args: ['-m', 'app.server'],
+            cwd: path.join(projectRoot, 'backend'),
+        });
+    } finally {
+        fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+});
+
+test('resolveBackendCommand returns null in dev mode when .venv is missing', () => {
+    const projectRoot = makeTmpProjectRoot();
+    try {
+        const result = resolveBackendCommand(projectRoot, path.join(projectRoot, 'resources'), false, 'win32');
+        assert.equal(result, null);
     } finally {
         fs.rmSync(projectRoot, { recursive: true, force: true });
     }

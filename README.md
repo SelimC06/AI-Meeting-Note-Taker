@@ -33,6 +33,20 @@ cd backend && python -m app.server
 
 This runs the `if __name__ == "__main__":` guard in `backend/app/server.py`, which calls `main()` and binds the server to `127.0.0.1` only (port `8000` by default, override with the `PORT` env var). Prefer this over hand-typing `uvicorn app.server:app --reload --port 8000`, since that command does not enforce the localhost-only bind.
 
+## Building an installer (Windows)
+
+```
+npm install
+npm run setup:backend
+npm run dist
+```
+
+This produces a Windows installer under `release/`. The installer bundles the Python backend (frozen with PyInstaller) and ffmpeg/ffprobe, so **end users installing the packaged app do not need Python or ffmpeg installed separately.**
+
+The one remaining external dependency for end users is [Ollama](https://ollama.com) — install it and pull a chat model before using the chat/summarize features.
+
+`npm run setup:backend` and the `.venv` it creates are only needed for *building* the installer (or running the backend directly in dev mode) — they are not needed by someone just installing and running the packaged app.
+
 Currently, two official plugins are available:
 
 - [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh

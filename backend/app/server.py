@@ -37,6 +37,7 @@ from .settings_store import (
     move_storage_dir,
     save as save_settings,
 )
+from .bin_paths import FFMPEG_BIN, FFPROBE_BIN
 
 try:
     from .ffmpeg_transcribe import stop_recording_and_transcribe  # type: ignore
@@ -96,7 +97,8 @@ app.add_middleware(
 )
 app.add_middleware(AuditMiddleware)
 
-ROOT = Path(__file__).resolve().parent
+_app_data_dir_env = os.getenv("APP_DATA_DIR")
+ROOT = Path(_app_data_dir_env) if _app_data_dir_env else Path(__file__).resolve().parent
 SETTINGS_PATH = ROOT / "settings.json"
 
 _settings = load_settings(SETTINGS_PATH, ROOT / "uploads")
@@ -115,7 +117,7 @@ def run(cmd: List[str]) -> subprocess.CompletedProcess[str]:
 
 
 def run_ffmpeg(args: List[str]) -> None:
-    p = run(["ffmpeg", "-y", *args])
+    p = run([FFMPEG_BIN, "-y", *args])
     if p.returncode != 0:
         raise RuntimeError(p.stderr[-1200:] if p.stderr else "ffmpeg failed")
 
@@ -123,7 +125,7 @@ def run_ffmpeg(args: List[str]) -> None:
 def ffprobe_ok(p: Path) -> bool:
     if not p.exists() or p.stat().st_size == 0:
         return False
-    probe = run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(p)])
+    probe = run([FFPROBE_BIN, "-v", "error", "-show_streams", "-of", "json", str(p)])
     return probe.returncode == 0 and '"streams": [' in (probe.stdout or "")
 
 
@@ -182,7 +184,7 @@ def mix_audios_wav(system_wav: Optional[Path], mic_wav: Optional[Path], out_wav:
 
 
 def ffmpeg_has_encoder(name: str) -> bool:
-    enc = run(["ffmpeg", "-hide_banner", "-encoders"])
+    enc = run([FFMPEG_BIN, "-hide_banner", "-encoders"])
     return enc.returncode == 0 and f" {name} " in (enc.stdout or "")
 
 
@@ -217,7 +219,7 @@ def mux_video_audio(video: Path, audio: Optional[Path], out_path: Path) -> Path:
         "-c:a", acodec,
         str(out_path),
     ]
-    p = run(["ffmpeg", "-y", *args])
+    p = run([FFMPEG_BIN, "-y", *args])
     if p.returncode != 0:
         raise RuntimeError(p.stderr[-1200:] if p.stderr else "mux failed")
     return out_path

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "main": "src/electron/main",
+  "main": "src/electron/main.js",
   "scripts": {
     "dev:react": "vite",
     "dev:electron": "electron .",
@@ -11,7 +11,37 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test:main": "node --test src/electron/*.test.js",
-    "setup:backend": "node scripts/setup-backend.mjs"
+    "setup:backend": "node scripts/setup-backend.mjs",
+    "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
+    "build:backend": "node scripts/build-backend.mjs",
+    "dist": "npm run build && npm run build:backend && npm run fetch:ffmpeg && electron-builder"
+  },
+  "build": {
+    "appId": "com.meetingnotetaker.app",
+    "productName": "Meeting Note Taker",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-react/**/*",
+      "src/electron/**/*",
+      "!src/electron/**/*.test.js",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "backend-dist/app-backend", "to": "backend" },
+      { "from": "vendor/ffmpeg", "to": "ffmpeg" }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "perMachine": false,
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.3.0",
@@ -28,6 +58,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "babel-plugin-react-compiler": "^19.1.0-rc.3",
     "electron": "^39.1.0",
+    "electron-builder": "^26.15.3",
     "eslint": "^9.36.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.22",

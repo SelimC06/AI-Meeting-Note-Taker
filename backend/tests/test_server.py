@@ -20,6 +20,22 @@ def client(tmp_path, monkeypatch):
     return TestClient(app)
 
 
+def test_root_respects_app_data_dir_env_var(tmp_path, monkeypatch):
+    import importlib
+    import app.server as server_module
+
+    custom_dir = tmp_path / "custom-app-data"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("APP_DATA_DIR", str(custom_dir))
+    try:
+        importlib.reload(server_module)
+        assert server_module.ROOT == custom_dir
+        assert server_module.SETTINGS_PATH == custom_dir / "settings.json"
+    finally:
+        monkeypatch.delenv("APP_DATA_DIR", raising=False)
+        importlib.reload(server_module)
+
+
 def test_main_binds_to_localhost_only(monkeypatch):
     captured = {}
 
@@ -401,9 +417,16 @@ def test_process_413_response_includes_cors_header(client, monkeypatch):
 
 
 def test_healthz_alias_matches_health(client: TestClient):
-    resp = client.get("/healthz")
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True}
+    healthz_resp = client.get("/healthz")
+    health_resp = client.get("/health")
+    assert healthz_resp.status_code == 200
+    assert health_resp.status_code == 200
+    assert healthz_resp.json() == health_resp.json()
+
+    body = health_resp.json()
+    assert body["ok"] is True
+    assert body["backend"] is True
+    assert isinstance(body["ollama"], bool)
 
 
 def test_process_dedupes_frame_indices_for_small_frame_count(client, monkeypatch):

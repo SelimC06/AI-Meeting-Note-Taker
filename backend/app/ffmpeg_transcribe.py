@@ -1,6 +1,7 @@
 import subprocess
 from faster_whisper import WhisperModel
 from pathlib import Path
+from .bin_paths import FFMPEG_BIN
 
 
 def extract_frames(
@@ -25,7 +26,7 @@ def extract_frames(
     vf = ",".join(vf_parts)
 
     pattern = str(outdir / f"frame_%05d.{image_ext}")
-    cmd = ["ffmpeg", "-y", "-i", str(video), "-vf", vf, "-vsync", "vfr"]
+    cmd = [FFMPEG_BIN, "-y", "-i", str(video), "-vf", vf, "-fps_mode", "vfr"]
     if image_ext.lower() in ("jpg", "jpeg"):
         cmd += ["-q:v", str(quality)]
     cmd += [pattern]
@@ -55,13 +56,13 @@ def stop_recording_and_transcribe(
     wav_path = Path(transcript_prefix).with_suffix(".wav")
     if separate_tracks:
         subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
+        FFMPEG_BIN, "-y", "-i", video_path,
         "-filter_complex", "[0:a:0][0:a:1]amix=inputs=2:duration=longest:dropout_transition=200",
         "-ac", "1", "-ar", "16000", str(wav_path)
     ], check=True)
     else:
         subprocess.run([
-            "ffmpeg","-y","-i",video_path,
+            FFMPEG_BIN,"-y","-i",video_path,
             "-map","0:a:0","-ac","1","-ar","16000",str(wav_path)
         ], check=True)
 
