@@ -32,13 +32,13 @@ const DashboardCards: React.FC<Props> = ({ onChangePage, active }) => {
             <Status />
         </div>
         <div className="px-6 py-4 flex flex-row gap-4">
-          <Chat active={active}/>
           <div
             onClick={() => onChangePage("settings")}
             className="cursor-pointer"
           >
             <Models active={active}/>
           </div>
+          <Chat active={active}/>
         </div>
     </>
   );

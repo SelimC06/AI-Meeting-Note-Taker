@@ -144,7 +144,7 @@ const Chat: React.FC<Props> = ({ active }) => {
   const hasMeetings = sessions !== null && sessions.length > 0;
 
   return (
-    <div className="p-4 w-[50%] h-[240px] bg-panel border border-line rounded-sm text-phosphor flex flex-col [-webkit-app-region:no-drag]">
+    <div className="p-4 flex-1 min-w-0 h-[240px] bg-panel border border-line rounded-sm text-phosphor flex flex-col [-webkit-app-region:no-drag]">
       <h2 className="text-xs font-semibold mb-2 tracking-wide uppercase text-dim">[CHAT]</h2>
 
       {sessions === null && (

@@ -24,7 +24,7 @@ const Status: React.FC = () => {
   }, []);
 
   return (
-    <div className="p-4 w-100 bg-panel border border-line rounded-sm text-phosphor">
+    <div className="p-4 flex-1 min-w-0 bg-panel border border-line rounded-sm text-phosphor">
       <h2 className="text-xs font-semibold mb-2 tracking-wide uppercase text-dim">[STATUS]</h2>
       <div className="flex items-center gap-2 text-sm">
         <span className={online ? "text-signal" : "text-dim"}>
