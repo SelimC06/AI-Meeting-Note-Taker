@@ -12,9 +12,11 @@ export function resolveVenvPython(projectRoot, platform = process.platform) {
 
 let backendProcess = null;
 let backendLogTail = [];
+let intentionalStop = false;
 const BACKEND_LOG_TAIL_MAX_LINES = 20;
 
 export function startBackend(command, args, cwd, env = process.env) {
+    intentionalStop = false;
     backendLogTail = [];
     backendProcess = spawn(command, args, { cwd, env });
     backendProcess.stdout.on('data', (data) => {
@@ -39,10 +41,24 @@ export function getBackendLogTail() {
 }
 
 export function stopBackend() {
+    intentionalStop = true;
     if (backendProcess && backendProcess.exitCode === null && !backendProcess.killed) {
         backendProcess.kill();
     }
     backendProcess = null;
+}
+
+export function armCrashMonitor(childProcess, onCrash) {
+    const listener = (code, signal) => {
+        if (intentionalStop) return;
+        onCrash(code, signal);
+    };
+    childProcess.once('exit', listener);
+    return listener;
+}
+
+export function disarmCrashMonitor(childProcess, listener) {
+    childProcess.removeListener('exit', listener);
 }
 
 export function waitForHealth(url, timeoutMs, childProcess = null) {

@@ -45,3 +45,19 @@ contextBridge.exposeInMainWorld("settingsAPI", {
     }
   },
 });
+
+contextBridge.exposeInMainWorld("backendAPI", {
+  onStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('backend:status', listener);
+    return () => ipcRenderer.removeListener('backend:status', listener);
+  },
+
+  restart: async () => {
+    try {
+      await ipcRenderer.invoke('backend:restart');
+    } catch (e) {
+      console.warn("[preload] backend restart failed:", e);
+    }
+  },
+});

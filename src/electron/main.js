@@ -3,7 +3,8 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { resolveVenvPython, startBackend, stopBackend, waitForHealth, getBackendLogTail } from './backend.js';
+import { resolveVenvPython, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor } from './backend.js';
+import { attemptRecovery, isRecovering } from './backendRecovery.js';
 
 let mainWindow = null;
 let railWindow = null;
@@ -206,6 +207,8 @@ ipcMain.handle('app:quit', () => {
 const BACKEND_PORT = '8000';
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 
+let recoveryConfig = null;
+
 app.whenReady().then(async () => {
     const projectRoot = app.getAppPath();
     const pythonExe = resolveVenvPython(projectRoot);
@@ -218,9 +221,10 @@ app.whenReady().then(async () => {
         return;
     }
 
+    const backendArgs = ['-m', 'app.server'];
     const backendCwd = path.join(projectRoot, 'backend');
     const backendEnv = { ...process.env, PORT: BACKEND_PORT };
-    const backendProcess = startBackend(pythonExe, ['-m', 'app.server'], backendCwd, backendEnv);
+    const backendProcess = startBackend(pythonExe, backendArgs, backendCwd, backendEnv);
 
     try {
         await waitForHealth(BACKEND_URL, 15000, backendProcess);
@@ -235,7 +239,30 @@ app.whenReady().then(async () => {
         return;
     }
 
+    recoveryConfig = {
+        pythonExe,
+        args: backendArgs,
+        cwd: backendCwd,
+        env: backendEnv,
+        backendUrl: BACKEND_URL,
+        logDir: path.join(app.getPath('userData'), 'logs'),
+    };
+    armCrashMonitor(backendProcess, (code, signal) => {
+        attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo: { exitCode: code, signal } });
+    });
+
     createWindow();
+});
+
+ipcMain.handle('backend:restart', async () => {
+    if (!recoveryConfig || isRecovering()) return;
+    try {
+        const res = await fetch(`${recoveryConfig.backendUrl}/health`);
+        if (res.ok) return; // already healthy — don't spawn a second process on the same port
+    } catch {
+        // not reachable, proceed with recovery
+    }
+    await attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo: null });
 });
 
 app.on('before-quit', () => stopBackend());

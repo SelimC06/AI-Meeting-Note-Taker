@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveVenvPython, startBackend, stopBackend, waitForHealth, getBackendLogTail } from './backend.js';
+import { resolveVenvPython, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, disarmCrashMonitor } from './backend.js';
 
 function makeTmpProjectRoot() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'backend-test-'));
@@ -158,4 +158,33 @@ test('waitForHealth rejects with a specific error when the child process fails t
     );
     assert.ok(Date.now() - start < 2000, 'should reject quickly, not wait out the full timeout');
     stopBackend();
+});
+
+test('armCrashMonitor invokes onCrash when the process exits unexpectedly', async () => {
+    const calls = [];
+    const child = startBackend(process.execPath, ['-e', 'process.exit(3)'], process.cwd());
+    armCrashMonitor(child, (code, signal) => calls.push({ code, signal }));
+    await new Promise((resolve) => child.once('exit', resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(calls, [{ code: 3, signal: null }]);
+});
+
+test('armCrashMonitor does not invoke onCrash when stopBackend caused the exit', async () => {
+    const calls = [];
+    const child = startBackend(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], process.cwd());
+    armCrashMonitor(child, (code, signal) => calls.push({ code, signal }));
+    const exited = new Promise((resolve) => child.once('exit', resolve));
+    stopBackend();
+    await exited;
+    assert.deepEqual(calls, []);
+});
+
+test('disarmCrashMonitor prevents onCrash from firing', async () => {
+    const calls = [];
+    const child = startBackend(process.execPath, ['-e', 'process.exit(1)'], process.cwd());
+    const listener = armCrashMonitor(child, (code, signal) => calls.push({ code, signal }));
+    disarmCrashMonitor(child, listener);
+    await new Promise((resolve) => child.once('exit', resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(calls, []);
 });

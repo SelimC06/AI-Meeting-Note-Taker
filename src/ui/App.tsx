@@ -4,6 +4,7 @@ import HealthPage from './components/HealthPage';
 import YourActivityPage from './components/YourActivityPage';
 import SettingsPage from './components/SettingsPage';
 import ErrorBoundary from './components/ErrorBoundary';
+import BackendStatusBanner from './components/BackendStatusBanner';
 import { useState } from 'react';
 
 export type MainPage = "dashboard" | "activity" | "health" | "settings";
@@ -16,6 +17,7 @@ function App() {
       <div className="h-[450px] w-[800px] rounded-sm border border-line bg-void overflow-hidden flex flex-col">
         <TitleBar page={page} onChangePage={setPage}/>
         <main className="flex-1 min-h-0 overflow-hidden [-webkit-app-region:no-drag] relative">
+          <BackendStatusBanner />
           <div
             className={
               "absolute inset-0 h-full transition-opacity duration-150 " +

@@ -8,6 +8,11 @@ declare global {
     freeMemBytes: number;
   }
 
+  type BackendStatus =
+    | { state: "restarting"; attempt: number; maxAttempts: number }
+    | { state: "up" }
+    | { state: "failed"; logTail: string };
+
   interface Window {
     windowControls?: {
       minimize: () => void;
@@ -24,6 +29,10 @@ declare global {
     };
     settingsAPI?: {
       chooseFolder: () => Promise<string | null>;
+    };
+    backendAPI?: {
+      onStatus: (callback: (status: BackendStatus) => void) => () => void;
+      restart: () => Promise<void>;
     };
   }
 }
