@@ -2,9 +2,30 @@
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-## Running the backend
+## Running the app
 
-Start the FastAPI backend with:
+First-time setup (once):
+
+```
+npm install
+npm run setup:backend
+```
+
+Then:
+
+```
+npm run build
+npm run dev:electron
+```
+
+Electron automatically starts the Python backend on launch (waiting for it to
+become healthy before showing the window) and stops it when the app quits —
+you no longer need to run the backend manually in a separate terminal.
+
+`npm run setup:backend` creates a `.venv` at the project root and installs
+`requirements.txt` into it. Re-run it any time `requirements.txt` changes.
+
+For debugging the backend in isolation, you can still run it manually with:
 
 ```
 cd backend && python -m app.server

@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
+import { resolveVenvPython, startBackend, stopBackend, waitForHealth, getBackendLogTail } from './backend.js';
 
 let mainWindow = null;
 let railWindow = null;
@@ -202,6 +203,41 @@ ipcMain.handle('app:quit', () => {
     app.quit();
 });
 
-app.whenReady().then(createWindow);
+const BACKEND_PORT = '8000';
+const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+
+app.whenReady().then(async () => {
+    const projectRoot = app.getAppPath();
+    const pythonExe = resolveVenvPython(projectRoot);
+    if (!pythonExe) {
+        dialog.showErrorBox(
+            'Backend not set up',
+            'Run `npm run setup:backend` first, then relaunch the app.'
+        );
+        app.quit();
+        return;
+    }
+
+    const backendCwd = path.join(projectRoot, 'backend');
+    const backendEnv = { ...process.env, PORT: BACKEND_PORT };
+    const backendProcess = startBackend(pythonExe, ['-m', 'app.server'], backendCwd, backendEnv);
+
+    try {
+        await waitForHealth(BACKEND_URL, 15000, backendProcess);
+    } catch (err) {
+        const logTail = getBackendLogTail();
+        const detail = logTail
+            ? `${err?.message ?? err}\n\nBackend output:\n${logTail}`
+            : String(err?.message ?? err);
+        dialog.showErrorBox('Backend failed to start', detail);
+        stopBackend();
+        app.quit();
+        return;
+    }
+
+    createWindow();
+});
+
+app.on('before-quit', () => stopBackend());
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (!mainWindow) createWindow(); });

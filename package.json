@@ -9,7 +9,9 @@
     "dev:electron": "electron .",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:main": "node --test src/electron/*.test.js",
+    "setup:backend": "node scripts/setup-backend.mjs"
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.3.0",
