@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import { resolve } from "path";
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -22,5 +22,10 @@ export default defineConfig({
         rail: resolve(__dirname, "rail.html"),
       },
     }
-  }
+  },
+  test: {
+    environment: "jsdom",
+    setupFiles: ["./src/ui/test-setup.ts"],
+    include: ["src/ui/**/*.test.{ts,tsx}"],
+  },
 })
