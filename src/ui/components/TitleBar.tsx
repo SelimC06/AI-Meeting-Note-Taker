@@ -1,17 +1,6 @@
 import { useState, useEffect } from "react";
 import type { MainPage } from "../App";
 
-declare global {
-  interface Window {
-    windowControls?: {
-      minimize: () => void;
-      close: () => void;
-      toggleRail: () => Promise<boolean>;
-      getRailState: () => Promise<boolean>;
-    };
-  }
-}
-
 interface Props {
   page: MainPage;
   onChangePage: (page: MainPage) => void;

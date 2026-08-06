@@ -1,11 +1,11 @@
 //import React from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import './rail.css';
 import Record from "./components/Record";
 import Pause from "./components/Pause";
 import Play from "./components/Play"
 import ErrorToast from "./components/ErrorToast";
-import { useThreeTrackSegments } from './hooks/useThreeTrackSegments';
+import { useThreeTrackSegments, type ClassifiedError } from './hooks/useThreeTrackSegments';
 
 const BACKEND_URL =
   import.meta.env.VITE_MEETING_API_URL ?? "http://localhost:8000";
@@ -26,9 +26,12 @@ export default function RailApp() {
 
     const isRecording = status === "recording";
     const isPaused = status === "paused";
-    const displayError = recordError ?? processError;
+    const displayError = useMemo<ClassifiedError | null>(
+        () => recordError ?? (processError ? { kind: "generic", message: processError } : null),
+        [recordError, processError]
+    );
 
-    const previousErrorRef = useRef<string | null>(null);
+    const previousErrorRef = useRef<ClassifiedError | null>(null);
     useEffect(() => {
         if (displayError !== null && displayError !== previousErrorRef.current) {
             setToastDismissed(false);
@@ -125,7 +128,7 @@ export default function RailApp() {
                 <Play onClick={handlePlayClick} disabled={!isPaused}/>
 
                 <span
-                    title={isProcessing ? "Processing recording…" : displayError ?? undefined}
+                    title={isProcessing ? "Processing recording…" : displayError?.message ?? undefined}
                     className={
                         "mt-auto h-2.5 w-2.5 rounded-full border border-void transition-colors " +
                         (isProcessing
@@ -138,7 +141,15 @@ export default function RailApp() {
                     }
                 />
             </div>
-            <ErrorToast message={toastDismissed ? null : displayError ?? null} onDismiss={handleDismissError} />
+            <ErrorToast
+                message={toastDismissed ? null : displayError?.message ?? null}
+                onDismiss={handleDismissError}
+                action={
+                    !toastDismissed && displayError?.kind === "permission-denied"
+                        ? { label: "open privacy settings", onClick: () => window.settingsAPI?.openPrivacySettings?.("microphone") }
+                        : undefined
+                }
+            />
         </div>
     )
 }

@@ -105,6 +105,43 @@ the chat/summarize features.
 *building* the installer (or running the backend directly in dev mode) — they
 are not needed by someone just installing and running the packaged app.
 
+### Publishing updates
+
+The app checks `https://updates.example.invalid/meeting-note-taker` for new
+versions on startup (see `src/electron/updater.js`) — **this is a
+placeholder and must be replaced** with a real public URL (e.g. a
+Cloudflare R2 or S3 bucket you control) before shipping a release.
+
+There are two separate things that both need to point at that real host,
+and both must be correct — editing only one is not sufficient:
+
+- **`build.publish.url` in `package.json`** — where
+  `electron-builder --publish always` uploads the installer and the
+  `latest.yml` manifest.
+- **The runtime feed URL the app actually checks** — controlled by
+  `getUpdateFeedUrl()` in `src/electron/updater.js` (its `DEFAULT_FEED_URL`
+  constant, or the `UPDATE_FEED_URL` environment variable at runtime). This
+  is *not* read from `package.json`. `armAutoUpdate` calls
+  `updater.setFeedURL({ provider: 'generic', url: getUpdateFeedUrl() })`
+  unconditionally, which overrides whatever `app-update.yml`
+  electron-builder baked in from `build.publish.url`.
+
+Editing only `build.publish.url` and cutting a release would ship a build
+that still checks the placeholder host at runtime. Before shipping, make
+sure both `DEFAULT_FEED_URL` in `updater.js` and `build.publish.url` in
+`package.json` point at the same real host (or set `UPDATE_FEED_URL` in the
+packaged app's environment to override the runtime value).
+
+Publishing a new version is a manual step, not part of `npm run dist`:
+
+```bash
+electron-builder --publish always
+```
+
+This uploads the installer and a `latest.yml` manifest to the configured
+`publish.url`. Bump `"version"` in `package.json` first — electron-updater
+compares semver against `latest.yml` to decide whether an update exists.
+
 ## Scripts
 
 | Script | Purpose |

@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import SettingsPage from "./SettingsPage";
 import {
   getOllamaModels,
@@ -39,6 +39,16 @@ beforeEach(() => {
   });
   Object.defineProperty(window, "settingsAPI", {
     value: { chooseFolder: vi.fn() },
+    writable: true,
+    configurable: true,
+  });
+  Object.defineProperty(window, "windowControls", {
+    value: { getVersion: vi.fn().mockResolvedValue("1.0.0") },
+    writable: true,
+    configurable: true,
+  });
+  Object.defineProperty(window, "updaterAPI", {
+    value: { onStatus: vi.fn(() => () => {}), install: vi.fn().mockResolvedValue(undefined) },
     writable: true,
     configurable: true,
   });
@@ -137,4 +147,63 @@ it("shows the local-first privacy statement", async () => {
     await screen.findByText(/never uploaded anywhere/i)
   ).toBeInTheDocument();
   expect(screen.getByText(/permanently deleted after 30 days/i)).toBeInTheDocument();
+});
+
+it("shows the current app version and an idle message by default", async () => {
+  render(<SettingsPage active={true} />);
+  await waitFor(() => {
+    expect(screen.getByText(/1\.0\.0/)).toBeInTheDocument();
+  });
+  expect(screen.getByText("You're on the latest version")).toBeInTheDocument();
+});
+
+it("shows a downloading message with percent when an update is downloading", async () => {
+  let pushStatus: (status: unknown) => void = () => {};
+  Object.defineProperty(window, "updaterAPI", {
+    value: {
+      onStatus: vi.fn((cb) => {
+        pushStatus = cb;
+        return () => {};
+      }),
+      install: vi.fn(),
+    },
+    writable: true,
+    configurable: true,
+  });
+
+  render(<SettingsPage active={true} />);
+  await waitFor(() => expect(screen.getByText(/1\.0\.0/)).toBeInTheDocument());
+
+  act(() => {
+    pushStatus({ state: "downloading", percent: 37 });
+  });
+
+  expect(screen.getByText("Downloading update... 37%")).toBeInTheDocument();
+});
+
+it("shows a restart button when an update is ready and calls install on click", async () => {
+  let pushStatus: (status: unknown) => void = () => {};
+  const install = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(window, "updaterAPI", {
+    value: {
+      onStatus: vi.fn((cb) => {
+        pushStatus = cb;
+        return () => {};
+      }),
+      install,
+    },
+    writable: true,
+    configurable: true,
+  });
+
+  render(<SettingsPage active={true} />);
+  await waitFor(() => expect(screen.getByText(/1\.0\.0/)).toBeInTheDocument());
+
+  act(() => {
+    pushStatus({ state: "ready", version: "1.1.0" });
+  });
+
+  const restartButton = screen.getByRole("button", { name: "restart to update" });
+  fireEvent.click(restartButton);
+  expect(install).toHaveBeenCalledTimes(1);
 });

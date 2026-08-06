@@ -6,6 +6,14 @@ contextBridge.exposeInMainWorld('windowControls', {
   toggleRail: () => ipcRenderer.invoke('rail:toggle'),
 
   getRailState: () => ipcRenderer.invoke('rail:getState'),
+  getVersion: async () => {
+    try {
+      return await ipcRenderer.invoke('app:getVersion');
+    } catch (e) {
+      console.warn("[preload] getVersion failed:", e);
+      return null;
+    }
+  },
 });
 
 contextBridge.exposeInMainWorld("electronAPI", {
@@ -52,6 +60,14 @@ contextBridge.exposeInMainWorld("settingsAPI", {
       return null;
     }
   },
+
+  openPrivacySettings: async (kind) => {
+    try {
+      await ipcRenderer.invoke('shell:openPrivacySettings', kind);
+    } catch (e) {
+      console.warn("[preload] openPrivacySettings failed:", e);
+    }
+  },
 });
 
 contextBridge.exposeInMainWorld("backendAPI", {
@@ -66,6 +82,31 @@ contextBridge.exposeInMainWorld("backendAPI", {
       await ipcRenderer.invoke('backend:restart');
     } catch (e) {
       console.warn("[preload] backend restart failed:", e);
+    }
+  },
+});
+
+contextBridge.exposeInMainWorld("updaterAPI", {
+  onStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('updater:status', listener);
+    return () => ipcRenderer.removeListener('updater:status', listener);
+  },
+
+  install: async () => {
+    try {
+      await ipcRenderer.invoke('updater:install');
+    } catch (e) {
+      console.warn("[preload] updater install failed:", e);
+    }
+  },
+
+  getStatus: async () => {
+    try {
+      return await ipcRenderer.invoke('updater:getStatus');
+    } catch (e) {
+      console.warn("[preload] updater getStatus failed:", e);
+      return { state: "idle" };
     }
   },
 });

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import RailApp from "./RailApp";
 import { useThreeTrackSegments } from "./hooks/useThreeTrackSegments";
 
@@ -25,7 +25,7 @@ function mockHook(overrides: Partial<ReturnType<typeof useThreeTrackSegments>> =
 }
 
 it("shows a persistent red dot with the hook's error as a tooltip", () => {
-  mockHook({ error: "Screen or microphone access denied — check your OS privacy settings." });
+  mockHook({ error: { kind: "permission-denied", message: "Screen or microphone access denied — check your OS privacy settings." } });
 
   const { container } = render(<RailApp />);
   const dot = container.querySelector("span[title]") as HTMLElement;
@@ -39,7 +39,7 @@ it("shows a persistent red dot with the hook's error as a tooltip", () => {
 
 it("does not auto-clear the error dot after 2 seconds", async () => {
   vi.useFakeTimers();
-  mockHook({ error: "Recording failed: no codec available" });
+  mockHook({ error: { kind: "generic", message: "Recording failed: no codec available" } });
 
   const { container } = render(<RailApp />);
   await vi.advanceTimersByTimeAsync(3000);
@@ -155,7 +155,7 @@ it("shows a persistent tooltip when stop() itself rejects, instead of silently r
 
 it("renders an ErrorToast with the display error and hides only the toast (not the red dot) on dismiss", async () => {
   const clearError = vi.fn();
-  mockHook({ error: "Screen or microphone access denied — check your OS privacy settings.", clearError });
+  mockHook({ error: { kind: "permission-denied", message: "Screen or microphone access denied — check your OS privacy settings." }, clearError });
 
   const { getByText, getByRole, container, queryByText } = render(<RailApp />);
   expect(
@@ -176,4 +176,79 @@ it("renders an ErrorToast with the display error and hides only the toast (not t
     "Screen or microphone access denied — check your OS privacy settings."
   );
   expect(dot.className).toContain("bg-red-500");
+});
+
+it("does not resurrect the toast after dismiss when the error came from a failed /process request", async () => {
+  vi.useFakeTimers();
+  const record = vi.fn().mockResolvedValue(undefined);
+  const stop = vi.fn().mockResolvedValue({ screen: new Blob(["x"]) });
+  mockHook({ status: "recording", record, stop, error: null });
+
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: () => Promise.resolve({ detail: "boom" }),
+      text: () => Promise.resolve('{"detail":"boom"}'),
+    })
+  );
+  const expandRail = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("electronAPI", { expandRail });
+
+  const { getByText, getByRole, queryByText, container } = render(<RailApp />);
+  const recordButton = container.querySelectorAll("button")[0];
+
+  await act(async () => {
+    fireEvent.click(recordButton);
+    // Flush the mocked fetch's promise microtasks (fake timers don't affect
+    // those), then let the just-mounted ErrorToast's own effect (which calls
+    // expandRail(true) and schedules its 6s timer) run.
+    await Promise.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  expect(getByText("boom")).toBeInTheDocument();
+
+  const expandCallsAfterError = expandRail.mock.calls.length;
+
+  fireEvent.click(getByRole("button", { name: "close" }));
+
+  // The toast message is gone immediately after dismiss...
+  expect(queryByText("boom")).toBeNull();
+
+  // ...and it must not reappear once the (identity-stable) 6s auto-dismiss
+  // timer in ErrorToast fires again, nor should expandRail be re-triggered.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(7000);
+  });
+
+  expect(queryByText("boom")).toBeNull();
+  expect(expandRail.mock.calls.length).toBe(expandCallsAfterError + 1); // only the collapse call from dismiss
+
+  vi.useRealTimers();
+});
+
+it("shows an 'open privacy settings' action on a permission-denied error and calls settingsAPI on click", () => {
+  const openPrivacySettings = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("settingsAPI", { openPrivacySettings });
+  mockHook({
+    error: {
+      kind: "permission-denied",
+      message: "Screen or microphone access denied — check your OS privacy settings.",
+    },
+  });
+
+  const { getByRole } = render(<RailApp />);
+  fireEvent.click(getByRole("button", { name: "open privacy settings" }));
+
+  expect(openPrivacySettings).toHaveBeenCalledWith("microphone");
+});
+
+it("does not show the 'open privacy settings' action for a generic error", () => {
+  mockHook({ error: { kind: "generic", message: "Recording failed: no codec available" } });
+
+  const { queryByRole } = render(<RailApp />);
+  expect(queryByRole("button", { name: "open privacy settings" })).toBeNull();
 });

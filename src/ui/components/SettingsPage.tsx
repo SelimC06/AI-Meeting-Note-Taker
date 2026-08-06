@@ -10,6 +10,7 @@ import {
   type Settings,
   type StorageUsage,
 } from "../api";
+import { useUpdaterStatus } from "../hooks/useUpdaterStatus";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -41,6 +42,13 @@ export default function SettingsPage({ active }: { active: boolean }) {
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
   const [emptyingTrash, setEmptyingTrash] = useState(false);
+
+  const updaterStatus = useUpdaterStatus();
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    window.windowControls?.getVersion?.().then(setAppVersion).catch(() => setAppVersion(null));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -303,6 +311,43 @@ export default function SettingsPage({ active }: { active: boolean }) {
               <p className="text-xs text-red-400">{ollamaSaveError}</p>
             )}
           </>
+        )}
+      </div>
+
+      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
+        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+          updates
+        </h2>
+        <p className="text-xs text-phosphor">
+          {appVersion ? `version ${appVersion}` : "loading version..."}
+        </p>
+        {updaterStatus.state === "idle" && (
+          <p className="text-xs text-dim">You're on the latest version</p>
+        )}
+        {updaterStatus.state === "checking" && (
+          <p className="text-xs text-dim">Checking for updates...</p>
+        )}
+        {updaterStatus.state === "available" && (
+          <p className="text-xs text-dim">Update {updaterStatus.version} found — downloading...</p>
+        )}
+        {updaterStatus.state === "downloading" && (
+          <p className="text-xs text-dim">
+            Downloading update... {Math.round(updaterStatus.percent)}%
+          </p>
+        )}
+        {updaterStatus.state === "ready" && (
+          <div className="flex items-center gap-2">
+            <p className="text-xs text-phosphor">Update {updaterStatus.version} ready</p>
+            <button
+              onClick={() => window.updaterAPI?.install?.()}
+              className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus:ring-2 focus:ring-signal"
+            >
+              restart to update
+            </button>
+          </div>
+        )}
+        {updaterStatus.state === "error" && (
+          <p className="text-xs text-dim">Update check failed: {updaterStatus.message}</p>
         )}
       </div>
     </div>

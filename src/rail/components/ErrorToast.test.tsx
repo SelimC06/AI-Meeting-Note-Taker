@@ -55,3 +55,40 @@ it("does not throw when window.electronAPI is undefined", () => {
     render(<ErrorToast message="boom" onDismiss={vi.fn()} />)
   ).not.toThrow();
 });
+
+it("renders an action button when action is provided", () => {
+  const onClick = vi.fn();
+  const { getByRole } = render(
+    <ErrorToast
+      message="Screen or microphone access denied — check your OS privacy settings."
+      onDismiss={vi.fn()}
+      action={{ label: "open privacy settings", onClick }}
+    />
+  );
+  const actionButton = getByRole("button", { name: "open privacy settings" });
+  expect(actionButton).toBeInTheDocument();
+  fireEvent.click(actionButton);
+  expect(onClick).toHaveBeenCalledTimes(1);
+});
+
+it("does not render an action button when action is omitted", () => {
+  const { queryByRole } = render(
+    <ErrorToast message="boom" onDismiss={vi.fn()} />
+  );
+  expect(queryByRole("button", { name: "open privacy settings" })).toBeNull();
+});
+
+it("clicking the action button does not also dismiss the toast", () => {
+  const onDismiss = vi.fn();
+  const onClick = vi.fn();
+  const { getByRole } = render(
+    <ErrorToast
+      message="boom"
+      onDismiss={onDismiss}
+      action={{ label: "open privacy settings", onClick }}
+    />
+  );
+  fireEvent.click(getByRole("button", { name: "open privacy settings" }));
+  expect(onClick).toHaveBeenCalledTimes(1);
+  expect(onDismiss).not.toHaveBeenCalled();
+});

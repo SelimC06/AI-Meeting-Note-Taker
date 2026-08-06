@@ -23,9 +23,10 @@ it("surfaces a permission-denied message when the browser rejects with NotAllowe
   });
 
   await waitFor(() => {
-    expect(result.current.error).toBe(
-      "Screen or microphone access denied — check your OS privacy settings."
-    );
+    expect(result.current.error).toEqual({
+      kind: "permission-denied",
+      message: "Screen or microphone access denied — check your OS privacy settings.",
+    });
   });
   expect(result.current.status).toBe("idle");
 });
@@ -39,7 +40,10 @@ it("surfaces a generic message for non-permission errors", async () => {
   });
 
   await waitFor(() => {
-    expect(result.current.error).toBe("Recording failed: no codec available");
+    expect(result.current.error).toEqual({
+      kind: "generic",
+      message: "Recording failed: no codec available",
+    });
   });
 });
 
@@ -51,7 +55,10 @@ it("clears a previous error when a new record() call starts", async () => {
     await result.current.record();
   });
   await waitFor(() => {
-    expect(result.current.error).toBe("Recording failed: first failure");
+    expect(result.current.error).toEqual({
+      kind: "generic",
+      message: "Recording failed: first failure",
+    });
   });
 
   vi.mocked(getSeparateCapture).mockResolvedValueOnce({
@@ -75,7 +82,10 @@ it("clearError resets the error to null without affecting status", async () => {
     await result.current.record();
   });
   await waitFor(() => {
-    expect(result.current.error).toBe("Recording failed: boom");
+    expect(result.current.error).toEqual({
+      kind: "generic",
+      message: "Recording failed: boom",
+    });
   });
 
   act(() => {

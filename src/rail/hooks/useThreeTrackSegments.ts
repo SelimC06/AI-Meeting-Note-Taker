@@ -19,20 +19,28 @@ export type Combined = {
   micAudio?: Blob;
 };
 
-function classifyRecordError(err: unknown): string {
+export type ClassifiedError = {
+  kind: "permission-denied" | "generic";
+  message: string;
+};
+
+function classifyRecordError(err: unknown): ClassifiedError {
   const name = (err as { name?: string } | null)?.name;
   if (name === "NotAllowedError" || name === "PermissionDeniedError") {
-    return "Screen or microphone access denied — check your OS privacy settings.";
+    return {
+      kind: "permission-denied",
+      message: "Screen or microphone access denied — check your OS privacy settings.",
+    };
   }
   const message = err instanceof Error ? err.message : String(err);
-  return `Recording failed: ${message}`;
+  return { kind: "generic", message: `Recording failed: ${message}` };
 }
 
 export function useThreeTrackSegments() {
   const micOnDataRef = useRef<((b: Blob) => void) | null>(null);
 
   const [status, setStatus] = useState<"idle" | "recording" | "paused">("idle");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ClassifiedError | null>(null);
   
 
   const streamsRef = useRef<CaptureStreams | null>(null);

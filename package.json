@@ -1,7 +1,7 @@
 {
   "name": "meeting-note-taker",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "main": "src/electron/main.js",
   "scripts": {
@@ -48,11 +48,16 @@
       "perMachine": false,
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "https://updates.example.invalid/meeting-note-taker"
     }
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@tailwindcss/vite": "^4.1.16",
+    "electron-updater": "^6.8.9",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "tailwindcss": "^4.1.16"

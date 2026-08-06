@@ -5,6 +5,7 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import { resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor } from './backend.js';
 import { attemptRecovery, isRecovering } from './backendRecovery.js';
+import { armAutoUpdate, getLastStatus, installUpdate } from './updater.js';
 
 let mainWindow = null;
 let railWindow = null;
@@ -155,6 +156,11 @@ ipcMain.handle('dialog:chooseFolder', async () => {
     return result.filePaths[0];
 });
 
+ipcMain.handle('shell:openPrivacySettings', (_event, kind) => {
+    const page = kind === 'camera' ? 'ms-settings:privacy-webcam' : 'ms-settings:privacy-microphone';
+    shell.openExternal(page).catch(() => {});
+});
+
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -282,7 +288,13 @@ app.whenReady().then(async () => {
     });
 
     createWindow();
+    armAutoUpdate(mainWindow);
 });
+
+ipcMain.handle('updater:install', () => installUpdate());
+ipcMain.handle('updater:getStatus', () => getLastStatus());
+
+ipcMain.handle('app:getVersion', () => app.getVersion());
 
 ipcMain.handle('backend:restart', async () => {
     if (!recoveryConfig || isRecovering()) return;
