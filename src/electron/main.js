@@ -6,6 +6,9 @@ import { fileURLToPath } from 'url';
 import { resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, ensurePortFree } from './backend.js';
 import { attemptRecovery, isRecovering } from './backendRecovery.js';
 import { armAutoUpdate, getLastStatus, installUpdate } from './updater.js';
+import { computeRailBounds } from './railGeometry.js';
+
+let railErrorVisible = false;
 
 let mainWindow = null;
 let railWindow = null;
@@ -27,11 +30,6 @@ if (!gotSingleInstanceLock) {
     });
 }
 
-const RAIL_WIDTH = 72;
-const RAIL_HEIGHT = 300;
-const RAIL_EXPANDED_WIDTH = 300;
-
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
@@ -52,22 +50,17 @@ function resolveRailFile() {
     throw new Error(`rail.html not found at ${prod} - run "npm run build" first`);
 }
 
+let lastWorkArea = null;
+
 function positionRail(relativeTo) {
   const target = relativeTo || mainWindow;
   if (!railWindow || !target) return;
 
   const b = target.getBounds();
   const display = screen.getDisplayNearestPoint({ x: b.x, y: b.y });
-  const wa = display.workArea; // excludes taskbar
+  lastWorkArea = display.workArea; // excludes taskbar
 
-  const INSET = 8; // small gap from absolute left
-
-  railWindow.setBounds({
-    x: wa.x + INSET,
-    y: Math.round(wa.y + (wa.height - RAIL_HEIGHT) / 2),
-    width: RAIL_WIDTH,
-    height: RAIL_HEIGHT,
-  });
+  railWindow.setBounds(computeRailBounds(lastWorkArea, { errorVisible: railErrorVisible }));
 }
 
 function createRailWindow() {
@@ -127,18 +120,16 @@ function hideRail() {
     if (railWindow && !railWindow.isDestroyed()) {
         railWindow.destroy();
         railWindow = null;
+        railErrorVisible = false;
     }
     mainWindow?.webContents.send('rail:getState', false);
     return false;
 }
 
-ipcMain.handle('rail:setExpanded', (_event, expanded) => {
-    if (!railWindow || railWindow.isDestroyed()) return;
-    const bounds = railWindow.getBounds();
-    railWindow.setBounds({
-        ...bounds,
-        width: expanded ? RAIL_EXPANDED_WIDTH : RAIL_WIDTH,
-    });
+ipcMain.handle('rail:setErrorVisible', (_event, visible) => {
+    railErrorVisible = !!visible;
+    if (!railWindow || railWindow.isDestroyed() || !lastWorkArea) return;
+    railWindow.setBounds(computeRailBounds(lastWorkArea, { errorVisible: railErrorVisible }));
 });
 
 ipcMain.handle('rail:toggle', () => {

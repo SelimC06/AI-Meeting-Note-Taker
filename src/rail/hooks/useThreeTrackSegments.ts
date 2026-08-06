@@ -41,7 +41,8 @@ export function useThreeTrackSegments() {
 
   const [status, setStatus] = useState<"idle" | "recording" | "paused">("idle");
   const [error, setError] = useState<ClassifiedError | null>(null);
-  
+  const [micStream, setMicStream] = useState<MediaStream | null>(null);
+
 
   const streamsRef = useRef<CaptureStreams | null>(null);
   const recRef = useRef<{
@@ -66,6 +67,7 @@ export function useThreeTrackSegments() {
       // Get streams (Electron: screen+system+mic; Browser: screen+mic, no system)
       const streams = await getSeparateCapture();
       streamsRef.current = streams;
+      setMicStream(streams.mic ?? null);
 
       const screenRec = streams.screen ? getVideoRecorder(streams.screen) : undefined;
       const systemRec = streams.system ? getAudioRecorder(streams.system) : undefined;
@@ -90,6 +92,7 @@ export function useThreeTrackSegments() {
       console.error("record() failed", e);
       setError(classifyRecordError(e));
       setStatus("idle");
+      setMicStream(null);
     }
 
   };
@@ -148,6 +151,7 @@ export function useThreeTrackSegments() {
     streamsRef.current = null;
     segsRef.current = { screen: [], systemAudio: [], micAudio: [] };
     setStatus("idle");
+    setMicStream(null);
 
     return combined;
   };
@@ -156,5 +160,5 @@ export function useThreeTrackSegments() {
     setError(null);
   }, []);
 
-  return { status, record, pause, resume, stop, error, clearError };
+  return { status, record, pause, resume, stop, error, clearError, micStream };
 }

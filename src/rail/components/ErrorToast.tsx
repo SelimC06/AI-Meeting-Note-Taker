@@ -11,11 +11,11 @@ const AUTO_DISMISS_MS = 6000;
 export default function ErrorToast({ message, onDismiss, action }: ErrorToastProps) {
   useEffect(() => {
     if (message === null) {
-      window.electronAPI?.expandRail(false);
+      window.electronAPI?.setRailErrorVisible(false);
       return;
     }
 
-    window.electronAPI?.expandRail(true);
+    window.electronAPI?.setRailErrorVisible(true);
 
     const timer = setTimeout(onDismiss, AUTO_DISMISS_MS);
     return () => clearTimeout(timer);

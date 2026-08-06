@@ -1,22 +1,26 @@
-//import React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import './rail.css';
 import Record from "./components/Record";
-import Pause from "./components/Pause";
-import Play from "./components/Play"
+import PauseResume from "./components/PauseResume";
+import LevelMeter from "./components/LevelMeter";
 import ErrorToast from "./components/ErrorToast";
 import { useThreeTrackSegments, type ClassifiedError } from './hooks/useThreeTrackSegments';
+import { useElapsedTime } from './hooks/useElapsedTime';
+import { useMicLevel } from './hooks/useMicLevel';
 
 const BACKEND_URL =
   import.meta.env.VITE_MEETING_API_URL ?? "http://localhost:8000";
 
 export default function RailApp() {
-    const { status, record, pause, resume, stop, error: recordError } = useThreeTrackSegments();
+    const { status, record, pause, resume, stop, error: recordError, micStream } = useThreeTrackSegments();
 
     const [resultFlash, setResultFlash] = useState<"success" | null>(null);
     const [isProcessing, setIsProcessing] = useState(false);
     const [processError, setProcessError] = useState<string | null>(null);
     const [toastDismissed, setToastDismissed] = useState(false);
+
+    const elapsed = useElapsedTime(status);
+    const levels = useMicLevel(micStream);
 
     useEffect(() => {
         if (resultFlash === null) return;
@@ -118,19 +122,30 @@ export default function RailApp() {
     }, []);
 
     return (
-        <div className="h-full w-full flex items-center gap-2">
-            <div className="h-full w-[72px] flex-none overflow-hidden rounded-[999px] bg-void border border-signal/40 flex flex-col items-center gap-3 py-4 select-none">
+        <div className="flex h-full w-full flex-col items-center gap-2">
+            <div className="flex h-10 w-full flex-none items-center gap-3 rounded-full border border-signal/40 bg-void px-3 select-none">
                 <Record onClick={handleRecordClick} isRecording={isRecording} disabled={isProcessing}/>
 
-                <div className="h-px w-[42px] bg-line" />
+                <span
+                    aria-label="Elapsed recording time"
+                    role="timer"
+                    className="font-mono text-[11px] tabular-nums text-phosphor"
+                >{elapsed}</span>
 
-                <Pause onClick={handlePauseClick} disabled={!isRecording}/>
-                <Play onClick={handlePlayClick} disabled={!isPaused}/>
+                <LevelMeter levels={levels} active={isRecording} />
+
+                <div className="h-4 w-px flex-none bg-line" />
+
+                <PauseResume
+                    status={isPaused ? "paused" : "recording"}
+                    onClick={isPaused ? handlePlayClick : handlePauseClick}
+                    disabled={!isRecording && !isPaused}
+                />
 
                 <span
                     title={isProcessing ? "Processing recording…" : displayError?.message ?? undefined}
                     className={
-                        "mt-auto h-2.5 w-2.5 rounded-full border border-void transition-colors " +
+                        "ml-auto h-2.5 w-2.5 flex-none rounded-full border border-void transition-colors " +
                         (isProcessing
                             ? "bg-amber-400 animate-pulse"
                             : displayError

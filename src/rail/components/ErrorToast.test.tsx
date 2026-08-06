@@ -39,15 +39,15 @@ it("auto-dismisses after 6 seconds", () => {
   expect(onDismiss).toHaveBeenCalledTimes(1);
 });
 
-it("calls electronAPI.expandRail(true) when a message appears and expandRail(false) when it clears", () => {
-  const expandRail = vi.fn().mockResolvedValue(undefined);
-  vi.stubGlobal("electronAPI", { expandRail });
+it("calls electronAPI.setRailErrorVisible(true) when a message appears and (false) when it clears", () => {
+  const setRailErrorVisible = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("electronAPI", { setRailErrorVisible });
 
   const { rerender } = render(<ErrorToast message="boom" onDismiss={vi.fn()} />);
-  expect(expandRail).toHaveBeenCalledWith(true);
+  expect(setRailErrorVisible).toHaveBeenCalledWith(true);
 
   rerender(<ErrorToast message={null} onDismiss={vi.fn()} />);
-  expect(expandRail).toHaveBeenCalledWith(false);
+  expect(setRailErrorVisible).toHaveBeenCalledWith(false);
 });
 
 it("does not throw when window.electronAPI is undefined", () => {

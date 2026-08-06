@@ -3,6 +3,14 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { useThreeTrackSegments } from "./useThreeTrackSegments";
 import { getSeparateCapture } from "../capture/capture";
 
+// jsdom (this project's test environment) does not implement MediaStream.
+// Provide a minimal stub so tests can construct one; production code never
+// touches this since real MediaStream instances come from the browser/Electron.
+if (typeof MediaStream === "undefined") {
+  (globalThis as unknown as { MediaStream: typeof MediaStream }).MediaStream =
+    class {} as unknown as typeof MediaStream;
+}
+
 vi.mock("../capture/capture");
 vi.mock("../capture/recorder", () => ({
   getVideoRecorder: vi.fn(() => ({ ondata: vi.fn(), start: vi.fn(), pause: vi.fn(), resume: vi.fn(), stop: vi.fn() })),
@@ -94,4 +102,25 @@ it("clearError resets the error to null without affecting status", async () => {
 
   expect(result.current.error).toBeNull();
   expect(result.current.status).toBe("idle");
+});
+
+it("exposes the mic MediaStream while recording and clears it on stop", async () => {
+  const micStream = new MediaStream();
+  vi.mocked(getSeparateCapture).mockResolvedValueOnce({
+    mic: micStream,
+    stopAll: vi.fn(),
+  });
+
+  const { result } = renderHook(() => useThreeTrackSegments());
+  expect(result.current.micStream).toBeNull();
+
+  await act(async () => {
+    await result.current.record();
+  });
+  expect(result.current.micStream).toBe(micStream);
+
+  await act(async () => {
+    await result.current.stop();
+  });
+  expect(result.current.micStream).toBeNull();
 });

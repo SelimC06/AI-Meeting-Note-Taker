@@ -31,11 +31,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return list[0]?.id ?? null;
   },
 
-  expandRail: async (expanded) => {
+  setRailErrorVisible: async (visible) => {
     try {
-      await ipcRenderer.invoke("rail:setExpanded", expanded);
+      await ipcRenderer.invoke("rail:setErrorVisible", visible);
     } catch (e) {
-      console.warn("[preload] expandRail failed:", e);
+      console.warn("[preload] setRailErrorVisible failed:", e);
     }
   },
 });

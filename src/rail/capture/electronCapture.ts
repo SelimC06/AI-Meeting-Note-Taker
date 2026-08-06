@@ -1,14 +1,6 @@
 // src/capture/electronCapture.ts
 
-declare global {
-  interface Window {
-    electronAPI?: {
-      listCaptureSources: (types?: string[]) => Promise<{ id: string; name: string }[]>;
-      pickPrimaryScreenId: () => Promise<string | null>;
-      expandRail: (expanded: boolean) => Promise<void>;
-    };
-  }
-}
+// Window.electronAPI is declared globally in src/ui/types/electron.d.ts.
 
 // Chromium/Electron's `mandatory` desktop-capture constraints aren't part of
 // the standard MediaTrackConstraints type in lib.dom.d.ts.

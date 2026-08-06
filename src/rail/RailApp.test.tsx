@@ -5,6 +5,15 @@ import { useThreeTrackSegments } from "./hooks/useThreeTrackSegments";
 
 vi.mock("./hooks/useThreeTrackSegments");
 
+// jsdom (this project's test environment) does not implement MediaStream.
+// Provide a minimal stub so this file can construct one; production code
+// never touches this since real MediaStream instances come from the
+// browser/Electron.
+if (typeof MediaStream === "undefined") {
+  (globalThis as unknown as { MediaStream: typeof MediaStream }).MediaStream =
+    class {} as unknown as typeof MediaStream;
+}
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -20,6 +29,7 @@ function mockHook(overrides: Partial<ReturnType<typeof useThreeTrackSegments>> =
     stop: vi.fn().mockResolvedValue({}),
     error: null,
     clearError: vi.fn(),
+    micStream: null,
     ...overrides,
   });
 }
@@ -193,8 +203,8 @@ it("does not resurrect the toast after dismiss when the error came from a failed
       text: () => Promise.resolve('{"detail":"boom"}'),
     })
   );
-  const expandRail = vi.fn().mockResolvedValue(undefined);
-  vi.stubGlobal("electronAPI", { expandRail });
+  const setRailErrorVisible = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("electronAPI", { setRailErrorVisible });
 
   const { getByText, getByRole, queryByText, container } = render(<RailApp />);
   const recordButton = container.querySelectorAll("button")[0];
@@ -211,7 +221,7 @@ it("does not resurrect the toast after dismiss when the error came from a failed
 
   expect(getByText("boom")).toBeInTheDocument();
 
-  const expandCallsAfterError = expandRail.mock.calls.length;
+  const expandCallsAfterError = setRailErrorVisible.mock.calls.length;
 
   fireEvent.click(getByRole("button", { name: "close" }));
 
@@ -225,7 +235,7 @@ it("does not resurrect the toast after dismiss when the error came from a failed
   });
 
   expect(queryByText("boom")).toBeNull();
-  expect(expandRail.mock.calls.length).toBe(expandCallsAfterError + 1); // only the collapse call from dismiss
+  expect(setRailErrorVisible.mock.calls.length).toBe(expandCallsAfterError + 1); // only the collapse call from dismiss
 
   vi.useRealTimers();
 });
@@ -251,4 +261,41 @@ it("does not show the 'open privacy settings' action for a generic error", () =>
 
   const { queryByRole } = render(<RailApp />);
   expect(queryByRole("button", { name: "open privacy settings" })).toBeNull();
+});
+
+it("calls pause (not resume) when the pause/resume button is clicked while recording", () => {
+  const pause = vi.fn().mockResolvedValue(undefined);
+  const resume = vi.fn().mockResolvedValue(undefined);
+  mockHook({ status: "recording", pause, resume });
+
+  const { getByLabelText } = render(<RailApp />);
+  fireEvent.click(getByLabelText("Pause recording"));
+
+  expect(pause).toHaveBeenCalledTimes(1);
+  expect(resume).not.toHaveBeenCalled();
+});
+
+it("calls resume (not pause) when the pause/resume button is clicked while paused", () => {
+  const pause = vi.fn().mockResolvedValue(undefined);
+  const resume = vi.fn().mockResolvedValue(undefined);
+  mockHook({ status: "paused", pause, resume });
+
+  const { getByLabelText } = render(<RailApp />);
+  fireEvent.click(getByLabelText("Resume recording"));
+
+  expect(resume).toHaveBeenCalledTimes(1);
+  expect(pause).not.toHaveBeenCalled();
+});
+
+it("disables the pause/resume button when idle", () => {
+  mockHook({ status: "idle" });
+
+  const { getByLabelText } = render(<RailApp />);
+  expect(getByLabelText("Pause recording")).toBeDisabled();
+});
+
+it("renders without throwing when given a non-null micStream (RailApp -> useMicLevel integration)", () => {
+  mockHook({ status: "recording", micStream: new MediaStream() });
+
+  expect(() => render(<RailApp />)).not.toThrow();
 });
