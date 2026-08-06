@@ -40,6 +40,19 @@ Sessions moved to trash are permanently deleted after 30 days
 (`purge_expired_trash` in `backend/app/sessions_store.py`). The same summary
 is shown in-app under Settings → Privacy.
 
+## Security model
+
+The backend has no authentication on its API. This is intentional: the
+server binds to `127.0.0.1` only (see `main()` in `backend/app/server.py`)
+and is designed to run entirely locally for a single user, the same way most
+local dev servers and tools like VS Code's local server work. Because there's
+no token check, any other process running on the same machine could in
+principle reach `127.0.0.1:8000` and read, export, or delete session data, or
+trigger recording/chat requests. This is an accepted tradeoff for a
+local-only tool — **the app should never be exposed to a network** (don't
+change the bind host to `0.0.0.0`, port-forward it, or put it behind a
+reverse proxy without adding real authentication first).
+
 ## Getting started (development)
 
 First-time setup (once):
