@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { logCrash, attemptRecovery, isRecovering } from './backendRecovery.js';
 import net from 'node:net';
+import { spawn } from 'node:child_process';
 import { stopBackend } from './backend.js';
 
 function makeTmpLogDir() {
@@ -261,6 +262,79 @@ test('attemptRecovery ignores overlapping calls while a recovery is in progress'
         const crashLog = fs.readFileSync(path.join(logDir, 'backend-crashes.log'), 'utf8').trim();
         assert.equal(crashLog.split('\n').length, 1);
     } finally {
+        stopBackend();
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});
+
+const ZOMBIE_HEALTH_SCRIPT = `
+const http = require('http');
+const server = http.createServer((req, res) => {
+    if (req.url === '/health') { res.writeHead(200); res.end('{"ok":true,"zombie":true}'); }
+    else { res.writeHead(404); res.end(); }
+});
+server.listen(Number(process.env.SDD_PORT), '127.0.0.1', () => console.log('zombie-listening'));
+`;
+
+const REAL_BACKEND_SCRIPT = `
+const http = require('http');
+const server = http.createServer((req, res) => {
+    if (req.url === '/health') { res.writeHead(200); res.end('{"ok":true}'); }
+    else { res.writeHead(404); res.end(); }
+});
+server.on('error', (err) => { console.error('bind failed: ' + err.message); process.exit(1); });
+server.listen(Number(process.env.SDD_PORT), '127.0.0.1');
+`;
+
+test('attemptRecovery clears a stale orphaned process squatting on the port before spawning', async () => {
+    const port = await findFreePort();
+    const logDir = makeTmpLogDir();
+    const win = makeFakeWindow();
+    // Spawned directly, not through startBackend — simulates a backend process
+    // orphaned from an earlier, unrelated app launch that never released the port.
+    const zombie = spawn(process.execPath, ['-e', ZOMBIE_HEALTH_SCRIPT], {
+        env: { ...process.env, SDD_PORT: String(port) },
+    });
+    try {
+        await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('zombie did not start listening in time')), 3000);
+            zombie.stdout.on('data', (data) => {
+                if (data.toString().includes('zombie-listening')) {
+                    clearTimeout(timer);
+                    resolve();
+                }
+            });
+        });
+
+        await attemptRecovery({
+            pythonExe: process.execPath,
+            args: ['-e', REAL_BACKEND_SCRIPT],
+            cwd: process.cwd(),
+            env: { ...process.env, SDD_PORT: String(port) },
+            backendUrl: `http://127.0.0.1:${port}`,
+            mainWindow: win,
+            logDir,
+            crashInfo: { exitCode: 1, signal: null },
+            delays: [0, 100],
+        });
+
+        const states = win.sent.map((s) => s.payload.state);
+        assert.equal(
+            states[states.length - 1],
+            'up',
+            'recovery should succeed once the stale zombie is cleared from the port instead of looping forever'
+        );
+
+        // Confirm the health endpoint is now served by the freshly spawned
+        // backend, not the zombie (which would still be alive and answering
+        // without the fix, masking the fact that the real backend never bound).
+        const res = await fetch(`http://127.0.0.1:${port}/health`);
+        const body = await res.json();
+        assert.equal(body.zombie, undefined);
+    } finally {
+        if (zombie.exitCode === null && zombie.signalCode === null) {
+            zombie.kill();
+        }
         stopBackend();
         fs.rmSync(logDir, { recursive: true, force: true });
     }

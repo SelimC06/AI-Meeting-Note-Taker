@@ -3,12 +3,29 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor } from './backend.js';
+import { resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, ensurePortFree } from './backend.js';
 import { attemptRecovery, isRecovering } from './backendRecovery.js';
 import { armAutoUpdate, getLastStatus, installUpdate } from './updater.js';
 
 let mainWindow = null;
 let railWindow = null;
+
+// Without this, every launch starts a fully independent instance — each with its own
+// windows and its own attempt to spawn a backend on the same hardcoded port. If an
+// earlier instance never fully quit (e.g. its rail window stayed open, which alone
+// keeps Electron's 'window-all-closed' from firing since not every window is closed),
+// a new launch's backend collides with the old instance's still-running one.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+    app.quit();
+} else {
+    app.on('second-instance', () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.focus();
+        }
+    });
+}
 
 const RAIL_WIDTH = 72;
 const RAIL_HEIGHT = 300;
@@ -253,6 +270,9 @@ app.whenReady().then(async () => {
             FFPROBE_BIN: path.join(process.resourcesPath, 'ffmpeg', 'ffprobe.exe'),
         } : {}),
     };
+    // A backend orphaned from a prior launch can still hold this port; clear it
+    // before spawning so this launch's health check can't be fooled by a stale process.
+    await ensurePortFree(Number(BACKEND_PORT));
     const backendProcess = startBackend(backend.command, backend.args, backend.cwd, backendEnv);
 
     // Packaged mode gets a longer timeout: a first launch after install can hit

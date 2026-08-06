@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 export function resolveVenvPython(projectRoot, platform = process.platform) {
     const venvDir = path.join(projectRoot, '.venv');
@@ -70,6 +73,63 @@ export function armCrashMonitor(childProcess, onCrash) {
 
 export function disarmCrashMonitor(childProcess, listener) {
     childProcess.removeListener('exit', listener);
+}
+
+async function findPidsListeningOnPort(port, platform) {
+    if (platform === 'win32') {
+        let stdout;
+        try {
+            ({ stdout } = await execFileAsync('netstat', ['-ano']));
+        } catch {
+            return [];
+        }
+        const pids = new Set();
+        for (const line of stdout.split('\n')) {
+            const match = line.match(/^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i);
+            if (match && Number(match[1]) === port) {
+                pids.add(Number(match[2]));
+            }
+        }
+        return [...pids];
+    }
+    try {
+        const { stdout } = await execFileAsync('lsof', ['-t', '-i', `tcp:${port}`, '-sTCP:LISTEN']);
+        return stdout
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .map(Number);
+    } catch {
+        return [];
+    }
+}
+
+// A prior launch's backend process can outlive its Electron parent (crash, force-close,
+// or a kill that didn't propagate) and stay bound to the backend port. Every later launch
+// then health-checks successfully against that stale process while the freshly spawned one
+// fails to bind and crash-loops forever. Clearing the port before every spawn — both the
+// initial launch and each crash-recovery attempt — makes this self-healing.
+//
+// After sending the kill signal, the OS can take a while to actually release the socket —
+// measured against the real frozen backend binary, this took ~600ms, well past any short
+// fixed delay. So we poll for the port to actually be free rather than guessing a duration.
+export async function ensurePortFree(port, platform = process.platform, releaseTimeoutMs = 5000) {
+    const pids = await findPidsListeningOnPort(port, platform);
+    for (const pid of pids) {
+        try {
+            process.kill(pid);
+        } catch {
+            // already gone
+        }
+    }
+    if (pids.length === 0) return;
+
+    const deadline = Date.now() + releaseTimeoutMs;
+    while (Date.now() < deadline) {
+        const stillListening = await findPidsListeningOnPort(port, platform);
+        if (stillListening.length === 0) return;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
 }
 
 export function waitForHealth(url, timeoutMs, childProcess = null) {

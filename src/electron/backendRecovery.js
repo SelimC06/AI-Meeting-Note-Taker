@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { startBackend, stopBackend, waitForHealth, armCrashMonitor, getBackendLogTail } from './backend.js';
+import { startBackend, stopBackend, waitForHealth, armCrashMonitor, getBackendLogTail, ensurePortFree } from './backend.js';
 
 export function logCrash(logDir, { exitCode, signal, logTail }) {
     fs.mkdirSync(logDir, { recursive: true });
@@ -55,6 +55,7 @@ export async function attemptRecovery({
             }
             sendStatus(mainWindow, { state: 'restarting', attempt, maxAttempts });
             try {
+                await ensurePortFree(Number(new URL(backendUrl).port));
                 const child = startBackend(pythonExe, args, cwd, env);
                 await waitForHealth(backendUrl, healthTimeoutMs, child);
                 armCrashMonitor(child, (code, signal) => {

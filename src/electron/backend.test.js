@@ -2,9 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveVenvPython, resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, disarmCrashMonitor } from './backend.js';
+import { spawn } from 'node:child_process';
+import { resolveVenvPython, resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree } from './backend.js';
 
 function makeTmpProjectRoot() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'backend-test-'));
@@ -247,3 +249,115 @@ test('disarmCrashMonitor prevents onCrash from firing', async () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(calls, []);
 });
+
+function getFreePort() {
+    return new Promise((resolve, reject) => {
+        const srv = net.createServer();
+        srv.on('error', reject);
+        srv.listen(0, '127.0.0.1', () => {
+            const { port } = srv.address();
+            srv.close((err) => (err ? reject(err) : resolve(port)));
+        });
+    });
+}
+
+test('ensurePortFree kills a process listening on the given port (orphaned zombie scenario)', async () => {
+    const port = await getFreePort();
+    // Spawned directly via child_process, NOT through startBackend/stopBackend — this
+    // simulates a backend process orphaned from an earlier, unrelated app launch.
+    const orphan = spawn(process.execPath, [
+        '-e',
+        `require('node:net').createServer().listen(${port}, '127.0.0.1', () => console.log('listening'));`,
+    ]);
+    try {
+        await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('orphan did not start listening in time')), 3000);
+            orphan.stdout.on('data', (data) => {
+                if (data.toString().includes('listening')) {
+                    clearTimeout(timer);
+                    resolve();
+                }
+            });
+        });
+
+        await ensurePortFree(port, 'win32');
+
+        assert.ok(orphan.exitCode !== null || orphan.signalCode !== null, 'orphan process should have been killed');
+
+        // Port should now be free: binding a new server on it should succeed.
+        const check = net.createServer();
+        await new Promise((resolve, reject) => {
+            check.once('error', reject);
+            check.listen(port, '127.0.0.1', resolve);
+        });
+        check.close();
+    } finally {
+        if (orphan.exitCode === null && orphan.signalCode === null) {
+            orphan.kill();
+        }
+    }
+});
+
+test('ensurePortFree resolves without error when nothing is listening on the port', async () => {
+    const port = await getFreePort();
+    await assert.doesNotReject(() => ensurePortFree(port, 'win32'));
+});
+
+function tryBind(port) {
+    return new Promise((resolve) => {
+        const srv = net.createServer();
+        srv.once('error', () => resolve(false));
+        srv.listen(port, '127.0.0.1', () => {
+            srv.close(() => resolve(true));
+        });
+    });
+}
+
+// Real-world regression: measured against the actual frozen backend binary,
+// the OS took ~600ms to release its listening socket after the process was
+// killed — longer than the fixed 300ms wait ensurePortFree used to have.
+// A synthetic Node child process can't reproduce this (Windows TerminateProcess
+// releases its sockets essentially instantly), so this test spawns the real
+// PyInstaller-frozen backend exe to reproduce the exact reported failure. It's
+// slow (real cold start + real process teardown) and skipped when the build
+// artifact isn't present, but it's the only faithful reproduction of the bug.
+const REAL_BACKEND_EXE = path.join(process.cwd(), 'backend-dist', 'app-backend', 'app-backend.exe');
+const hasRealBackend = process.platform === 'win32' && fs.existsSync(REAL_BACKEND_EXE);
+
+test(
+    'ensurePortFree actually frees the port before returning, even against the real backend binary\'s slower socket release',
+    { skip: !hasRealBackend ? 'backend-dist/app-backend/app-backend.exe not built' : false, timeout: 30000 },
+    async () => {
+        const port = await getFreePort();
+        const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-timing-test-'));
+        const child = spawn(REAL_BACKEND_EXE, [], {
+            cwd: path.dirname(REAL_BACKEND_EXE),
+            env: { ...process.env, PORT: String(port), APP_DATA_DIR: dataDir },
+        });
+        try {
+            // Cold start can take several seconds; poll until it actually binds.
+            const bindDeadline = Date.now() + 20000;
+            let boundOk = false;
+            while (Date.now() < bindDeadline) {
+                if (!(await tryBind(port))) {
+                    boundOk = true;
+                    break;
+                }
+                await new Promise((r) => setTimeout(r, 200));
+            }
+            assert.ok(boundOk, 'real backend never bound to the test port within 20s');
+
+            await ensurePortFree(port, 'win32');
+
+            // The whole point: by the time ensurePortFree resolves, the port
+            // must actually be free — not just "probably free after a guess".
+            const freeNow = await tryBind(port);
+            assert.ok(freeNow, 'port should be bindable immediately after ensurePortFree resolves');
+        } finally {
+            fs.rmSync(dataDir, { recursive: true, force: true });
+            if (child.exitCode === null && child.signalCode === null) {
+                child.kill();
+            }
+        }
+    }
+);
