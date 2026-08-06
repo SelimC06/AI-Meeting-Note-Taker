@@ -1,13 +1,9 @@
 import electronUpdater from 'electron-updater';
 
-const DEFAULT_FEED_URL = 'https://updates.example.invalid/meeting-note-taker';
+const DEFAULT_FEED_URL = 'https://pub-e9fb1382ea6345b5bfcda99097519034.r2.dev';
 
 export function getUpdateFeedUrl(env = process.env) {
-    const url = env.UPDATE_FEED_URL || DEFAULT_FEED_URL;
-    if (url === DEFAULT_FEED_URL) {
-        console.warn('[updater] UPDATE_FEED_URL is not set — using placeholder feed URL. Set UPDATE_FEED_URL or update DEFAULT_FEED_URL before shipping a release.');
-    }
-    return url;
+    return env.UPDATE_FEED_URL || DEFAULT_FEED_URL;
 }
 
 let lastStatus = { state: 'idle' };

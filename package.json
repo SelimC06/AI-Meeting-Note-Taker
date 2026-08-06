@@ -50,8 +50,11 @@
       "allowToChangeInstallationDirectory": true
     },
     "publish": {
-      "provider": "generic",
-      "url": "https://updates.example.invalid/meeting-note-taker"
+      "provider": "s3",
+      "bucket": "meeting-note-taker-updates",
+      "region": "auto",
+      "endpoint": "https://cf527edf58223c391e60611f545f5f0c.r2.cloudflarestorage.com",
+      "acl": null
     }
   },
   "dependencies": {

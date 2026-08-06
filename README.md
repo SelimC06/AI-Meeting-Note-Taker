@@ -107,40 +107,42 @@ are not needed by someone just installing and running the packaged app.
 
 ### Publishing updates
 
-The app checks `https://updates.example.invalid/meeting-note-taker` for new
-versions on startup (see `src/electron/updater.js`) — **this is a
-placeholder and must be replaced** with a real public URL (e.g. a
-Cloudflare R2 or S3 bucket you control) before shipping a release.
+Release artifacts (the installer + `latest.yml` manifest) are hosted on a
+Cloudflare R2 bucket, `meeting-note-taker-updates`. There are two separate
+pieces of config, serving two different purposes — both must stay correct:
 
-There are two separate things that both need to point at that real host,
-and both must be correct — editing only one is not sufficient:
-
-- **`build.publish.url` in `package.json`** — where
-  `electron-builder --publish always` uploads the installer and the
-  `latest.yml` manifest.
-- **The runtime feed URL the app actually checks** — controlled by
-  `getUpdateFeedUrl()` in `src/electron/updater.js` (its `DEFAULT_FEED_URL`
-  constant, or the `UPDATE_FEED_URL` environment variable at runtime). This
-  is *not* read from `package.json`. `armAutoUpdate` calls
+- **`build.publish` in `package.json`** — the R2 bucket's S3-compatible API
+  (`provider: "s3"` with R2's endpoint). This is only used at *publish
+  time*, by `electron-builder --publish always`, to know where to *upload*
+  a new release. It requires write credentials (see below) and is never
+  read by the running app.
+- **The runtime feed URL the app actually checks** — `DEFAULT_FEED_URL` in
+  `src/electron/updater.js`, currently the bucket's public R2.dev URL
+  (`https://pub-e9fb1382ea6345b5bfcda99097519034.r2.dev`), overridable via
+  the `UPDATE_FEED_URL` environment variable. `armAutoUpdate` calls
   `updater.setFeedURL({ provider: 'generic', url: getUpdateFeedUrl() })`
   unconditionally, which overrides whatever `app-update.yml`
-  electron-builder baked in from `build.publish.url`.
+  electron-builder baked in from `build.publish` — so the app always does a
+  plain, unauthenticated HTTPS GET against the public URL, never the S3 API
+  endpoint.
 
-Editing only `build.publish.url` and cutting a release would ship a build
-that still checks the placeholder host at runtime. Before shipping, make
-sure both `DEFAULT_FEED_URL` in `updater.js` and `build.publish.url` in
-`package.json` point at the same real host (or set `UPDATE_FEED_URL` in the
-packaged app's environment to override the runtime value).
+If the bucket is ever recreated or its public URL changes, update
+`DEFAULT_FEED_URL` in `updater.js` to match — editing `build.publish` alone
+is not sufficient, since that only controls where uploads go, not what the
+app reads.
 
-Publishing a new version is a manual step, not part of `npm run dist`:
+Publishing a new version is a manual step, not part of `npm run dist`.
+`electron-builder`'s S3 publisher reads write credentials from the
+standard AWS SDK environment variables (never store these in
+`package.json` or commit them):
 
 ```bash
-electron-builder --publish always
+AWS_ACCESS_KEY_ID=<r2 access key id> AWS_SECRET_ACCESS_KEY=<r2 secret access key> electron-builder --publish always
 ```
 
-This uploads the installer and a `latest.yml` manifest to the configured
-`publish.url`. Bump `"version"` in `package.json` first — electron-updater
-compares semver against `latest.yml` to decide whether an update exists.
+This uploads the installer and a `latest.yml` manifest to the R2 bucket.
+Bump `"version"` in `package.json` first — electron-updater compares
+semver against `latest.yml` to decide whether an update exists.
 
 ## Scripts
 

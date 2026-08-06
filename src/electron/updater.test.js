@@ -33,24 +33,9 @@ test('getUpdateFeedUrl returns UPDATE_FEED_URL when set', () => {
     assert.equal(url, 'https://example.com/feed');
 });
 
-test('getUpdateFeedUrl falls back to the placeholder when unset', () => {
+test('getUpdateFeedUrl falls back to the default production feed when unset', () => {
     const url = getUpdateFeedUrl({});
-    assert.equal(url, 'https://updates.example.invalid/meeting-note-taker');
-});
-
-test('getUpdateFeedUrl warns when falling back to the placeholder, and stays quiet when UPDATE_FEED_URL is set', () => {
-    const warnCalls = [];
-    const originalWarn = console.warn;
-    console.warn = (...args) => warnCalls.push(args);
-    try {
-        getUpdateFeedUrl({});
-        assert.equal(warnCalls.length, 1);
-
-        getUpdateFeedUrl({ UPDATE_FEED_URL: 'https://example.com/feed' });
-        assert.equal(warnCalls.length, 1);
-    } finally {
-        console.warn = originalWarn;
-    }
+    assert.equal(url, 'https://pub-e9fb1382ea6345b5bfcda99097519034.r2.dev');
 });
 
 test('armAutoUpdate sets autoDownload, sets the feed URL, and triggers a check', () => {
