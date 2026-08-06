@@ -38,6 +38,7 @@ const YourActivityPage: React.FC<Props> = ({ active }) => {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [query, setQuery] = useState("");
 
   const load = () => {
     getSessions(view === "trash")
@@ -68,11 +69,14 @@ const YourActivityPage: React.FC<Props> = ({ active }) => {
   }, [active, view]);
 
   const selected = sessions?.find((s) => s.id === selectedId) ?? null;
+  const filteredSessions =
+    sessions?.filter((s) => s.title.toLowerCase().includes(query.trim().toLowerCase())) ?? null;
 
   const switchView = (next: View) => {
     setView(next);
     setSelectedId(null);
     setSessions(null);
+    setQuery("");
   };
 
   const handleTrash = async (s: Session) => {
@@ -171,6 +175,16 @@ const YourActivityPage: React.FC<Props> = ({ active }) => {
         </div>
       </div>
 
+      {!selected && (
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="search by title..."
+          className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor placeholder:text-dim focus:outline-none focus:ring-2 focus:ring-signal"
+        />
+      )}
+
       {undoToast && (
         <div className="flex items-center justify-between px-3 py-2 text-xs bg-panel border border-signal rounded-sm">
           <span>trashed "{undoToast.title}"</span>
@@ -203,9 +217,16 @@ const YourActivityPage: React.FC<Props> = ({ active }) => {
           </div>
         )}
 
-        {!error && sessions !== null && sessions.length > 0 && !selected && (
+        {!error && sessions !== null && sessions.length > 0 && filteredSessions !== null && filteredSessions.length === 0 && (
+          <div className="h-full flex items-center justify-center text-xs text-dim">
+            {`no matches for "${query}"`}
+            <span className="cursor-blink">▌</span>
+          </div>
+        )}
+
+        {!error && filteredSessions !== null && filteredSessions.length > 0 && !selected && (
           <ul className="divide-y divide-line">
-            {sessions.map((s) => (
+            {filteredSessions.map((s) => (
               <li key={s.id} className="flex items-center justify-between px-4 py-2 text-xs group">
                 {renamingId === s.id ? (
                   <input

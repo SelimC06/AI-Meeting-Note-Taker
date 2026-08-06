@@ -10,10 +10,11 @@ const BACKEND_URL =
   import.meta.env.VITE_MEETING_API_URL ?? "http://localhost:8000";
 
 export default function RailApp() {
-    const { status, record, pause, resume, stop } = useThreeTrackSegments();
+    const { status, record, pause, resume, stop, error: recordError } = useThreeTrackSegments();
 
-    const [resultFlash, setResultFlash] = useState<"success" | "error" | null>(null);
+    const [resultFlash, setResultFlash] = useState<"success" | null>(null);
     const [isProcessing, setIsProcessing] = useState(false);
+    const [processError, setProcessError] = useState<string | null>(null);
 
     useEffect(() => {
         if (resultFlash === null) return;
@@ -23,12 +24,14 @@ export default function RailApp() {
 
     const isRecording = status === "recording";
     const isPaused = status === "paused";
+    const displayError = recordError ?? processError;
 
     const handleRecordClick = async () => {
         if (isProcessing) return;
 
         try {
             if (status === "idle") {
+                setProcessError(null);
                 await record();
         } else if (status === "recording" || status === "paused") {
                 const blobs = await stop();
@@ -59,13 +62,14 @@ export default function RailApp() {
                 setResultFlash("success");
             } catch (err) {
                 console.error("/process failed", err);
-                setResultFlash("error");
+                setProcessError(err instanceof Error ? err.message : String(err));
             } finally {
                 setIsProcessing(false);
             }
         }
         } catch (err) {
             console.error("record/stop error", err);
+            setProcessError(err instanceof Error ? err.message : String(err));
         }
     };
 
@@ -91,15 +95,15 @@ export default function RailApp() {
             <Play onClick={handlePlayClick} disabled={!isPaused}/>
 
             <span
-                title={isProcessing ? "Processing recording…" : undefined}
+                title={isProcessing ? "Processing recording…" : displayError ?? undefined}
                 className={
                     "mt-auto h-2.5 w-2.5 rounded-full border border-void transition-colors " +
                     (isProcessing
                         ? "bg-amber-400 animate-pulse"
+                        : displayError
+                        ? "bg-red-500"
                         : resultFlash === "success"
                         ? "bg-signal"
-                        : resultFlash === "error"
-                        ? "bg-red-500"
                         : "bg-dim")
                 }
             />

@@ -130,3 +130,11 @@ it("shows unreachable message and retries on button click", async () => {
     expect(getOllamaModels).toHaveBeenCalledTimes(2);
   });
 });
+
+it("shows the local-first privacy statement", async () => {
+  render(<SettingsPage active />);
+  expect(
+    await screen.findByText(/never uploaded anywhere/i)
+  ).toBeInTheDocument();
+  expect(screen.getByText(/permanently deleted after 30 days/i)).toBeInTheDocument();
+});

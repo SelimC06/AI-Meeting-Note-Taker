@@ -216,6 +216,16 @@ export default function SettingsPage({ active }: { active: boolean }) {
 
       <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
         <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+          privacy
+        </h2>
+        <p className="text-xs text-phosphor">
+          Recordings and notes are stored only on this machine and never uploaded anywhere.
+          Items moved to trash are permanently deleted after 30 days.
+        </p>
+      </div>
+
+      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
+        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
           storage usage
         </h2>
         {usageError && <p className="text-xs text-red-400">{usageError}</p>}

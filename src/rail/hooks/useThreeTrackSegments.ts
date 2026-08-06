@@ -19,10 +19,20 @@ export type Combined = {
   micAudio?: Blob;
 };
 
+function classifyRecordError(err: unknown): string {
+  const name = (err as { name?: string } | null)?.name;
+  if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+    return "Screen or microphone access denied — check your OS privacy settings.";
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return `Recording failed: ${message}`;
+}
+
 export function useThreeTrackSegments() {
   const micOnDataRef = useRef<((b: Blob) => void) | null>(null);
 
   const [status, setStatus] = useState<"idle" | "recording" | "paused">("idle");
+  const [error, setError] = useState<string | null>(null);
   
 
   const streamsRef = useRef<CaptureStreams | null>(null);
@@ -41,7 +51,8 @@ export function useThreeTrackSegments() {
   // ----- RECORD -----
   const record = async () => {
     if (status !== "idle") return;
-    setStatus("recording");   
+    setError(null);
+    setStatus("recording");
 
     try {
       // Get streams (Electron: screen+system+mic; Browser: screen+mic, no system)
@@ -63,12 +74,13 @@ export function useThreeTrackSegments() {
       };
       micOnDataRef.current = micOnData;
       micRec?.ondata(micOnData);
-  
+
       screenRec?.start();
       systemRec?.start();
       micRec?.start();
     } catch (e) {
       console.error("record() failed", e);
+      setError(classifyRecordError(e));
       setStatus("idle");
     }
 
@@ -132,5 +144,5 @@ export function useThreeTrackSegments() {
     return combined;
   };
 
-  return { status, record, pause, resume, stop };
+  return { status, record, pause, resume, stop, error };
 }
