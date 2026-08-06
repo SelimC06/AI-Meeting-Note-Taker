@@ -477,7 +477,14 @@ async def process(
     mixed_wav  = mix_audios_wav(system_wav, mic_wav, session / "mixed.wav")
 
     # 4) mux with video (robust encoder fallback)
-    final_path = mux_video_audio(screen_webm, mixed_wav, session / "final.webm")
+    try:
+        final_path = mux_video_audio(screen_webm, mixed_wav, session / "final.webm")
+    except Exception as e:
+        log(f"mux failed: {e}")
+        raise HTTPException(
+            500,
+            "Couldn't combine your audio and video — the recording file may be corrupted. Try recording again.",
+        )
 
     selected_paths: list[str] = []
     if frames:

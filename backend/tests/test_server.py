@@ -74,6 +74,29 @@ def test_process_rejects_invalid_screen_upload(client: TestClient):
     assert resp.status_code == 400
 
 
+def test_process_returns_friendly_500_when_mux_fails(client, monkeypatch):
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        raise RuntimeError("ffmpeg: no suitable audio encoder found")
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == (
+        "Couldn't combine your audio and video — the recording file may be "
+        "corrupted. Try recording again."
+    )
+
+
 def test_process_falls_back_to_stub_notes_without_transcription(client, monkeypatch):
     # Force the "transcription helper unavailable" path that previously
     # caused a NameError on txt_path.

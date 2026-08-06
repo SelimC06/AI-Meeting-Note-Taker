@@ -23,6 +23,7 @@ declare global {
     electronAPI?: {
       listCaptureSources: (types?: string[]) => Promise<{ id: string; name: string }[]>;
       pickPrimaryScreenId: () => Promise<string | null>;
+      expandRail: (expanded: boolean) => Promise<void>;
     };
     systemAPI?: {
       getStats: () => Promise<SystemStats | null>;

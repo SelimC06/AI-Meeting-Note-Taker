@@ -1,5 +1,5 @@
 // src/hooks/useThreeTrackSegments.ts
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { getSeparateCapture, type CaptureStreams } from "../capture/capture";
 import {
   getVideoRecorder,
@@ -144,5 +144,9 @@ export function useThreeTrackSegments() {
     return combined;
   };
 
-  return { status, record, pause, resume, stop, error };
+  const clearError = useCallback(() => {
+    setError(null);
+  }, []);
+
+  return { status, record, pause, resume, stop, error, clearError };
 }

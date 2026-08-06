@@ -9,6 +9,10 @@ import { attemptRecovery, isRecovering } from './backendRecovery.js';
 let mainWindow = null;
 let railWindow = null;
 
+const RAIL_WIDTH = 72;
+const RAIL_HEIGHT = 300;
+const RAIL_EXPANDED_WIDTH = 300;
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -38,8 +42,6 @@ function positionRail(relativeTo) {
   const display = screen.getDisplayNearestPoint({ x: b.x, y: b.y });
   const wa = display.workArea; // excludes taskbar
 
-  const RAIL_WIDTH = 72;
-  const RAIL_HEIGHT = 300;
   const INSET = 8; // small gap from absolute left
 
   railWindow.setBounds({
@@ -111,6 +113,15 @@ function hideRail() {
     mainWindow?.webContents.send('rail:getState', false);
     return false;
 }
+
+ipcMain.handle('rail:setExpanded', (_event, expanded) => {
+    if (!railWindow || railWindow.isDestroyed()) return;
+    const bounds = railWindow.getBounds();
+    railWindow.setBounds({
+        ...bounds,
+        width: expanded ? RAIL_EXPANDED_WIDTH : RAIL_WIDTH,
+    });
+});
 
 ipcMain.handle('rail:toggle', () => {
     if (railWindow && !railWindow.isDestroyed() && railWindow.isVisible()) {

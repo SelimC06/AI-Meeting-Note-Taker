@@ -22,6 +22,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const list = await ipcRenderer.invoke("list-capture-sources", ["screen"]);
     return list[0]?.id ?? null;
   },
+
+  expandRail: async (expanded) => {
+    try {
+      await ipcRenderer.invoke("rail:setExpanded", expanded);
+    } catch (e) {
+      console.warn("[preload] expandRail failed:", e);
+    }
+  },
 });
 
 contextBridge.exposeInMainWorld("systemAPI", {
