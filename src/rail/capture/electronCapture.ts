@@ -63,14 +63,23 @@ export async function startElectronCapture(opts: ElectronCaptureOptions = {}): P
   const sysTracks = screenAndSystem.getAudioTracks();
   const systemAudio = sysTracks.length ? new MediaStream(sysTracks) : undefined;
 
-  // Mic capture (separate; no echo cancellation for better sync to desktop)
-  const micAudio = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
-    },
-  });
+  // Mic capture (separate; no echo cancellation for better sync to desktop).
+  // If this fails after screen+system audio were already granted, stop
+  // those already-acquired tracks before rethrowing -- otherwise the OS
+  // capture indicator stays lit with no handle left to turn it off.
+  let micAudio: MediaStream;
+  try {
+    micAudio = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    });
+  } catch (e) {
+    screenAndSystem.getTracks().forEach((t) => t.stop());
+    throw e;
+  }
 
   const stopAll = () => {
     [screen, systemAudio, micAudio, screenAndSystem].forEach(s =>

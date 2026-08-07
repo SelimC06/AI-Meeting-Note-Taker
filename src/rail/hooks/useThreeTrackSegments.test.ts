@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useThreeTrackSegments } from "./useThreeTrackSegments";
 import { getSeparateCapture } from "../capture/capture";
+import { getVideoRecorder } from "../capture/recorder";
 
 // jsdom (this project's test environment) does not implement MediaStream.
 // Provide a minimal stub so tests can construct one; production code never
@@ -123,4 +124,53 @@ it("exposes the mic MediaStream while recording and clears it on stop", async ()
     await result.current.stop();
   });
   expect(result.current.micStream).toBeNull();
+});
+
+it("stop() calls stopAll and resets status to idle even if a recorder's stop() rejects", async () => {
+  const stopAll = vi.fn();
+  vi.mocked(getSeparateCapture).mockResolvedValueOnce({
+    screen: new MediaStream(),
+    stopAll,
+  });
+  vi.mocked(getVideoRecorder).mockReturnValueOnce({
+    ondata: vi.fn(),
+    start: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
+    stop: vi.fn().mockRejectedValueOnce(
+      Object.assign(new Error("The MediaRecorder's state is inactive."), { name: "InvalidStateError" })
+    ),
+  });
+
+  const { result } = renderHook(() => useThreeTrackSegments());
+  await act(async () => {
+    await result.current.record();
+  });
+  expect(result.current.status).toBe("recording");
+
+  await act(async () => {
+    await result.current.stop();
+  });
+
+  expect(stopAll).toHaveBeenCalled();
+  expect(result.current.status).toBe("idle");
+});
+
+it("record() releases already-acquired streams if recorder setup fails afterward", async () => {
+  const stopAll = vi.fn();
+  vi.mocked(getSeparateCapture).mockResolvedValueOnce({
+    screen: new MediaStream(),
+    stopAll,
+  });
+  vi.mocked(getVideoRecorder).mockImplementationOnce(() => {
+    throw new Error("Unsupported mimeType");
+  });
+
+  const { result } = renderHook(() => useThreeTrackSegments());
+  await act(async () => {
+    await result.current.record();
+  });
+
+  expect(stopAll).toHaveBeenCalled();
+  expect(result.current.status).toBe("idle");
 });

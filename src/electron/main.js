@@ -8,6 +8,8 @@ import { attemptRecovery, isRecovering } from './backendRecovery.js';
 import { armAutoUpdate, getLastStatus, installUpdate } from './updater.js';
 import { computeRailBounds } from './railGeometry.js';
 import { computeSlideY, computeOffScreenY, RAIL_SLIDE_DURATION_MS } from './slideAnimation.js';
+import { sanitizeCaptureSourceTypes } from './captureSources.js';
+import { distReactPath } from './paths.js';
 
 let railErrorVisible = false;
 
@@ -46,7 +48,7 @@ function disableZoom(webContents) {
 }
 
 function resolveRailFile() {
-    const prod = path.join(app.getAppPath() + '/dist-react/rail.html');
+    const prod = distReactPath(app.getAppPath(), 'rail.html');
     if (fs.existsSync(prod)) return prod;
     throw new Error(`rail.html not found at ${prod} - run "npm run build" first`);
 }
@@ -220,9 +222,9 @@ ipcMain.handle('rail:getState', () => {
     return !!(railWindow && !railWindow.isDestroyed() && railWindow.isVisible());
 });
 
-ipcMain.handle("list-capture-sources", async (_event, types = ["screen", "window"]) => {
+ipcMain.handle("list-capture-sources", async (_event, types) => {
     const sources = await desktopCapturer.getSources({
-        types,
+        types: sanitizeCaptureSourceTypes(types),
         thumbnailSize: { width: 0, height: 0 }, // we only need ids & names
     });
 
@@ -267,7 +269,7 @@ function createWindow() {
         }
         return { action: 'deny' };
     });
-    mainWindow.loadFile(path.join(app.getAppPath() + '/dist-react/index.html'));
+    mainWindow.loadFile(distReactPath(app.getAppPath(), 'index.html'));
 
     mainWindow.once("ready-to-show", () => {
         if (!app.isPackaged) {

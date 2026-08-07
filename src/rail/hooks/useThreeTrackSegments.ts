@@ -90,6 +90,14 @@ export function useThreeTrackSegments() {
       micRec?.start();
     } catch (e) {
       console.error("record() failed", e);
+      // getSeparateCapture() may have already succeeded (streamsRef.current
+      // set) before a later step -- recorder construction or .start() --
+      // threw. Release those already-granted streams so the OS capture
+      // indicator doesn't stay lit and a retry doesn't stack a second set
+      // of live streams on top.
+      streamsRef.current?.stopAll?.();
+      streamsRef.current = null;
+      recRef.current = null;
       setError(classifyRecordError(e));
       setStatus("idle");
       setMicStream(null);
@@ -119,39 +127,51 @@ export function useThreeTrackSegments() {
     if (status === "idle") return {};
 
     const s = recRef.current;
-    // stop returns a final Blob (flushes last timeslice)
-    const [screenBlob, systemBlob, micBlob] = await Promise.all([
-      s?.screen?.stop() ?? Promise.resolve<Blob | undefined>(undefined),
-      s?.system?.stop() ?? Promise.resolve<Blob | undefined>(undefined),
-      s?.mic?.stop()    ?? Promise.resolve<Blob | undefined>(undefined),
-    ]);
+    const segs = segsRef.current;
 
-    streamsRef.current?.stopAll?.();
+    let screenBlob: Blob | undefined;
+    let systemBlob: Blob | undefined;
+    let micBlob: Blob | undefined;
+
+    try {
+      // stop returns a final Blob (flushes last timeslice)
+      [screenBlob, systemBlob, micBlob] = await Promise.all([
+        s?.screen?.stop() ?? Promise.resolve<Blob | undefined>(undefined),
+        s?.system?.stop() ?? Promise.resolve<Blob | undefined>(undefined),
+        s?.mic?.stop()    ?? Promise.resolve<Blob | undefined>(undefined),
+      ]);
+    } catch (e) {
+      // A rejected recorder.stop() (e.g. an unexpected InvalidStateError a
+      // different task's fix didn't anticipate) must not prevent the
+      // cleanup below -- otherwise streams are never released and status
+      // never leaves "recording", leaving the UI stuck with no way to stop.
+      console.error("stop() failed while stopping one or more recorders", e);
+    } finally {
+      streamsRef.current?.stopAll?.();
+      recRef.current = null;
+      streamsRef.current = null;
+      segsRef.current = { screen: [], systemAudio: [], micAudio: [] };
+      setStatus("idle");
+      setMicStream(null);
+    }
 
     const combined: Combined = {
       screen:
         screenBlob ??
-        (segsRef.current.screen.length
-          ? new Blob(segsRef.current.screen, { type: "video/webm" })
+        (segs.screen.length
+          ? new Blob(segs.screen, { type: "video/webm" })
           : undefined),
       systemAudio:
         systemBlob ??
-        (segsRef.current.systemAudio.length
-          ? new Blob(segsRef.current.systemAudio, { type: "audio/webm" })
+        (segs.systemAudio.length
+          ? new Blob(segs.systemAudio, { type: "audio/webm" })
           : undefined),
       micAudio:
         micBlob ??
-        (segsRef.current.micAudio.length
-          ? new Blob(segsRef.current.micAudio, { type: "audio/webm" })
+        (segs.micAudio.length
+          ? new Blob(segs.micAudio, { type: "audio/webm" })
           : undefined),
     };
-
-    // reset state
-    recRef.current = null;
-    streamsRef.current = null;
-    segsRef.current = { screen: [], systemAudio: [], micAudio: [] };
-    setStatus("idle");
-    setMicStream(null);
 
     return combined;
   };

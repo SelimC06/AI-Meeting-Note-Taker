@@ -47,6 +47,16 @@ export function getRecorder(
     resume: () => mr.resume(),
     stop: () =>
       new Promise<Blob>((resolve) => {
+        // MediaRecorder.stop() throws InvalidStateError if the recorder is
+        // already inactive (e.g. called twice, or called after an earlier
+        // internal error already stopped it). Treat that as "already
+        // stopped" and resolve with whatever was captured, instead of
+        // letting the throw reject this promise and abort whatever caller
+        // is awaiting cleanup (see useThreeTrackSegments.ts's stop()).
+        if (mr.state === "inactive") {
+          resolve(new Blob(chunks, { type: mimeType || mr.mimeType }));
+          return;
+        }
         mr.onstop = () => resolve(new Blob(chunks, { type: mimeType || mr.mimeType }));
         mr.stop();
       }),

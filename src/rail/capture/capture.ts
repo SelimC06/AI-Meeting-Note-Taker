@@ -24,7 +24,16 @@ export async function getSeparateCapture(): Promise<CaptureStreams> {
     video: { frameRate: 30 },
     audio: false,
   });
-  const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+  // If mic capture fails after screen was already granted, stop the
+  // already-acquired screen tracks before rethrowing -- otherwise the OS
+  // capture indicator stays lit with no handle left to turn it off.
+  let mic: MediaStream;
+  try {
+    mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    screen.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+    throw e;
+  }
 
   const stopAll = () => {
     ([screen, mic] as Array<MediaStream | undefined>).forEach((s) =>
