@@ -38,6 +38,7 @@ from .settings_store import (
     save as save_settings,
 )
 from .bin_paths import FFMPEG_BIN, FFPROBE_BIN
+from .whisper_cache import get_whisper_model
 
 try:
     from .ffmpeg_transcribe import stop_recording_and_transcribe  # type: ignore
@@ -621,7 +622,7 @@ async def process(
     if not notes:
         try:
             from faster_whisper import WhisperModel
-            model = WhisperModel(whisper_model, compute_type="int8")  # CPU-friendly
+            model = get_whisper_model(WhisperModel, whisper_model, compute_type="int8")  # CPU-friendly
             segments, info = model.transcribe(str(final_path), beam_size=1)
             transcript = "\n".join(s.text.strip() for s in segments if s.text)
             notes = (

@@ -15,7 +15,6 @@ class FakeMediaRecorder {
   onstop: (() => void) | null = null;
   mimeType = "video/webm";
 
-  constructor(_stream: unknown, _options?: unknown) {}
 
   start(): void {
     this.state = "recording";

@@ -2,6 +2,7 @@ import subprocess
 from faster_whisper import WhisperModel
 from pathlib import Path
 from .bin_paths import FFMPEG_BIN
+from .whisper_cache import get_whisper_model
 
 
 def extract_frames(
@@ -66,7 +67,7 @@ def stop_recording_and_transcribe(
             "-map","0:a:0","-ac","1","-ar","16000",str(wav_path)
         ], check=True)
 
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
+    model = get_whisper_model(WhisperModel, model_name, device="cpu", compute_type="int8")
     segments, _ = model.transcribe(str(wav_path))
 
     full_text = " ".join(seg.text for seg in segments).strip()
