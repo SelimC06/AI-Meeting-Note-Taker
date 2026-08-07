@@ -27,9 +27,9 @@ const DashboardCards: React.FC<Props> = ({ onChangePage, active }) => {
             onClick={() => onChangePage("health")}
             className="cursor-pointer"
           >
-            <Health />
+            <Health active={active} />
           </div>
-            <Status />
+            <Status active={active} />
         </div>
         <div className="px-6 py-4 flex flex-row gap-4">
           <div

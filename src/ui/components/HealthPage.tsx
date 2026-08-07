@@ -2,9 +2,13 @@ import React from "react";
 import { useSystemStats } from "../hooks/useSystemStats";
 import { useBackendHealth } from "../hooks/useBackendHealth";
 
-const HealthPage: React.FC = () => {
-    const stats = useSystemStats();
-    useBackendHealth();
+interface Props {
+  active: boolean;
+}
+
+const HealthPage: React.FC<Props> = ({ active }) => {
+    const stats = useSystemStats(active);
+    useBackendHealth(active);
 
     const cpuPct = stats?.cpuPercent ?? null;
     const memPct = stats?.memPercent ?? null;

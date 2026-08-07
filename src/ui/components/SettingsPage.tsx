@@ -1,5 +1,5 @@
 // src/ui/components/SettingsPage.tsx
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   getSettings,
   updateSettings,
@@ -31,7 +31,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [ollamaError, setOllamaError] = useState<string | null>(null);
   const [ollamaLoading, setOllamaLoading] = useState(true);
-  const [ollamaLoadingCancelled, setOllamaLoadingCancelled] = useState(false);
+  const ollamaGenerationRef = useRef(0);
 
   const [storageBusy, setStorageBusy] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
@@ -94,23 +94,30 @@ export default function SettingsPage({ active }: { active: boolean }) {
   };
 
   const loadOllamaModels = () => {
+    const generation = ++ollamaGenerationRef.current;
     setOllamaLoading(true);
     setOllamaError(null);
-    setOllamaLoadingCancelled(false);
     getOllamaModels().then((result) => {
-      if (!ollamaLoadingCancelled) {
-        setOllamaLoading(false);
-        if (result.ok) {
-          setOllamaModels(result.models);
-        } else {
-          setOllamaError(result.error ?? "Ollama unreachable");
-        }
+      // A newer loadOllamaModels() call, or this component unmounting
+      // (which also bumps the generation -- see the mount effect's
+      // cleanup below), invalidates this response: applying it now would
+      // either overwrite a more recent result or update state after
+      // unmount.
+      if (generation !== ollamaGenerationRef.current) return;
+      setOllamaLoading(false);
+      if (result.ok) {
+        setOllamaModels(result.models);
+      } else {
+        setOllamaError(result.error ?? "Ollama unreachable");
       }
     });
   };
 
   useEffect(() => {
     loadOllamaModels();
+    return () => {
+      ollamaGenerationRef.current += 1;
+    };
   }, []);
 
   const handleWhisperChange = async (value: string) => {

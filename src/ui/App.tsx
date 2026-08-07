@@ -49,7 +49,7 @@ function App() {
             }
           >
             <ErrorBoundary resetKey={page}>
-              <HealthPage />
+              <HealthPage active={page === "health"} />
             </ErrorBoundary>
           </div>
 

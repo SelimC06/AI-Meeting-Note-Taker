@@ -1,8 +1,12 @@
 import React from "react";
 import { useSystemStats } from "../hooks/useSystemStats";
 
-const Health: React.FC = () => {
-  const stats = useSystemStats();
+interface Props {
+  active: boolean;
+}
+
+const Health: React.FC<Props> = ({ active }) => {
+  const stats = useSystemStats(active);
 
   return (
     <div className="p-4 w-50 h-full bg-panel border border-line rounded-sm text-phosphor transition-all duration-150 hover:-translate-y-0.5 hover:border-signal hover:shadow-[0_0_16px_-4px_var(--color-signal)]">

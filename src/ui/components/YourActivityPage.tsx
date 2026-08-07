@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   getSessions,
   trashSession,
@@ -39,6 +39,13 @@ const YourActivityPage: React.FC<Props> = ({ active }) => {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [query, setQuery] = useState("");
+  const undoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (undoTimeoutRef.current !== null) clearTimeout(undoTimeoutRef.current);
+    };
+  }, []);
 
   const load = () => {
     getSessions(view === "trash")
@@ -85,8 +92,10 @@ const YourActivityPage: React.FC<Props> = ({ active }) => {
     try {
       await trashSession(s.id);
       setUndoToast({ id: s.id, title: s.title });
-      setTimeout(() => {
+      if (undoTimeoutRef.current !== null) clearTimeout(undoTimeoutRef.current);
+      undoTimeoutRef.current = setTimeout(() => {
         setUndoToast((cur) => (cur?.id === s.id ? null : cur));
+        undoTimeoutRef.current = null;
       }, 6000);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

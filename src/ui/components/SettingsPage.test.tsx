@@ -207,3 +207,36 @@ it("shows a restart button when an update is ready and calls install on click", 
   fireEvent.click(restartButton);
   expect(install).toHaveBeenCalledTimes(1);
 });
+
+// Note: in React 19, the "state update on an unmounted component" warning
+// was removed entirely, so a post-unmount setState is a silent no-op here --
+// this test can't actually distinguish the generation-ref guard being present
+// from it being absent. It still locks in a real invariant (no thrown
+// exceptions or console errors when a pending request resolves after
+// unmount), and it exercises the generation ref as defense-in-depth against a
+// same-instance stale-response race, even though that race isn't reachable
+// through the current UI (the Retry button is hidden while loading).
+it("does not throw or log an error when unmounted mid-request and the pending request later resolves", async () => {
+  let resolveOllama: (r: { ok: boolean; models: string[]; error: string | null }) => void = () => {};
+  vi.mocked(getOllamaModels).mockReturnValueOnce(
+    new Promise((resolve) => {
+      resolveOllama = resolve;
+    })
+  );
+
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+  const { unmount } = render(<SettingsPage active />);
+  await screen.findByText(/loading installed models/i);
+
+  unmount();
+  resolveOllama({ ok: true, models: ["gemma3:4b"], error: null });
+  await new Promise((r) => setTimeout(r, 0));
+
+  const actWarning = consoleError.mock.calls.some((args) =>
+    args.some((a) => typeof a === "string" && a.includes("not wrapped in act"))
+  );
+  expect(actWarning).toBe(false);
+
+  consoleError.mockRestore();
+});

@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 
 const POLL_INTERVAL_MS = 1500;
 
-export function useSystemStats() {
+export function useSystemStats(active: boolean) {
   const [stats, setStats] = useState<SystemStats | null>(null);
 
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
 
     const poll = () => {
@@ -20,7 +21,7 @@ export function useSystemStats() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [active]);
 
   return stats;
 }

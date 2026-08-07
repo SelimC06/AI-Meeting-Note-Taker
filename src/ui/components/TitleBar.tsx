@@ -131,7 +131,13 @@ function PillButton() {
         if (typeof v === "boolean") {
           setOn(v);
         } else {
-          setOn((prev) => !prev);
+          // Neither toggleRail() nor getRailState() returned a real
+          // answer (e.g. the preload bridge isn't ready yet, or we're
+          // running outside Electron). Leave the displayed state
+          // unchanged instead of optimistically flipping it -- nothing
+          // has actually toggled, so flipping here would show a state
+          // that doesn't match reality.
+          console.warn("[PillButton] toggleRail/getRailState unavailable; leaving state unchanged");
         }
       }
     } catch (e) {

@@ -3,10 +3,15 @@ import { checkHealth } from "../api";
 
 const POLL_INTERVAL_MS = 15000;
 
-const Status: React.FC = () => {
+interface Props {
+  active: boolean;
+}
+
+const Status: React.FC<Props> = ({ active }) => {
   const [online, setOnline] = useState<boolean | null>(null);
 
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
 
     const poll = () => {
@@ -21,7 +26,7 @@ const Status: React.FC = () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [active]);
 
   return (
     <div className="p-4 flex-1 min-w-0 bg-panel border border-line rounded-sm text-phosphor">

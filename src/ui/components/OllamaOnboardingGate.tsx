@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useOllamaReadiness } from "../hooks/useOllamaReadiness";
 
 const OLLAMA_DOWNLOAD_URL = "https://ollama.com/download";
@@ -12,6 +12,12 @@ export default function OllamaOnboardingGate({ active = true }: OllamaOnboarding
   const [dismissed, setDismissed] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current !== null) clearTimeout(copyTimeoutRef.current);
+    };
+  }, []);
 
   if (dismissed) return null;
   if (readiness.status === "checking" || readiness.status === "ready") return null;
