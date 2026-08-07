@@ -29,3 +29,13 @@ it("does not call onClick when disabled", () => {
   expect(onClick).not.toHaveBeenCalled();
   expect(getByRole("button")).toBeDisabled();
 });
+
+it("has a solid amber fill while recording (pause available)", () => {
+  const { getByRole } = render(<PauseResume status="recording" />);
+  expect(getByRole("button").className).toContain("bg-amber-500");
+});
+
+it("has a solid, slightly lighter amber fill while paused (resume available)", () => {
+  const { getByRole } = render(<PauseResume status="paused" />);
+  expect(getByRole("button").className).toContain("bg-amber-400");
+});

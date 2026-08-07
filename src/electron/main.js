@@ -7,6 +7,7 @@ import { resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBac
 import { attemptRecovery, isRecovering } from './backendRecovery.js';
 import { armAutoUpdate, getLastStatus, installUpdate } from './updater.js';
 import { computeRailBounds } from './railGeometry.js';
+import { computeSlideY, computeOffScreenY, RAIL_SLIDE_DURATION_MS } from './slideAnimation.js';
 
 let railErrorVisible = false;
 
@@ -51,16 +52,71 @@ function resolveRailFile() {
 }
 
 let lastWorkArea = null;
+let railAnimationTimer = null;
+let railPendingComplete = null;
 
-function positionRail(relativeTo) {
+function computeAndCacheRailBounds(relativeTo) {
   const target = relativeTo || mainWindow;
-  if (!railWindow || !target) return;
+  if (!target) return null;
 
   const b = target.getBounds();
   const display = screen.getDisplayNearestPoint({ x: b.x, y: b.y });
   lastWorkArea = display.workArea; // excludes taskbar
 
-  railWindow.setBounds(computeRailBounds(lastWorkArea, { errorVisible: railErrorVisible }));
+  return computeRailBounds(lastWorkArea, { errorVisible: railErrorVisible });
+}
+
+// Clears the running interval (if any) and the pending completion, WITHOUT
+// invoking the pending completion. This is correct when starting a fresh
+// animation that supersedes a previous one (its completion should just be
+// abandoned), but callers that are interrupting an in-flight animation to
+// finish it early (e.g. because its target window is about to change state)
+// must capture railPendingComplete themselves beforehand and invoke it after
+// this call, so the completion contract is never silently dropped.
+function stopRailAnimation() {
+  if (railAnimationTimer) {
+    clearInterval(railAnimationTimer);
+    railAnimationTimer = null;
+  }
+  railPendingComplete = null;
+}
+
+function animateRailTo(targetY, onComplete) {
+  if (!railWindow || railWindow.isDestroyed() || !lastWorkArea) {
+    onComplete?.();
+    return;
+  }
+  stopRailAnimation();
+  railPendingComplete = onComplete || null;
+
+  const bounds = computeRailBounds(lastWorkArea, { errorVisible: railErrorVisible });
+  const startY = railWindow.getBounds().y;
+  const startTime = Date.now();
+
+  railAnimationTimer = setInterval(() => {
+    if (!railWindow || railWindow.isDestroyed()) {
+      const pending = railPendingComplete;
+      stopRailAnimation();
+      // The window is gone, so there's nothing to .hide() — but the
+      // completion contract still needs to be honored (e.g. state
+      // bookkeeping in the callback), so invoke it defensively.
+      try {
+        pending?.();
+      } catch (err) {
+        console.error('[rail] pending animation completion threw', err);
+      }
+      return;
+    }
+    const elapsed = Date.now() - startTime;
+    const y = computeSlideY(startY, targetY, elapsed, RAIL_SLIDE_DURATION_MS);
+    railWindow.setBounds({ x: bounds.x, y, width: bounds.width, height: bounds.height });
+
+    if (elapsed >= RAIL_SLIDE_DURATION_MS) {
+      const pending = railPendingComplete;
+      stopRailAnimation();
+      pending?.();
+    }
+  }, 16);
 }
 
 function createRailWindow() {
@@ -82,7 +138,10 @@ function createRailWindow() {
         },
     });
 
-    railWindow.on('closed', () => (railWindow = null));
+    railWindow.on('closed', () => {
+        stopRailAnimation();
+        railWindow = null;
+    });
     disableZoom(railWindow.webContents);
 
     let railFile;
@@ -97,8 +156,11 @@ function createRailWindow() {
     railWindow.loadFile(railFile);
 
     railWindow.webContents.on('did-finish-load', () => {
-        positionRail(mainWindow);
+        const bounds = computeAndCacheRailBounds(mainWindow);
+        if (!bounds) return;
+        railWindow.setBounds({ x: bounds.x, y: computeOffScreenY(lastWorkArea, bounds), width: bounds.width, height: bounds.height });
         railWindow.show();
+        animateRailTo(bounds.y);
     });
 
     if (!app.isPackaged) {
@@ -108,7 +170,12 @@ function createRailWindow() {
 
 function showRail() {
     if (railWindow && !railWindow.isDestroyed()) {
+        const bounds = computeAndCacheRailBounds(mainWindow);
+        if (bounds) {
+            railWindow.setBounds({ x: bounds.x, y: computeOffScreenY(lastWorkArea, bounds), width: bounds.width, height: bounds.height });
+        }
         railWindow.show();
+        if (bounds) animateRailTo(bounds.y);
         mainWindow?.webContents.send('rail:getState', true);
         return true;
     }
@@ -117,10 +184,14 @@ function showRail() {
 }
 
 function hideRail() {
-    if (railWindow && !railWindow.isDestroyed()) {
-        railWindow.destroy();
-        railWindow = null;
-        railErrorVisible = false;
+    if (railWindow && !railWindow.isDestroyed() && lastWorkArea) {
+        const bounds = computeRailBounds(lastWorkArea, { errorVisible: railErrorVisible });
+        const offScreenY = computeOffScreenY(lastWorkArea, bounds);
+        animateRailTo(offScreenY, () => {
+            railWindow?.hide();
+        });
+    } else if (railWindow && !railWindow.isDestroyed()) {
+        railWindow.hide();
     }
     mainWindow?.webContents.send('rail:getState', false);
     return false;
@@ -129,7 +200,13 @@ function hideRail() {
 ipcMain.handle('rail:setErrorVisible', (_event, visible) => {
     railErrorVisible = !!visible;
     if (!railWindow || railWindow.isDestroyed() || !lastWorkArea) return;
+    const pendingComplete = railPendingComplete;
+    stopRailAnimation();
     railWindow.setBounds(computeRailBounds(lastWorkArea, { errorVisible: railErrorVisible }));
+    // An interrupted hide-animation's completion (e.g. railWindow.hide()) must
+    // still run now that the bounds have been reset to on-screen — otherwise
+    // the rail is stuck visible while the rest of the app believes it's hidden.
+    pendingComplete?.();
 });
 
 ipcMain.handle('rail:toggle', () => {
@@ -199,7 +276,13 @@ function createWindow() {
         mainWindow.focus();
     });
 
-    mainWindow.on('closed', () => (mainWindow = null));
+    mainWindow.on('closed', () => {
+        stopRailAnimation();
+        if (railWindow && !railWindow.isDestroyed()) {
+            railWindow.destroy();
+        }
+        mainWindow = null;
+    });
 }
 
 function cpuSnapshot() {

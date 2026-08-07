@@ -29,3 +29,13 @@ it("is disabled when disabled is true", () => {
   const { getByRole } = render(<Record isRecording={false} disabled />);
   expect(getByRole("button")).toBeDisabled();
 });
+
+it("has a solid red fill when idle", () => {
+  const { getByRole } = render(<Record isRecording={false} />);
+  expect(getByRole("button").className).toContain("bg-red-500");
+});
+
+it("has a solid, slightly darker red fill when recording", () => {
+  const { getByRole } = render(<Record isRecording={true} />);
+  expect(getByRole("button").className).toContain("bg-red-600");
+});
