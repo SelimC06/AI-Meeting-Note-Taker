@@ -1,9 +1,11 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import RailApp from "./RailApp";
 import { useThreeTrackSegments } from "./hooks/useThreeTrackSegments";
+import { useProcessingJobs } from "./hooks/useProcessingJobs";
 
 vi.mock("./hooks/useThreeTrackSegments");
+vi.mock("./hooks/useProcessingJobs");
 
 // jsdom (this project's test environment) does not implement MediaStream.
 // Provide a minimal stub so this file can construct one; production code
@@ -33,6 +35,19 @@ function mockHook(overrides: Partial<ReturnType<typeof useThreeTrackSegments>> =
     ...overrides,
   });
 }
+
+function mockJobsHook(overrides: Partial<ReturnType<typeof useProcessingJobs>> = {}) {
+  vi.mocked(useProcessingJobs).mockReturnValue({
+    jobs: [],
+    addJob: vi.fn(),
+    removeJob: vi.fn(),
+    ...overrides,
+  });
+}
+
+beforeEach(() => {
+  mockJobsHook();
+});
 
 it("shows a persistent red dot with the hook's error as a tooltip", () => {
   mockHook({ error: { kind: "permission-denied", message: "Screen or microphone access denied — check your OS privacy settings." } });
@@ -298,4 +313,100 @@ it("renders without throwing when given a non-null micStream (RailApp -> useMicL
   mockHook({ status: "recording", micStream: new MediaStream() });
 
   expect(() => render(<RailApp />)).not.toThrow();
+});
+
+it("re-enables recording immediately after /process responds, without waiting for the background job", async () => {
+  const addJob = vi.fn();
+  mockJobsHook({ jobs: [], addJob });
+  const record = vi.fn().mockResolvedValue(undefined);
+  const stop = vi.fn().mockResolvedValue({ screen: new Blob(["x"]) });
+  mockHook({ status: "recording", record, stop, error: null });
+
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: () => Promise.resolve({ job_id: "job-1", session_id: "sess-1" }),
+    })
+  );
+
+  const { container } = render(<RailApp />);
+  const recordButton = container.querySelectorAll("button")[0];
+
+  await act(async () => {
+    fireEvent.click(recordButton);
+  });
+
+  expect(recordButton).not.toBeDisabled();
+  expect(addJob).toHaveBeenCalledWith("job-1");
+});
+
+it("pulses the amber dot with a stage-specific tooltip while a background job is active", () => {
+  mockHook();
+  mockJobsHook({
+    jobs: [{ id: "job-1", stage: "transcribing", status: "running", error: null }],
+  });
+
+  const { container } = render(<RailApp />);
+  const dot = container.querySelector("span[title]") as HTMLElement;
+
+  expect(dot.className).toContain("bg-amber-400");
+  expect(dot).toHaveAttribute("title", "Processing: transcribing");
+});
+
+it("flashes success and drops the job once it reaches done", () => {
+  mockHook();
+  const removeJob = vi.fn();
+  mockJobsHook({
+    jobs: [{ id: "job-1", stage: null, status: "done", error: null }],
+    removeJob,
+  });
+
+  const { container } = render(<RailApp />);
+
+  expect(removeJob).toHaveBeenCalledWith("job-1");
+  const dot = container.querySelector("span[title]") as HTMLElement;
+  expect(dot.className).toContain("bg-signal");
+});
+
+it("shows the job's error via the toast and drops the job once it fails", () => {
+  mockHook();
+  const removeJob = vi.fn();
+  mockJobsHook({
+    jobs: [
+      {
+        id: "job-1",
+        stage: "muxing",
+        status: "failed",
+        error:
+          "Couldn't combine your audio and video — the recording file may be corrupted. Try recording again.",
+      },
+    ],
+    removeJob,
+  });
+
+  const { getByText } = render(<RailApp />);
+
+  expect(removeJob).toHaveBeenCalledWith("job-1");
+  expect(
+    getByText(
+      "Couldn't combine your audio and video — the recording file may be corrupted. Try recording again."
+    )
+  ).toBeInTheDocument();
+});
+
+it("shows a count in the dot's tooltip when more than one job is processing", () => {
+  mockHook();
+  mockJobsHook({
+    jobs: [
+      { id: "job-1", stage: "transcribing", status: "running", error: null },
+      { id: "job-2", stage: "muxing", status: "running", error: null },
+    ],
+  });
+
+  const { container } = render(<RailApp />);
+  const dot = container.querySelector("span[title]") as HTMLElement;
+
+  expect(dot).toHaveAttribute("title", "2 recordings processing");
 });

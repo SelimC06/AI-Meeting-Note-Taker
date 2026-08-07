@@ -193,3 +193,53 @@ export async function getStorageUsage(): Promise<StorageUsage> {
   }
   return (await resp.json()) as StorageUsage;
 }
+
+export type JobStatus = {
+  id: string;
+  session_id: string;
+  status: "queued" | "running" | "done" | "failed";
+  stage: "muxing" | "transcribing" | "summarizing" | "saving" | null;
+  error: string | null;
+  notes: string | null;
+  video_path: string | null;
+  created_at: string;
+};
+
+export async function startProcessing(
+  formData: FormData
+): Promise<{ job_id: string; session_id: string }> {
+  const resp = await fetch(`${BACKEND_URL}/process`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    let detail: string;
+    try {
+      const body = JSON.parse(text);
+      detail = typeof body?.detail === "string" ? body.detail : JSON.stringify(body);
+    } catch {
+      detail = text;
+    }
+    throw new Error(detail);
+  }
+
+  return (await resp.json()) as { job_id: string; session_id: string };
+}
+
+export async function getJobStatus(jobId: string): Promise<JobStatus> {
+  const resp = await fetch(`${BACKEND_URL}/jobs/${jobId}`);
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch job status: ${resp.status}`);
+  }
+  return (await resp.json()) as JobStatus;
+}
+
+export async function listJobs(): Promise<JobStatus[]> {
+  const resp = await fetch(`${BACKEND_URL}/jobs`);
+  if (!resp.ok) {
+    throw new Error(`Failed to list jobs: ${resp.status}`);
+  }
+  return (await resp.json()) as JobStatus[];
+}

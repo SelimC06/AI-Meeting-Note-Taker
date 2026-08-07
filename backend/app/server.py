@@ -39,6 +39,7 @@ from .settings_store import (
 )
 from .bin_paths import FFMPEG_BIN, FFPROBE_BIN
 from .whisper_cache import get_whisper_model
+from . import jobs
 
 try:
     from .ffmpeg_transcribe import stop_recording_and_transcribe  # type: ignore
@@ -487,84 +488,45 @@ def chat(session_id: str, body: ChatRequest):
 
     return StreamingResponse(token_stream(), media_type="text/plain")
 
-@app.post("/process")
-async def process(
-    screen: UploadFile | None = File(None),   # required logically, but optional type so 422 doesn't fire
-    system: UploadFile | None = File(None),   # optional
-    mic:    UploadFile | None = File(None),   # optional
-    frames: List[UploadFile] | None = File(None)
-):
-    """
-    Accepts blobs from the frontend:
-      - screen (video/webm;codecs=vp8 recommended)
-      - system (audio/webm;codecs=opus) [optional]
-      - mic    (audio/webm;codecs=opus) [optional]
+def _run_process_job(job_id: str) -> None:
+    inputs = jobs.get_job_inputs(job_id)
+    if inputs is None:
+        jobs.update_job(job_id, status="failed", error="Internal error: job inputs missing")
+        return
 
-    Steps:
-      1) save uploads (skip empty/invalid)
-      2) convert audios to wav
-      3) mix wavs -> mixed.wav (optional)
-      4) mux with video using a safe encoder/container
-      5) (optional) run your Whisper+LLaVA pipeline
-    """
-    # Bind STORE (and WHISPER_MODEL below) to locals once, at the top, so
-    # this request sees one consistent snapshot of settings throughout --
-    # even though transcription can take minutes and a PATCH /settings
-    # changing storage_dir could otherwise land mid-request, causing the
-    # video files to land in the OLD folder while the index entry gets
-    # appended to the NEW folder's index.
-    store = STORE
-    whisper_model = WHISPER_MODEL
+    job = jobs.get_job(job_id)
+    store = Path(inputs["store"])
+    session = store / job["session_id"]
+    screen_webm = Path(inputs["screen_webm"])
+    system_webm = Path(inputs["system_webm"]) if inputs["system_webm"] else None
+    mic_webm = Path(inputs["mic_webm"]) if inputs["mic_webm"] else None
+    selected_paths = inputs["frame_paths"]
+    whisper_model = inputs["whisper_model"]
 
-    session = store / uuid.uuid4().hex
-    session.mkdir(parents=True, exist_ok=True)
-    log(f"session: {session}")
+    jobs.update_job(job_id, stage="muxing")
 
-    # 1) save uploads
-    screen_webm = save_upload(session, screen, "screen.webm")
-    if not screen_webm:
-        raise HTTPException(400, "valid screen video is required")
-
-    system_webm = save_upload(session, system, "system.webm") if system else None
-    mic_webm    = save_upload(session, mic,    "mic.webm")    if mic    else None
-
-    # 2) normalize -> wav (16k mono)
     system_wav = to_wav(system_webm, session / "system.wav")
-    mic_wav    = to_wav(mic_webm,    session / "mic.wav")
+    mic_wav = to_wav(mic_webm, session / "mic.wav")
+    mixed_wav = mix_audios_wav(system_wav, mic_wav, session / "mixed.wav")
 
-    # 3) mix audio if we have any
-    mixed_wav  = mix_audios_wav(system_wav, mic_wav, session / "mixed.wav")
-
-    # 4) mux with video (robust encoder fallback)
     try:
         final_path = mux_video_audio(screen_webm, mixed_wav, session / "final.webm")
     except Exception as e:
         log(f"mux failed: {e}")
-        raise HTTPException(
-            500,
-            "Couldn't combine your audio and video — the recording file may be corrupted. Try recording again.",
+        jobs.update_job(
+            job_id,
+            status="failed",
+            error=(
+                "Couldn't combine your audio and video — the recording file may be "
+                "corrupted. Try recording again."
+            ),
         )
-
-    selected_paths: list[str] = []
-    if frames:
-        k = min(2, len(frames))
-        n = len(frames)
-        idxs = sorted({round((i + 1) / (k + 1) * (n - 1)) for i in range(k)})  # ~20%,50%,80%, deduped
-
-        frames_dir = session / "frames"
-        frames_dir.mkdir(parents=True, exist_ok=True)
-        for j, idx in enumerate(idxs, start=1):
-            uf = frames[idx]
-            out = frames_dir / f"frame_{j:03d}.png"
-            with out.open("wb") as f:
-                shutil.copyfileobj(uf.file, f)
-            selected_paths.append(str(out))
+        return
 
     notes: str = ""
-    # 5) (optional) run your pipeline if available
     txt_path: Optional[str] = None
+    jobs.update_job(job_id, stage="transcribing")
     if stop_recording_and_transcribe is not None:
-        # Use your helper on the final muxed video; request frames & transcript
         try:
             txt_path, _ = stop_recording_and_transcribe(
                 video_path=str(final_path),
@@ -580,15 +542,10 @@ async def process(
                 max_frames=3,
             )
         except Exception as e:
-            # Leave txt_path as None so the summarization block below is
-            # skipped and the raw-Whisper fallback (further down) runs on
-            # final_path instead -- mirrors the llava_complete failure
-            # handling immediately below, and guarantees the session still
-            # gets appended to the index instead of 500ing and orphaning
-            # the already-uploaded video.
             log(f"stop_recording_and_transcribe failed, falling back to raw transcription: {e}")
             txt_path = None
 
+    jobs.update_job(job_id, stage="summarizing")
     if txt_path is not None:
         try:
             if llava_complete is None:
@@ -622,7 +579,7 @@ async def process(
     if not notes:
         try:
             from faster_whisper import WhisperModel
-            model = get_whisper_model(WhisperModel, whisper_model, compute_type="int8")  # CPU-friendly
+            model = get_whisper_model(WhisperModel, whisper_model, compute_type="int8")
             segments, info = model.transcribe(str(final_path), beam_size=1)
             transcript = "\n".join(s.text.strip() for s in segments if s.text)
             notes = (
@@ -638,6 +595,7 @@ async def process(
                 f"- Final file: {final_path.name}\n"
             )
 
+    jobs.update_job(job_id, stage="saving")
     record = {
         "id": session.name,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -648,11 +606,95 @@ async def process(
     }
     append_session(store, record)
 
-    return {
-        "notes": notes,
-        "video_path": str(final_path),
-        "session": session.name,
-    }
+    jobs.update_job(job_id, status="done", notes=notes, video_path=str(final_path))
+
+
+jobs.start_worker(_run_process_job)
+
+
+@app.post("/process", status_code=202)
+async def process(
+    screen: UploadFile | None = File(None),   # required logically, but optional type so 422 doesn't fire
+    system: UploadFile | None = File(None),   # optional
+    mic:    UploadFile | None = File(None),   # optional
+    frames: List[UploadFile] | None = File(None)
+):
+    """
+    Accepts blobs from the frontend:
+      - screen (video/webm;codecs=vp8 recommended)
+      - system (audio/webm;codecs=opus) [optional]
+      - mic    (audio/webm;codecs=opus) [optional]
+
+    Saves the uploads synchronously, then hands the slow ffmpeg/Whisper/
+    LLaVA pipeline off to the background job queue (see _run_process_job)
+    and returns immediately with a job id to poll via GET /jobs/{job_id}.
+    """
+    # Bind STORE (and WHISPER_MODEL below) to locals once, at the top, so
+    # this request sees one consistent snapshot of settings -- a PATCH
+    # /settings changing storage_dir mid-request shouldn't split where the
+    # video files land from where the session index entry gets appended.
+    store = STORE
+    whisper_model = WHISPER_MODEL
+
+    session = store / uuid.uuid4().hex
+    session.mkdir(parents=True, exist_ok=True)
+    log(f"session: {session}")
+
+    screen_webm = save_upload(session, screen, "screen.webm")
+    if not screen_webm:
+        raise HTTPException(400, "valid screen video is required")
+
+    system_webm = save_upload(session, system, "system.webm") if system else None
+    mic_webm    = save_upload(session, mic,    "mic.webm")    if mic    else None
+
+    selected_paths: list[str] = []
+    if frames:
+        k = min(2, len(frames))
+        n = len(frames)
+        idxs = sorted({round((i + 1) / (k + 1) * (n - 1)) for i in range(k)})  # ~20%,50%,80%, deduped
+
+        frames_dir = session / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for j, idx in enumerate(idxs, start=1):
+            uf = frames[idx]
+            out = frames_dir / f"frame_{j:03d}.png"
+            with out.open("wb") as f:
+                shutil.copyfileobj(uf.file, f)
+            selected_paths.append(str(out))
+
+    job_id = jobs.create_job(
+        session_id=session.name,
+        inputs={
+            "store": str(store),
+            "screen_webm": str(screen_webm),
+            "system_webm": str(system_webm) if system_webm else None,
+            "mic_webm": str(mic_webm) if mic_webm else None,
+            "frame_paths": selected_paths,
+            "whisper_model": whisper_model,
+        },
+    )
+    jobs.enqueue(job_id)
+
+    return {"job_id": job_id, "session_id": session.name}
+
+
+@app.get("/jobs/{job_id}")
+def job_status(job_id: str):
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    return job
+
+
+@app.get("/jobs")
+def jobs_list():
+    # Strip the potentially large notes/video_path fields from the bulk list
+    # response -- the only current consumer (useProcessingJobs's mount-time
+    # rehydration) immediately filters down to queued/running jobs and
+    # discards the rest, so shipping up to 50 terminal jobs' full notes
+    # markdown (up to ~12000 chars each) here is pure waste. Callers needing
+    # the full job detail should hit GET /jobs/{job_id} instead.
+    return [{**job, "notes": None, "video_path": None} for job in jobs.list_jobs()]
 
 
 def _slugify_filename(name: str) -> str:

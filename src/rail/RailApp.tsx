@@ -7,12 +7,20 @@ import ErrorToast from "./components/ErrorToast";
 import { useThreeTrackSegments, type ClassifiedError } from './hooks/useThreeTrackSegments';
 import { useElapsedTime } from './hooks/useElapsedTime';
 import { useMicLevel } from './hooks/useMicLevel';
+import { startProcessing } from "../ui/api";
+import { useProcessingJobs } from "./hooks/useProcessingJobs";
 
-const BACKEND_URL =
-  import.meta.env.VITE_MEETING_API_URL ?? "http://localhost:8000";
+const STAGE_LABELS: Record<string, string> = {
+  queued: "queued",
+  muxing: "combining audio & video",
+  transcribing: "transcribing",
+  summarizing: "summarizing",
+  saving: "saving",
+};
 
 export default function RailApp() {
     const { status, record, pause, resume, stop, error: recordError, micStream } = useThreeTrackSegments();
+    const { jobs, addJob, removeJob } = useProcessingJobs();
 
     const [resultFlash, setResultFlash] = useState<"success" | null>(null);
     const [isProcessing, setIsProcessing] = useState(false);
@@ -28,12 +36,34 @@ export default function RailApp() {
         return () => clearTimeout(timer);
     }, [resultFlash]);
 
+    useEffect(() => {
+        const finished = jobs.find((j) => j.status === "done");
+        if (finished) {
+            setResultFlash("success");
+            removeJob(finished.id);
+            return;
+        }
+        const failed = jobs.find((j) => j.status === "failed");
+        if (failed) {
+            setProcessError(failed.error ?? "Processing failed.");
+            removeJob(failed.id);
+        }
+    }, [jobs, removeJob]);
+
     const isRecording = status === "recording";
     const isPaused = status === "paused";
     const displayError = useMemo<ClassifiedError | null>(
         () => recordError ?? (processError ? { kind: "generic", message: processError } : null),
         [recordError, processError]
     );
+
+    const hasActiveJobs = jobs.some((j) => j.status === "queued" || j.status === "running");
+    const jobStatusTitle =
+        jobs.length === 1
+            ? `Processing: ${STAGE_LABELS[jobs[0].stage ?? "queued"]}`
+            : jobs.length > 1
+            ? `${jobs.length} recordings processing`
+            : undefined;
 
     const previousErrorRef = useRef<ClassifiedError | null>(null);
     useEffect(() => {
@@ -66,12 +96,9 @@ export default function RailApp() {
 
             setIsProcessing(true);
             try {
-                let resp: Response;
+                let result: { job_id: string; session_id: string };
                 try {
-                    resp = await fetch(`${BACKEND_URL}/process`, {
-                        method: "POST",
-                        body: formData,
-                    });
+                    result = await startProcessing(formData);
                 } catch (networkErr) {
                     if (networkErr instanceof TypeError) {
                         throw new Error("Couldn't reach the app backend — is it running?");
@@ -79,19 +106,7 @@ export default function RailApp() {
                     throw networkErr;
                 }
 
-                if (!resp.ok) {
-                    const text = await resp.text();
-                    let detail: string;
-                    try {
-                        const body = JSON.parse(text);
-                        detail = typeof body?.detail === "string" ? body.detail : JSON.stringify(body);
-                    } catch {
-                        detail = text;
-                    }
-                    throw new Error(detail);
-                }
-
-                setResultFlash("success");
+                addJob(result.job_id);
             } catch (err) {
                 console.error("/process failed", err);
                 setProcessError(err instanceof Error ? err.message : String(err));
@@ -143,10 +158,10 @@ export default function RailApp() {
                 />
 
                 <span
-                    title={isProcessing ? "Processing recording…" : displayError?.message ?? undefined}
+                    title={isProcessing ? "Uploading recording…" : displayError?.message ?? jobStatusTitle}
                     className={
                         "ml-auto h-2.5 w-2.5 flex-none rounded-full border border-void transition-colors " +
-                        (isProcessing
+                        (isProcessing || hasActiveJobs
                             ? "bg-amber-400 animate-pulse"
                             : displayError
                             ? "bg-red-500"

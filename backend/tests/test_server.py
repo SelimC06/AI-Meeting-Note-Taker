@@ -20,6 +20,21 @@ def client(tmp_path, monkeypatch):
     return TestClient(app)
 
 
+import time
+
+
+def wait_for_job(client: TestClient, job_id: str, timeout: float = 2.0) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        resp = client.get(f"/jobs/{job_id}")
+        assert resp.status_code == 200
+        job = resp.json()
+        if job["status"] in ("done", "failed"):
+            return job
+        time.sleep(0.01)
+    raise AssertionError(f"job {job_id} did not finish within {timeout}s")
+
+
 def test_root_respects_app_data_dir_env_var(tmp_path, monkeypatch):
     import importlib
     import app.server as server_module
@@ -74,7 +89,7 @@ def test_process_rejects_invalid_screen_upload(client: TestClient):
     assert resp.status_code == 400
 
 
-def test_process_returns_friendly_500_when_mux_fails(client, monkeypatch):
+def test_process_job_fails_with_friendly_message_when_mux_fails(client, monkeypatch):
     def fake_save_upload(dst_dir, uf, name):
         out = dst_dir / name
         out.write_bytes(b"fake video bytes")
@@ -90,8 +105,12 @@ def test_process_returns_friendly_500_when_mux_fails(client, monkeypatch):
         "/process",
         files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
     )
-    assert resp.status_code == 500
-    assert resp.json()["detail"] == (
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+
+    job = wait_for_job(client, job_id)
+    assert job["status"] == "failed"
+    assert job["error"] == (
         "Couldn't combine your audio and video — the recording file may be "
         "corrupted. Try recording again."
     )
@@ -100,6 +119,9 @@ def test_process_returns_friendly_500_when_mux_fails(client, monkeypatch):
 def test_process_falls_back_to_stub_notes_without_transcription(client, monkeypatch):
     # Force the "transcription helper unavailable" path that previously
     # caused a NameError on txt_path.
+    import sys
+    import types
+
     monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
     monkeypatch.setattr(server_module, "llava_complete", None)
 
@@ -115,14 +137,37 @@ def test_process_falls_back_to_stub_notes_without_transcription(client, monkeypa
     monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
     monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
 
+    # This scenario falls all the way through to the real (unmocked)
+    # faster_whisper fallback path, which would otherwise load a real
+    # WhisperModel from disk/cache -- far slower than wait_for_job's
+    # default timeout. Mock faster_whisper the same way
+    # test_process_fallback_whisper_uses_configured_model does, so the
+    # fallback code path is still exercised without the real ML model load.
+    # transcribe() raises so this test exercises the stub-notes ("Key
+    # Points") except branch, not the transcript-success branch.
+    class FakeWhisperModel:
+        def __init__(self, model_name, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1):
+            raise RuntimeError("simulated whisper failure")
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
     resp = client.post(
         "/process",
         files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
     )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "notes" in body
-    assert "session" in body
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+
+    job = wait_for_job(client, job_id)
+    assert job["status"] == "done"
+    assert job["notes"]
+    assert "Key Points" in job["notes"]
+    assert job["session_id"] == resp.json()["session_id"]
 
 
 def test_process_skips_summarization_when_no_transcript(client, monkeypatch, capsys):
@@ -154,6 +199,9 @@ def test_process_skips_summarization_when_no_transcript(client, monkeypatch, cap
     before the call is made). We assert on captured stdout to distinguish
     the two behaviors, since the response body alone cannot.
     """
+    import sys
+    import types
+
     monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
 
     llava_calls = []
@@ -176,14 +224,35 @@ def test_process_skips_summarization_when_no_transcript(client, monkeypatch, cap
     monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
     monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
 
+    # As explained above, llava_complete is never actually invoked on either
+    # code path here, so this scenario also falls through to the real
+    # (unmocked) faster_whisper fallback, which would otherwise load a real
+    # WhisperModel from disk/cache. Mock it out the same way
+    # test_process_fallback_whisper_uses_configured_model does.
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1):
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
     resp = client.post(
         "/process",
         files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
     )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "notes" in body
-    assert "session" in body
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+
+    job = wait_for_job(client, job_id)
+    assert job["status"] == "done"
+    assert job["notes"]
 
     # The summarization block must never run when there is no transcript:
     # llava_complete should not be invoked...
@@ -245,9 +314,12 @@ def test_process_reuses_existing_transcript_when_summarization_fails(client, mon
         "/process",
         files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
     )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "hello from existing transcript" in body["notes"]
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+
+    job = wait_for_job(client, job_id)
+    assert job["status"] == "done"
+    assert "hello from existing transcript" in job["notes"]
 
 
 def test_process_survives_stop_recording_and_transcribe_failure(client, monkeypatch, capsys):
@@ -296,16 +368,17 @@ def test_process_survives_stop_recording_and_transcribe_failure(client, monkeypa
         "/process",
         files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
     )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
 
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "notes" in body
-    assert "session" in body
+    job = wait_for_job(client, job_id)
+    assert job["status"] == "done"
+    assert job["notes"]
 
     # The session must still be recorded in the index -- this is the actual
     # bug: pre-fix, the uncaught exception meant append_session() never ran.
     sessions = client.get("/sessions").json()
-    assert any(s["id"] == body["session"] for s in sessions)
+    assert any(s["id"] == job["session_id"] for s in sessions)
 
     captured = capsys.readouterr()
     assert "stop_recording_and_transcribe failed" in captured.out
@@ -318,6 +391,9 @@ def test_sessions_empty_when_no_index(client: TestClient):
 
 
 def test_process_appends_to_sessions_and_get_sessions_returns_it(client, monkeypatch):
+    import sys
+    import types
+
     monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
     monkeypatch.setattr(server_module, "llava_complete", None)
 
@@ -333,12 +409,32 @@ def test_process_appends_to_sessions_and_get_sessions_returns_it(client, monkeyp
     monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
     monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
 
+    # This falls through to the real (unmocked) faster_whisper fallback
+    # path; mock it out to avoid loading a real WhisperModel (see
+    # test_process_fallback_whisper_uses_configured_model for the pattern).
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1):
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
     resp = client.post(
         "/process",
         files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
     )
-    assert resp.status_code == 200
-    session_id = resp.json()["session"]
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    job = wait_for_job(client, job_id)
+    assert job["status"] == "done"
+    session_id = job["session_id"]
 
     sessions_resp = client.get("/sessions")
     assert sessions_resp.status_code == 200
@@ -346,14 +442,16 @@ def test_process_appends_to_sessions_and_get_sessions_returns_it(client, monkeyp
     assert len(sessions) == 1
     entry = sessions[0]
     assert entry["id"] == session_id
-    assert entry["notes"] == resp.json()["notes"]
+    assert entry["notes"] == job["notes"]
     assert "created_at" in entry
-    # created_at must be parseable ISO 8601
     datetime.fromisoformat(entry["created_at"])
     assert entry["title"]  # non-empty, extracted or fallback
 
 
 def test_sessions_returns_newest_first(client, monkeypatch):
+    import sys
+    import types
+
     monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
     monkeypatch.setattr(server_module, "llava_complete", None)
 
@@ -369,13 +467,31 @@ def test_sessions_returns_newest_first(client, monkeypatch):
     monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
     monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
 
+    # This falls through to the real (unmocked) faster_whisper fallback
+    # path; mock it out to avoid loading a real WhisperModel (see
+    # test_process_fallback_whisper_uses_configured_model for the pattern).
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1):
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
     ids = []
     for _ in range(2):
         resp = client.post(
             "/process",
             files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
         )
-        ids.append(resp.json()["session"])
+        job = wait_for_job(client, resp.json()["job_id"])
+        ids.append(job["session_id"])
 
     sessions = client.get("/sessions").json()
     assert [s["id"] for s in sessions] == list(reversed(ids))
@@ -633,6 +749,9 @@ def test_healthz_alias_matches_health(client: TestClient):
 
 
 def test_process_dedupes_frame_indices_for_small_frame_count(client, monkeypatch):
+    import sys
+    import types
+
     monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
     monkeypatch.setattr(server_module, "llava_complete", None)
 
@@ -648,6 +767,23 @@ def test_process_dedupes_frame_indices_for_small_frame_count(client, monkeypatch
     monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
     monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
 
+    # This falls through to the real (unmocked) faster_whisper fallback
+    # path; mock it out to avoid loading a real WhisperModel (see
+    # test_process_fallback_whisper_uses_configured_model for the pattern).
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1):
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
     # n=2 frames: pre-fix idxs would be [round(1/3*1), round(2/3*1)] = [0, 1] here,
     # which already doesn't collide -- use n where both picks land on the same
     # index (n=1: (n-1)=0 for every i) to exercise the dedup path.
@@ -658,7 +794,9 @@ def test_process_dedupes_frame_indices_for_small_frame_count(client, monkeypatch
             ("frames", ("frame0.png", io.BytesIO(b"f0"), "image/png")),
         ],
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    wait_for_job(client, job_id)
 
     frames_dir = None
     for p in server_module.STORE.iterdir():
@@ -669,6 +807,178 @@ def test_process_dedupes_frame_indices_for_small_frame_count(client, monkeypatch
     assert frames_dir is not None
     saved = sorted(frames_dir.glob("frame_*.png"))
     assert len(saved) == 1
+
+
+def test_job_status_404_for_unknown_job_id(client: TestClient):
+    resp = client.get("/jobs/some-unknown-id")
+    assert resp.status_code == 404
+
+
+def test_jobs_list_contains_created_job_with_expected_keys(client, monkeypatch):
+    import sys
+    import types
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    # This falls through to the real (unmocked) faster_whisper fallback
+    # path; mock it out to avoid loading a real WhisperModel (see
+    # test_process_fallback_whisper_uses_configured_model for the pattern).
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1):
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    wait_for_job(client, job_id)
+
+    list_resp = client.get("/jobs")
+    assert list_resp.status_code == 200
+    body = list_resp.json()
+    assert isinstance(body, list)
+    matching = [j for j in body if j["id"] == job_id]
+    assert len(matching) == 1
+    entry = matching[0]
+    for key in (
+        "id", "session_id", "status", "stage", "error", "notes", "video_path", "created_at",
+    ):
+        assert key in entry
+
+
+def test_jobs_list_strips_notes_and_video_path_but_job_detail_keeps_them(client, monkeypatch):
+    import sys
+    import types
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    # This falls through to the real (unmocked) faster_whisper fallback
+    # path; mock it out to avoid loading a real WhisperModel (see
+    # test_process_fallback_whisper_uses_configured_model for the pattern).
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1):
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    job = wait_for_job(client, job_id)
+    assert job["status"] == "done"
+    assert job["notes"]
+    assert job["video_path"]
+
+    list_resp = client.get("/jobs")
+    assert list_resp.status_code == 200
+    entry = next(j for j in list_resp.json() if j["id"] == job_id)
+    assert entry["notes"] is None
+    assert entry["video_path"] is None
+
+    detail_resp = client.get(f"/jobs/{job_id}")
+    assert detail_resp.status_code == 200
+    detail = detail_resp.json()
+    assert detail["notes"] == job["notes"]
+    assert detail["video_path"] == job["video_path"]
+
+
+def test_process_jobs_run_serially_not_concurrently(client, monkeypatch):
+    import threading
+    import time as time_module
+
+    monkeypatch.setattr(server_module, "llava_complete", None)
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    active = {"count": 0}
+    max_concurrent = {"value": 0}
+    lock = threading.Lock()
+
+    def slow_stop_recording_and_transcribe(**kwargs):
+        with lock:
+            active["count"] += 1
+            max_concurrent["value"] = max(max_concurrent["value"], active["count"])
+        time_module.sleep(0.1)
+        with lock:
+            active["count"] -= 1
+        return None, []
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", slow_stop_recording_and_transcribe
+    )
+
+    job_ids = []
+    for _ in range(3):
+        resp = client.post(
+            "/process",
+            files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+        )
+        assert resp.status_code == 202
+        job_ids.append(resp.json()["job_id"])
+
+    for job_id in job_ids:
+        wait_for_job(client, job_id, timeout=5.0)
+
+    assert max_concurrent["value"] == 1
 
 
 def test_get_settings_returns_current_values_and_choices(client: TestClient):
@@ -904,7 +1214,14 @@ def test_process_uses_configured_whisper_model_via_transcribe_helper(client, mon
         "/process",
         files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 202
+    # This test exercises the real (unmocked) faster_whisper fallback path
+    # (stop_recording_and_transcribe returns no txt_path and llava_complete
+    # is None), so the job has to actually construct a real WhisperModel --
+    # on this machine that cold load consistently takes >2s, well past
+    # wait_for_job's default timeout. Give it more headroom rather than
+    # flaking; the point of this test is the model name plumbing, not timing.
+    wait_for_job(client, resp.json()["job_id"], timeout=30.0)
     assert captured["model_name"] == "small.en"
 
 
@@ -949,7 +1266,8 @@ def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
         "/process",
         files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"])
     assert captured["model_name"] == "medium.en"
 
 
