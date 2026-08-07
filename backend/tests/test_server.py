@@ -250,6 +250,67 @@ def test_process_reuses_existing_transcript_when_summarization_fails(client, mon
     assert "hello from existing transcript" in body["notes"]
 
 
+def test_process_survives_stop_recording_and_transcribe_failure(client, monkeypatch, capsys):
+    """
+    Regression test: if stop_recording_and_transcribe() raises (ffmpeg/Whisper
+    failure on a corrupted or unusual upload), /process must not 500 -- it
+    should log the failure and fall back to the existing raw-Whisper path,
+    same as the llava_complete failure handling right below it.
+    """
+    import sys
+    import types
+
+    monkeypatch.setattr(server_module, "llava_complete", None)
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    def failing_stop_recording_and_transcribe(**kwargs):
+        raise RuntimeError("ffmpeg exploded")
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", failing_stop_recording_and_transcribe
+    )
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1):
+            return [], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "notes" in body
+    assert "session" in body
+
+    # The session must still be recorded in the index -- this is the actual
+    # bug: pre-fix, the uncaught exception meant append_session() never ran.
+    sessions = client.get("/sessions").json()
+    assert any(s["id"] == body["session"] for s in sessions)
+
+    captured = capsys.readouterr()
+    assert "stop_recording_and_transcribe failed" in captured.out
+
+
 def test_sessions_empty_when_no_index(client: TestClient):
     resp = client.get("/sessions")
     assert resp.status_code == 200
@@ -419,6 +480,125 @@ def test_process_rejects_oversized_upload_by_content_length(client, monkeypatch)
         "/process",
         files={"screen": ("screen.webm", io.BytesIO(b"x" * 1000), "video/webm")},
     )
+    assert resp.status_code == 413
+
+
+def test_max_upload_middleware_rejects_malformed_content_length():
+    """
+    Regression test: a non-numeric Content-Length header must be rejected
+    cleanly (400), not crash the middleware with an unhandled ValueError (500).
+    """
+    import asyncio
+
+    async def unreachable_app(scope, receive, send):
+        raise AssertionError("downstream app should not be reached for a malformed header")
+
+    middleware = server_module.MaxUploadSizeMiddleware(unreachable_app)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/process",
+        "headers": [(b"content-length", b"not-a-number")],
+    }
+
+    async def receive():
+        raise AssertionError("receive should not be called before the header is validated")
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(middleware(scope, receive, send))
+
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    assert status == 400
+
+
+def test_max_upload_middleware_raises_http_exception_without_content_length(monkeypatch):
+    """
+    Regression test: uploads with no Content-Length header (e.g. chunked
+    transfer-encoding) must still be capped at MAX_UPLOAD_BYTES by counting
+    bytes as the body streams in.
+
+    _UploadTooLarge is an HTTPException subclass so that, in the real app,
+    FastAPI's routing.py re-raises it untouched (it only converts non-
+    HTTPException errors) and Starlette's ExceptionMiddleware renders it as
+    a proper 413 response. This hand-built ASGI stub has no
+    ExceptionMiddleware layer above it, so the exception simply propagates
+    out of the middleware call -- see
+    test_process_rejects_oversized_upload_without_content_length below for
+    the end-to-end proof against the real app.
+    """
+    import asyncio
+
+    monkeypatch.setattr(server_module, "MAX_UPLOAD_BYTES", 10)
+
+    async def consume_all_app(scope, receive, send):
+        more = True
+        while more:
+            message = await receive()
+            more = message.get("more_body", False)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    middleware = server_module.MaxUploadSizeMiddleware(consume_all_app)
+    scope = {"type": "http", "method": "POST", "path": "/process", "headers": []}
+    chunks = [
+        {"type": "http.request", "body": b"x" * 6, "more_body": True},
+        {"type": "http.request", "body": b"y" * 6, "more_body": False},
+    ]
+
+    async def receive():
+        return chunks.pop(0)
+
+    async def send(message):
+        pass
+
+    with pytest.raises(server_module.HTTPException) as excinfo:
+        asyncio.run(middleware(scope, receive, send))
+
+    assert excinfo.value.status_code == 413
+
+
+def test_process_rejects_oversized_upload_without_content_length(client, monkeypatch):
+    """
+    End-to-end regression test against the REAL FastAPI app (not a hand-built
+    ASGI stub): a chunked/streamed multipart POST with no declared
+    Content-Length that exceeds MAX_UPLOAD_BYTES must still be rejected with
+    413, not 400.
+
+    This guards against the class of bug where _UploadTooLarge, if it were a
+    bare Exception, gets caught and converted to a generic 400 by FastAPI's
+    routing.py while it's inside `await request.form()` -- routing.py only
+    re-raises HTTPException as-is and converts everything else. Because
+    _UploadTooLarge is now an HTTPException subclass, it survives that layer
+    untouched and Starlette's ExceptionMiddleware renders the real 413.
+    """
+    monkeypatch.setattr(server_module, "MAX_UPLOAD_BYTES", 10)
+
+    boundary = "testboundary"
+    field_header = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="screen"; filename="screen.webm"\r\n'
+        f"Content-Type: video/webm\r\n\r\n"
+    ).encode()
+    field_footer = f"\r\n--{boundary}--\r\n".encode()
+
+    def body_stream():
+        yield field_header
+        # Well over the tiny MAX_UPLOAD_BYTES cap, streamed in chunks so no
+        # Content-Length is ever declared.
+        for _ in range(5):
+            yield b"x" * 1000
+        yield field_footer
+
+    resp = client.post(
+        "/process",
+        content=body_stream(),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+
     assert resp.status_code == 413
 
 
@@ -608,6 +788,48 @@ def test_patch_settings_storage_dir_refuses_non_empty_destination(client: TestCl
     resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
     assert resp.status_code == 400
     assert server_module.STORE == original_store
+
+
+def test_patch_settings_holds_save_lock_during_storage_move(client, tmp_path, monkeypatch):
+    """
+    Regression test for the storage-move race: while a PATCH /settings
+    request that changes storage_dir is inside move_storage_dir, SAVE_LOCK
+    must still be held so a second concurrent PATCH can't start its own
+    move against the same source directory.
+    """
+    import threading
+    from app import settings_store
+
+    new_dir = tmp_path / "moved"
+    original_move = server_module.move_storage_dir
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    def slow_move(old, new):
+        entered.set()
+        proceed.wait(timeout=2)
+        return original_move(old, new)
+
+    monkeypatch.setattr(server_module, "move_storage_dir", slow_move)
+
+    def do_patch():
+        client.patch("/settings", json={"storage_dir": str(new_dir)})
+
+    t = threading.Thread(target=do_patch)
+    t.start()
+    assert entered.wait(timeout=2), "move_storage_dir was not entered"
+
+    # While the request thread is inside move_storage_dir, a non-blocking
+    # acquire of SAVE_LOCK from this thread must fail -- proving the lock
+    # is held for the whole move, not just the later save() call.
+    lock_free = settings_store.SAVE_LOCK.acquire(blocking=False)
+    if lock_free:
+        settings_store.SAVE_LOCK.release()
+
+    proceed.set()
+    t.join(timeout=2)
+
+    assert lock_free is False
 
 
 def test_ollama_models_returns_installed_models(client: TestClient, monkeypatch):
@@ -993,6 +1215,16 @@ def test_export_zip_contains_final_webm_and_notes(client: TestClient):
 def test_export_zip_404_for_unknown_id(client: TestClient):
     resp = client.get("/sessions/does-not-exist/export/zip")
     assert resp.status_code == 404
+
+
+def test_export_zip_rejects_path_traversal_session_id(client: TestClient):
+    """
+    Regression test: session_id must be validated as a plain hex id before
+    it's used to build a filesystem path, as defense-in-depth even though
+    the sessions_index.json lookup already gates unknown ids today.
+    """
+    resp = client.get("/sessions/%2e%2e/export/zip")
+    assert resp.status_code == 400
 
 
 def test_export_zip_404_when_session_folder_missing(client: TestClient):

@@ -155,6 +155,29 @@ def test_ffmpeg_has_encoder_false_when_absent(monkeypatch):
     assert server_module.ffmpeg_has_encoder("libopus") is False
 
 
+def test_ffmpeg_has_encoder_tolerates_tab_separated_output(monkeypatch):
+    monkeypatch.setattr(
+        server_module,
+        "run",
+        lambda cmd: _cp(returncode=0, stdout=" A.....\tlibopus\tOpus (Interactive Audio Codec)\n"),
+    )
+    assert server_module.ffmpeg_has_encoder("libopus") is True
+
+
+def test_ffmpeg_has_encoder_does_not_match_substring_names(monkeypatch):
+    monkeypatch.setattr(
+        server_module,
+        "run",
+        lambda cmd: _cp(returncode=0, stdout=" A..... libopus_experimental  Opus (exp)\n"),
+    )
+    assert server_module.ffmpeg_has_encoder("libopus") is False
+
+
+def test_ffmpeg_has_encoder_false_when_ffmpeg_command_fails(monkeypatch):
+    monkeypatch.setattr(server_module, "run", lambda cmd: _cp(returncode=1, stdout=""))
+    assert server_module.ffmpeg_has_encoder("libopus") is False
+
+
 # ---- mux_video_audio ----------------------------------------------------------
 
 def test_mux_video_audio_copies_when_no_audio(tmp_path):

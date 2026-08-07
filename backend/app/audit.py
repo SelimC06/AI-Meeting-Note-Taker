@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os, time, uuid, json, re
+import threading
 from pathlib import Path
 from typing import Callable
 from fastapi import Request
@@ -16,6 +17,7 @@ _BASE_DIR = Path(_app_data_dir_env) if _app_data_dir_env else Path(__file__).res
 LOG_DIR = _BASE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_PATH = LOG_DIR / "audit.jsonl"
+_LOG_LOCK = threading.Lock()
 
 SENSITIVE_KEYS = {"password","token","code","client_secret","authorization","cookie","sid"}
 
@@ -60,7 +62,8 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 "status": status_code,
                 "duration_ms": duration_ms,
             })
-            with LOG_PATH.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(_redact(entry), ensure_ascii=False) + "\n")
+            with _LOG_LOCK:
+                with LOG_PATH.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(_redact(entry), ensure_ascii=False) + "\n")
         resp.headers["X-Request-Id"] = rid
         return resp

@@ -4,7 +4,6 @@ from fastapi.responses import StreamingResponse, Response
 from .audit import AuditMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.types import Scope, Receive, Send
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import PlainTextResponse
 from pathlib import Path
 from pydantic import BaseModel
@@ -30,6 +29,7 @@ from .sessions_store import (
     compute_storage_usage,
 )
 from .settings_store import (
+    SAVE_LOCK,
     WHISPER_MODEL_CHOICES,
     WHISPER_MODEL_VALUES,
     StorageMoveError,
@@ -76,15 +76,54 @@ MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "2048"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 
-class MaxUploadSizeMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        if request.method == "POST" and request.url.path == "/process":
-            content_length = request.headers.get("content-length")
-            if content_length is not None and int(content_length) > MAX_UPLOAD_BYTES:
-                return PlainTextResponse(
+class _UploadTooLarge(HTTPException):
+    def __init__(self):
+        super().__init__(413, f"Upload too large (max {MAX_UPLOAD_MB} MB)")
+
+
+class MaxUploadSizeMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope.get("method") != "POST" or scope.get("path") != "/process":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or [])
+        content_length = headers.get(b"content-length")
+
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError:
+                response = PlainTextResponse("Invalid Content-Length header", status_code=400)
+                await response(scope, receive, send)
+                return
+            if declared_size > MAX_UPLOAD_BYTES:
+                response = PlainTextResponse(
                     f"Upload too large (max {MAX_UPLOAD_MB} MB)", status_code=413
                 )
-        return await call_next(request)
+                await response(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+            return
+
+        # No Content-Length header (e.g. chunked transfer-encoding): the
+        # declared-size check above can't run, so enforce the cap by
+        # counting actual bytes as the body streams in instead.
+        seen = 0
+
+        async def limited_receive():
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body") or b"")
+                if seen > MAX_UPLOAD_BYTES:
+                    raise _UploadTooLarge()
+            return message
+
+        await self.app(scope, limited_receive, send)
 
 
 app.add_middleware(MaxUploadSizeMiddleware)
@@ -184,8 +223,21 @@ def mix_audios_wav(system_wav: Optional[Path], mic_wav: Optional[Path], out_wav:
 
 
 def ffmpeg_has_encoder(name: str) -> bool:
+    """Check `ffmpeg -encoders` output for an exact encoder name match.
+
+    Matches on whitespace-delimited tokens (the encoder name is always the
+    second column, after the capability flags) rather than a literal
+    " name " substring, since real ffmpeg builds vary column separators
+    between single spaces, multiple spaces, and tabs.
+    """
     enc = run([FFMPEG_BIN, "-hide_banner", "-encoders"])
-    return enc.returncode == 0 and f" {name} " in (enc.stdout or "")
+    if enc.returncode != 0 or not enc.stdout:
+        return False
+    for line in enc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == name:
+            return True
+    return False
 
 
 def mux_video_audio(video: Path, audio: Optional[Path], out_path: Path) -> Path:
@@ -330,35 +382,41 @@ def patch_settings(body: SettingsUpdate):
     if body.storage_dir is not None and not Path(body.storage_dir).is_absolute():
         raise HTTPException(400, "Storage folder must be an absolute path")
 
-    # Build the merge base from the current LIVE globals (not a fresh disk
-    # read via load_settings) so a corrupted/deleted settings.json can't
-    # cause patch_settings to silently merge onto stale re-seeded defaults.
-    # Passing a full dict as `updates` makes save_settings's internal
-    # load_or_init-based merge a no-op on whatever is on disk.
-    updates: dict = {
-        "whisper_model": WHISPER_MODEL,
-        "storage_dir": str(STORE),
-        "ollama_chat_model": OLLAMA_CHAT_MODEL,
-    }
-    if body.whisper_model is not None:
-        updates["whisper_model"] = body.whisper_model
-    if body.ollama_chat_model is not None:
-        updates["ollama_chat_model"] = body.ollama_chat_model
+    # Hold SAVE_LOCK across the move AND the save AND the global reassignment
+    # so a second concurrent PATCH /settings changing storage_dir can't start
+    # its own move_storage_dir against the same source directory while this
+    # one is still in flight (SAVE_LOCK is an RLock, so save_settings()
+    # re-acquiring it below on the same thread is safe).
+    with SAVE_LOCK:
+        # Build the merge base from the current LIVE globals (not a fresh disk
+        # read via load_settings) so a corrupted/deleted settings.json can't
+        # cause patch_settings to silently merge onto stale re-seeded defaults.
+        # Passing a full dict as `updates` makes save_settings's internal
+        # load_or_init-based merge a no-op on whatever is on disk.
+        updates: dict = {
+            "whisper_model": WHISPER_MODEL,
+            "storage_dir": str(STORE),
+            "ollama_chat_model": OLLAMA_CHAT_MODEL,
+        }
+        if body.whisper_model is not None:
+            updates["whisper_model"] = body.whisper_model
+        if body.ollama_chat_model is not None:
+            updates["ollama_chat_model"] = body.ollama_chat_model
 
-    if body.storage_dir is not None:
-        new_dir = Path(body.storage_dir)
-        try:
-            move_storage_dir(STORE, new_dir)
-        except StorageMoveError as e:
-            raise HTTPException(400, str(e))
-        updates["storage_dir"] = str(new_dir)
+        if body.storage_dir is not None:
+            new_dir = Path(body.storage_dir)
+            try:
+                move_storage_dir(STORE, new_dir)
+            except StorageMoveError as e:
+                raise HTTPException(400, str(e))
+            updates["storage_dir"] = str(new_dir)
 
-    settings = save_settings(SETTINGS_PATH, updates, ROOT / "uploads")
+        settings = save_settings(SETTINGS_PATH, updates, ROOT / "uploads")
 
-    STORE = Path(settings["storage_dir"])
-    STORE.mkdir(parents=True, exist_ok=True)
-    WHISPER_MODEL = settings["whisper_model"]
-    OLLAMA_CHAT_MODEL = settings["ollama_chat_model"]
+        STORE = Path(settings["storage_dir"])
+        STORE.mkdir(parents=True, exist_ok=True)
+        WHISPER_MODEL = settings["whisper_model"]
+        OLLAMA_CHAT_MODEL = settings["ollama_chat_model"]
 
     return {**settings, "whisper_model_choices": WHISPER_MODEL_CHOICES}
 
@@ -506,19 +564,29 @@ async def process(
     txt_path: Optional[str] = None
     if stop_recording_and_transcribe is not None:
         # Use your helper on the final muxed video; request frames & transcript
-        txt_path, _ = stop_recording_and_transcribe(
-            video_path=str(final_path),
-            transcript_prefix=str(session / "transcript_"),
-            model_name=whisper_model,
-            separate_tracks=False,
-            extract_frames_after=True,
-            frames_out_dir=str(session / "frames"),
-            every_n_seconds=5.0,
-            scale_width=960,
-            image_ext="png",
-            quality=2,
-            max_frames=3,
-        )
+        try:
+            txt_path, _ = stop_recording_and_transcribe(
+                video_path=str(final_path),
+                transcript_prefix=str(session / "transcript_"),
+                model_name=whisper_model,
+                separate_tracks=False,
+                extract_frames_after=True,
+                frames_out_dir=str(session / "frames"),
+                every_n_seconds=5.0,
+                scale_width=960,
+                image_ext="png",
+                quality=2,
+                max_frames=3,
+            )
+        except Exception as e:
+            # Leave txt_path as None so the summarization block below is
+            # skipped and the raw-Whisper fallback (further down) runs on
+            # final_path instead -- mirrors the llava_complete failure
+            # handling immediately below, and guarantees the session still
+            # gets appended to the index instead of 500ing and orphaning
+            # the already-uploaded video.
+            log(f"stop_recording_and_transcribe failed, falling back to raw transcription: {e}")
+            txt_path = None
 
     if txt_path is not None:
         try:
@@ -591,6 +659,16 @@ def _slugify_filename(name: str) -> str:
     return slug or "session"
 
 
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _is_valid_session_id(session_id: str) -> bool:
+    """Session ids are always uuid.uuid4().hex (32 lowercase hex chars); this
+    is a defense-in-depth format check before session_id is used to build a
+    filesystem path, independent of the sessions_index.json lookup."""
+    return bool(session_id) and "/" not in session_id and "\\" not in session_id and _SESSION_ID_RE.match(session_id) is not None
+
+
 @app.get("/sessions/{session_id}/export/notes")
 def export_session_notes(session_id: str):
     store = STORE
@@ -609,6 +687,8 @@ def export_session_notes(session_id: str):
 
 @app.get("/sessions/{session_id}/export/zip")
 def export_session_zip(session_id: str):
+    if not _is_valid_session_id(session_id):
+        raise HTTPException(400, "Invalid session id")
     store = STORE
     matching = [s for s in load_sessions(store) if s.get("id") == session_id]
     if not matching:

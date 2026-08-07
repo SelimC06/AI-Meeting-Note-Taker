@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict
 
-_SAVE_LOCK = threading.Lock()
+SAVE_LOCK = threading.RLock()
 
 WHISPER_MODEL_CHOICES = [
     {"value": "tiny.en", "label": "Tiny", "description": "Fastest, lower accuracy"},
@@ -66,8 +66,12 @@ def save(path: Path, updates: Dict[str, Any], default_storage_dir: Path) -> Dict
     click with no debounce, and FastAPI sync handlers run in a threadpool,
     so concurrent requests are genuinely parallel) can't interleave and
     tear/lose a write, mirroring sessions_store.append_session's locking.
+
+    SAVE_LOCK is reentrant (RLock) because server.py's patch_settings also
+    holds it across move_storage_dir before calling this function, and this
+    function acquiring it again on the same thread must not deadlock.
     """
-    with _SAVE_LOCK:
+    with SAVE_LOCK:
         current = load_or_init(path, default_storage_dir)
         merged = {**current, **updates}
         _write_json_dict(path, merged)

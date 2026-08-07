@@ -266,3 +266,21 @@ def test_move_storage_dir_refuses_deeply_nested_destination(tmp_path):
         move_storage_dir(old_dir, session_dir / "archive")
 
     assert (session_dir / "final.webm").read_bytes() == b"video"
+
+
+def test_save_lock_is_reentrant(tmp_path):
+    """
+    server.py's patch_settings holds SAVE_LOCK across move_storage_dir AND
+    save() (which itself acquires SAVE_LOCK) to close the storage-move race.
+    That only works if the lock is reentrant -- a plain threading.Lock would
+    deadlock here.
+    """
+    from app.settings_store import SAVE_LOCK, save
+
+    settings_path = tmp_path / "settings.json"
+    default_dir = tmp_path / "uploads"
+
+    with SAVE_LOCK:
+        result = save(settings_path, {"whisper_model": "small.en"}, default_dir)
+
+    assert result["whisper_model"] == "small.en"
