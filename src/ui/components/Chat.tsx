@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { streamChatReply, type Session, type ChatTurn } from "../api";
+import Welcome from "./Welcome";
 
 interface Props {
   sessions: Session[] | null;
@@ -94,17 +95,7 @@ const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId }) => {
         </div>
       )}
 
-      {sessions !== null && !hasMeetings && (
-        <div className="flex-1 flex items-center justify-center text-xs text-dim text-center px-4">
-          record a meeting first
-        </div>
-      )}
-
-      {hasMeetings && !selected && (
-        <div className="flex-1 flex items-center justify-center text-xs text-dim text-center px-4">
-          select a meeting from the left
-        </div>
-      )}
+      {sessions !== null && (!hasMeetings || !selected) && <Welcome sessions={sessions} />}
 
       {hasMeetings && selected && (
         <>

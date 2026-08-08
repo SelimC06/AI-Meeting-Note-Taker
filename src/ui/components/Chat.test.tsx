@@ -44,14 +44,16 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-it("shows a prompt to select a meeting when nothing is selected", () => {
+it("shows the Welcome panel when nothing is selected", () => {
   render(<Chat sessions={[sessionA]} sessionsError={null} selectedId={null} />);
-  expect(screen.getByText(/select a meeting from the left/i)).toBeInTheDocument();
+  expect(screen.getByText(/meeting note taker/i)).toBeInTheDocument();
+  expect(screen.getByText(/1 meeting recorded/i)).toBeInTheDocument();
 });
 
-it("shows a record-first prompt when there are no meetings", () => {
+it("shows the Welcome panel's no-meetings state when there are no meetings", () => {
   render(<Chat sessions={[]} sessionsError={null} selectedId={null} />);
-  expect(screen.getByText(/record a meeting first/i)).toBeInTheDocument();
+  expect(screen.getByText(/meeting note taker/i)).toBeInTheDocument();
+  expect(screen.getByText(/no meetings recorded yet/i)).toBeInTheDocument();
 });
 
 it("streams chunks and appends them to the last assistant turn", async () => {
