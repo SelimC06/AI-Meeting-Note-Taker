@@ -1,10 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useProcessingJobs } from "./useProcessingJobs";
-import * as api from "../../ui/api";
+import * as api from "../api";
 
-vi.mock("../../ui/api", async () => {
-  const actual = await vi.importActual<typeof import("../../ui/api")>("../../ui/api");
+vi.mock("../api", async () => {
+  const actual = await vi.importActual<typeof import("../api")>("../api");
   return {
     ...actual,
     listJobs: vi.fn(),

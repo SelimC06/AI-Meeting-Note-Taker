@@ -8,7 +8,7 @@ import { useThreeTrackSegments, type ClassifiedError } from './hooks/useThreeTra
 import { useElapsedTime } from './hooks/useElapsedTime';
 import { useMicLevel } from './hooks/useMicLevel';
 import { startProcessing } from "../ui/api";
-import { useProcessingJobs } from "./hooks/useProcessingJobs";
+import { useProcessingJobs } from "../ui/hooks/useProcessingJobs";
 
 const STAGE_LABELS: Record<string, string> = {
   queued: "queued",

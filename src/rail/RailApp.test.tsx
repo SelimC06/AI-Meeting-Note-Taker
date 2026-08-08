@@ -2,10 +2,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import RailApp from "./RailApp";
 import { useThreeTrackSegments } from "./hooks/useThreeTrackSegments";
-import { useProcessingJobs } from "./hooks/useProcessingJobs";
+import { useProcessingJobs } from "../ui/hooks/useProcessingJobs";
 
 vi.mock("./hooks/useThreeTrackSegments");
-vi.mock("./hooks/useProcessingJobs");
+vi.mock("../ui/hooks/useProcessingJobs");
 
 // jsdom (this project's test environment) does not implement MediaStream.
 // Provide a minimal stub so this file can construct one; production code

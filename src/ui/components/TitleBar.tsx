@@ -1,45 +1,31 @@
 import { useState, useEffect } from "react";
-import type { MainPage } from "../App";
 
 interface Props {
-  page: MainPage;
-  onChangePage: (page: MainPage) => void;
+  onOpenSettings: () => void;
 }
 
-const NAV_ITEMS: { key: MainPage; label: string }[] = [
-  { key: "dashboard", label: "dashboard" },
-  { key: "activity", label: "activity" },
-  { key: "health", label: "health" },
-  { key: "settings", label: "settings" },
-];
-
-export default function TitleBar({ page, onChangePage }: Props) {
+export default function TitleBar({ onOpenSettings }: Props) {
   return (
     <div className="h-10 flex items-center justify-between bg-panel border-b border-line text-phosphor select-none [-webkit-app-region:drag] text-xs">
       <div className="flex items-center gap-3 px-3 [-webkit-app-region:no-drag]">
         <span className="font-semibold">
           $ meeting-note-taker<span className="cursor-blink">▌</span>
         </span>
-        <nav className="flex items-center gap-1">
-          {NAV_ITEMS.map((item) => (
-            <button
-              key={item.key}
-              onClick={() => onChangePage(item.key)}
-              className={
-                "px-1.5 py-0.5 rounded-sm transition focus:outline-none focus:ring-2 focus:ring-signal " +
-                (page === item.key
-                  ? "bg-signal text-void"
-                  : "text-dim hover:text-phosphor")
-              }
-            >
-              [{item.label}]
-            </button>
-          ))}
-        </nav>
       </div>
 
       <div className="flex items-center gap-1 pr-1 [-webkit-app-region:no-drag]">
         <PillButton />
+
+        <ToolButton label="Settings" onClick={onOpenSettings}>
+          <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none">
+            <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2" />
+            <path
+              d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+              stroke="currentColor"
+              strokeWidth="1.5"
+            />
+          </svg>
+        </ToolButton>
 
         <ToolButton
           label="Minimize"
@@ -85,7 +71,7 @@ function ToolButton({
       title={label}
       aria-label={label}
       className={
-        "h-10 w-12 grid place-items-center focus:outline-none focus:ring-2 focus:ring-signal " +
+        "h-10 w-12 grid place-items-center focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
         (danger ? "hover:bg-red-500/80 hover:text-void" : "hover:bg-line")
       }
     >
@@ -153,7 +139,7 @@ function PillButton() {
       disabled={busy}
       className={
         "inline-flex items-center justify-center h-5 w-16 rounded-sm text-xs font-semibold " +
-        "focus:outline-none focus:ring-2 focus:ring-signal [-webkit-app-region:no-drag] " +
+        "focus:outline-none focus-visible:ring-2 focus-visible:ring-signal [-webkit-app-region:no-drag] " +
         (on
           ? "bg-signal text-void"
           : "border border-line text-dim hover:text-phosphor")

@@ -197,7 +197,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
               key={choice.value}
               onClick={() => handleWhisperChange(choice.value)}
               className={
-                "text-left px-2 py-1 rounded-sm text-xs transition focus:outline-none focus:ring-2 focus:ring-signal " +
+                "text-left px-2 py-1 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
                 (settings.whisper_model === choice.value
                   ? "bg-signal text-void"
                   : "text-dim hover:text-phosphor border border-line")
@@ -220,7 +220,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
         <button
           onClick={handleBrowseStorage}
           disabled={storageBusy}
-          className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus:ring-2 focus:ring-signal disabled:opacity-50"
+          className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:opacity-50"
         >
           {storageBusy ? "Moving recordings..." : "Browse..."}
         </button>
@@ -269,7 +269,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
                 <button
                   onClick={handleEmptyTrash}
                   disabled={emptyingTrash}
-                  className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus:ring-2 focus:ring-signal disabled:opacity-50"
+                  className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:opacity-50"
                 >
                   {emptyingTrash ? "Emptying..." : "Empty Trash"}
                 </button>
@@ -291,7 +291,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
             <p className="text-xs text-red-400">Ollama unreachable — is it running?</p>
             <button
               onClick={loadOllamaModels}
-              className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus:ring-2 focus:ring-signal"
+              className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
             >
               Retry
             </button>
@@ -301,7 +301,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
             <select
               value={settings.ollama_chat_model}
               onChange={(e) => handleOllamaChange(e.target.value)}
-              className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus:ring-2 focus:ring-signal"
+              className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
             >
               {!ollamaModels.includes(settings.ollama_chat_model) && (
                 <option value={settings.ollama_chat_model}>
@@ -347,7 +347,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
             <p className="text-xs text-phosphor">Update {updaterStatus.version} ready</p>
             <button
               onClick={() => window.updaterAPI?.install?.()}
-              className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus:ring-2 focus:ring-signal"
+              className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
             >
               restart to update
             </button>

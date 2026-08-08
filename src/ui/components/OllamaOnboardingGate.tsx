@@ -76,7 +76,7 @@ export default function OllamaOnboardingGate({ active = true }: OllamaOnboarding
                 </code>
                 <button
                   onClick={() => handleCopy(`ollama pull ${readiness.model}`)}
-                  className="px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus:ring-2 focus:ring-signal"
+                  className="px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                 >
                   {copyState === "copied" ? "Copied" : "Copy"}
                 </button>
@@ -92,7 +92,7 @@ export default function OllamaOnboardingGate({ active = true }: OllamaOnboarding
           <button
             onClick={readiness.recheck}
             disabled={readiness.isRechecking}
-            className="px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus:ring-2 focus:ring-signal disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {readiness.isRechecking ? "Checking…" : "Check again"}
           </button>

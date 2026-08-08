@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getJobStatus, listJobs, type JobStatus } from "../../ui/api";
+import { getJobStatus, listJobs, type JobStatus } from "../api";
 
 export type ProcessingJob = {
   id: string;
@@ -36,7 +36,7 @@ export function useProcessingJobs() {
         }
       })
       .catch(() => {
-        // Rehydration is best-effort -- if it fails, the rail widget just
+        // Rehydration is best-effort -- if it fails, the consumer just
         // starts with an empty job list, same as a normal cold start.
       });
     return () => {
