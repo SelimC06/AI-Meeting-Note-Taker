@@ -86,9 +86,9 @@ const SessionContextMenu: React.FC<Props> = ({
             [restore]
           </button>
           {confirmingDelete ? (
-            <div className="px-2 py-1.5 text-xs text-red-400 flex items-center justify-between gap-1">
+            <div className="px-2 py-1.5 text-xs text-red-400 flex flex-col gap-1">
               <span>delete forever?</span>
-              <div className="flex gap-1">
+              <div className="flex gap-2">
                 <button
                   className="text-red-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                   onClick={() => onDeleteForever(session)}

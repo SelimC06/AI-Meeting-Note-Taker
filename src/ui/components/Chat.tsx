@@ -130,7 +130,7 @@ const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId }) => {
               onKeyDown={handleKeyDown}
               placeholder="ask about this meeting... (enter to send)"
               aria-label="Chat message"
-              className="flex-1 bg-transparent border-none focus:outline-none focus-visible:ring-1 focus-visible:ring-signal rounded-sm text-phosphor placeholder:text-dim"
+              className="flex-1 bg-transparent border-none outline-none text-phosphor placeholder:text-dim"
             />
             {isStreaming && (
               <>
