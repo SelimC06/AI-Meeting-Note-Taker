@@ -75,68 +75,54 @@ export default function RailApp() {
         previousErrorRef.current = displayError;
     }, [displayError]);
 
-    // Tracks the currently-running stopAndUpload() call, if any, so
-    // handleStopForClose (below) can wait for an upload a manual stop
-    // already kicked off instead of either starting a second one or acking
-    // immediately while it's still in flight -- a close/quit arriving in
-    // that window used to slip past the guard entirely and kill the rail
-    // window (and the in-flight POST /process with it) mid-upload.
+    // Tracks the currently-running upload (initial or a manual retry), if
+    // any, so handleStopForClose (below) can wait for it instead of either
+    // starting a second one or acking immediately while it's still in
+    // flight -- a close/quit arriving in that window used to slip past the
+    // guard entirely and kill the rail window (and the in-flight POST
+    // /process with it) mid-upload.
     const inFlightUploadRef = useRef<Promise<void> | null>(null);
 
-    // Stops the current recording and uploads it. Acked unconditionally on
-    // every exit (empty segments, success, or failure) so main.js's guarded
-    // close/quit flow — which triggers this via a "stopForClose"
-    // rail:command and awaits the ack — never hangs waiting for one that
-    // was never coming. See stopAndSaveRailRecording() in main.js.
-    const stopAndUpload = async () => {
-        const run = async () => {
+    // Holds the FormData (and its Blobs) from the most recent failed
+    // upload, so "retry upload" can re-POST the exact same recording
+    // instead of it being lost. Blobs are immutable and safely re-readable
+    // across multiple fetch calls, so the same FormData object can just be
+    // resent as-is. Cleared on a successful upload (initial or retried).
+    const pendingUploadRef = useRef<FormData | null>(null);
+
+    // POSTs formData to /process, tracked via inFlightUploadRef regardless
+    // of whether this is the upload right after a stop or a manual retry of
+    // a previously failed one -- either way, a close/quit arriving mid-
+    // upload must wait for it (see handleStopForClose).
+    const runUpload = async (formData: FormData) => {
+        const attempt = async () => {
+            setIsProcessing(true);
             try {
-                const blobs = await stop();
-
-                // A recording that produced no segments (or a stop that landed
-                // while still "starting") resolves stop() to an empty Combined
-                // -- nothing to upload, so skip the POST instead of sending an
-                // empty FormData.
-                if (!blobs.screen && !blobs.systemAudio && !blobs.micAudio) {
-                    return;
-                }
-
-                const formData = new FormData();
-                if (blobs.screen) {
-                    formData.append("screen", blobs.screen, "screen.webm");
-                }
-                if (blobs.systemAudio) {
-                    formData.append("system", blobs.systemAudio, "system.webm");
-                }
-                if (blobs.micAudio) {
-                    formData.append("mic", blobs.micAudio, "mic.webm");
-                }
-
-                setIsProcessing(true);
+                let result: { job_id: string; session_id: string };
                 try {
-                    let result: { job_id: string; session_id: string };
-                    try {
-                        result = await startProcessing(formData);
-                    } catch (networkErr) {
-                        if (networkErr instanceof TypeError) {
-                            throw new Error("Couldn't reach the app backend — is it running?");
-                        }
-                        throw networkErr;
+                    result = await startProcessing(formData);
+                } catch (networkErr) {
+                    if (networkErr instanceof TypeError) {
+                        throw new Error("Couldn't reach the app backend — is it running?");
                     }
-
-                    addJob(result.job_id);
-                } catch (err) {
-                    console.error("/process failed", err);
-                    setProcessError(err instanceof Error ? err.message : String(err));
-                } finally {
-                    setIsProcessing(false);
+                    throw networkErr;
                 }
+
+                pendingUploadRef.current = null;
+                setProcessError(null);
+                addJob(result.job_id);
+            } catch (err) {
+                console.error("/process failed", err);
+                // Keep the FormData around instead of discarding it -- the
+                // recording it holds is otherwise unrecoverable.
+                pendingUploadRef.current = formData;
+                setProcessError(err instanceof Error ? err.message : String(err));
             } finally {
-                window.windowControls?.notifyStopAndSaveComplete?.();
+                setIsProcessing(false);
             }
         };
 
-        const promise = run();
+        const promise = attempt();
         inFlightUploadRef.current = promise;
         try {
             await promise;
@@ -146,6 +132,65 @@ export default function RailApp() {
             }
         }
     };
+
+    // Stops the current recording and uploads it. Acked unconditionally on
+    // every exit (empty segments, success, or failure) so main.js's guarded
+    // close/quit flow — which triggers this via a "stopForClose"
+    // rail:command and awaits the ack — never hangs waiting for one that
+    // was never coming. See stopAndSaveRailRecording() in main.js.
+    const stopAndUpload = async () => {
+        try {
+            const blobs = await stop();
+
+            // A recording that produced no segments (or a stop that landed
+            // while still "starting") resolves stop() to an empty Combined
+            // -- nothing to upload, so skip the POST instead of sending an
+            // empty FormData.
+            if (!blobs.screen && !blobs.systemAudio && !blobs.micAudio) {
+                return;
+            }
+
+            const formData = new FormData();
+            if (blobs.screen) {
+                formData.append("screen", blobs.screen, "screen.webm");
+            }
+            if (blobs.systemAudio) {
+                formData.append("system", blobs.systemAudio, "system.webm");
+            }
+            if (blobs.micAudio) {
+                formData.append("mic", blobs.micAudio, "mic.webm");
+            }
+
+            await runUpload(formData);
+        } finally {
+            window.windowControls?.notifyStopAndSaveComplete?.();
+        }
+    };
+
+    // Re-POSTs the FormData from the most recent failed upload. Fire-and-
+    // forget from the caller's perspective (ErrorToast's action.onClick is
+    // synchronous) -- runUpload tracks it via inFlightUploadRef the same as
+    // any other upload. Acks on its own once settled, same as
+    // stopAndUpload does, so a close/quit that arrives while a retry is
+    // mid-flight (handleStopForClose's inFlightUploadRef wait below) isn't
+    // left waiting on an ack nothing would otherwise ever send.
+    const handleRetryUpload = () => {
+        const formData = pendingUploadRef.current;
+        if (!formData || isProcessing) return;
+        void (async () => {
+            try {
+                await runUpload(formData);
+            } finally {
+                window.windowControls?.notifyStopAndSaveComplete?.();
+            }
+        })();
+    };
+
+    // True only while there's a distinct, currently-displayed upload error
+    // with a FormData still held for it -- not while a permission-denied
+    // recordError (a different failure entirely, nothing to re-upload) is
+    // what's actually showing.
+    const canRetryUpload = !recordError && processError !== null && pendingUploadRef.current !== null;
 
     const handleRecordClick = async () => {
         if (isProcessing) return;
@@ -171,16 +216,19 @@ export default function RailApp() {
     // round-trip).
     const handleStopForClose = async () => {
         if (inFlightUploadRef.current) {
-            // A manual stop already kicked off stopAndUpload and it's mid-
-            // flight (isProcessing) -- wait for that same operation instead
-            // of starting a new one or acking immediately, or the close
-            // would destroy this window (and the in-flight POST /process
-            // with it) mid-upload. Its own finally sends the ack once it
-            // settles, so nothing further to do here either way.
+            // Something -- a manual stop's own upload, or the user clicking
+            // "retry upload" on a previously failed one -- already kicked
+            // off an upload and it's mid-flight. Wait for that same
+            // operation instead of starting a new one or acking
+            // immediately, or the close would destroy this window (and the
+            // in-flight POST /process with it) mid-upload. Whichever flow
+            // started it (stopAndUpload or handleRetryUpload) already
+            // guarantees its own single ack once it settles, so there's
+            // nothing further to do here either way.
             try {
                 await inFlightUploadRef.current;
             } catch {
-                // stopAndUpload already reports its own errors via setProcessError.
+                // runUpload already reports its own errors via setProcessError.
             }
             return;
         }
@@ -312,7 +360,9 @@ export default function RailApp() {
                 message={toastDismissed ? null : displayError?.message ?? null}
                 onDismiss={handleDismissError}
                 action={
-                    !toastDismissed && displayError?.kind === "permission-denied"
+                    !toastDismissed && canRetryUpload
+                        ? { label: "retry upload", onClick: handleRetryUpload }
+                        : !toastDismissed && displayError?.kind === "permission-denied"
                         ? { label: "open privacy settings", onClick: () => window.settingsAPI?.openPrivacySettings?.("microphone") }
                         : undefined
                 }

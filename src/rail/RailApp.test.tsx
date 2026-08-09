@@ -111,6 +111,66 @@ it("shows a persistent tooltip when the /process request fails, and clears it on
   expect(dotAfterReset).toBeNull();
 });
 
+it("offers a retry action when /process fails, and retry re-POSTs the same recording and succeeds", async () => {
+  // Regression test for brief 09 Stage 1: a failed /process POST used to
+  // just discard the assembled blobs, with only the error message left --
+  // the recording was unrecoverable. Now the FormData (and its Blobs) is
+  // held until upload succeeds, and a "retry upload" action re-sends it.
+  const record = vi.fn().mockResolvedValue(undefined);
+  const stop = vi.fn().mockResolvedValue({ screen: new Blob(["screen bytes"]) });
+  mockHook({ status: "recording", record, stop, error: null });
+
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: () => Promise.resolve({ detail: "backend restarting" }),
+      text: () => Promise.resolve('{"detail":"backend restarting"}'),
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ job_id: "job-1", session_id: "session-1" }),
+    });
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { container, getByRole, queryByRole } = render(<RailApp />);
+  const recordButton = container.querySelectorAll("button")[0];
+  fireEvent.click(recordButton);
+
+  const retryButton = await waitFor(() => getByRole("button", { name: "retry upload" }));
+
+  fireEvent.click(retryButton);
+
+  await waitFor(() => {
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  // The error/retry UI clears once the retry succeeds.
+  await waitFor(() => {
+    expect(queryByRole("button", { name: "retry upload" })).not.toBeInTheDocument();
+  });
+
+  // Both attempts must have carried the exact same recording data -- the
+  // whole point is the blobs are never discarded or re-recorded.
+  const [firstCall, secondCall] = fetchMock.mock.calls;
+  const firstBody = firstCall[1].body as FormData;
+  const secondBody = secondCall[1].body as FormData;
+  expect(firstBody.get("screen")).toBe(secondBody.get("screen"));
+});
+
+it("does not offer a retry action for a permission-denied recordError, even if a prior upload also failed", async () => {
+  mockHook({
+    status: "idle",
+    error: { kind: "permission-denied", message: "Screen or microphone access denied — check your OS privacy settings." },
+  });
+
+  const { queryByRole, getByRole } = render(<RailApp />);
+
+  expect(queryByRole("button", { name: "retry upload" })).not.toBeInTheDocument();
+  expect(getByRole("button", { name: "open privacy settings" })).toBeInTheDocument();
+});
+
 it("shows a friendly message when the /process request can't reach the backend at all", async () => {
   const record = vi.fn().mockResolvedValue(undefined);
   const stop = vi.fn().mockResolvedValue({ screen: new Blob(["x"]) });

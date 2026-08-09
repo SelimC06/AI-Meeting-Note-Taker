@@ -335,3 +335,178 @@ def test_compute_storage_usage_missing_dir_returns_zeros(tmp_path: Path):
         "session_count": 0,
         "trashed_count": 0,
     }
+
+
+ORPHAN_ID = "0123456789abcdef0123456789abcdef"  # 32 lowercase hex chars, like uuid4().hex
+
+
+def test_sweep_orphaned_sessions_adopts_a_dir_with_recording_data(tmp_path: Path):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    orphan = tmp_path / ORPHAN_ID
+    orphan.mkdir()
+    (orphan / "screen.webm").write_bytes(b"video bytes")
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [ORPHAN_ID], "deleted": []}
+    loaded = load_sessions(tmp_path)
+    assert len(loaded) == 1
+    assert loaded[0]["id"] == ORPHAN_ID
+    assert loaded[0]["status"] == "recovered"
+    assert orphan.exists()  # adopted, not deleted
+
+
+def test_sweep_orphaned_sessions_adopts_a_dir_with_only_a_transcript(tmp_path: Path):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    orphan = tmp_path / ORPHAN_ID
+    orphan.mkdir()
+    (orphan / "transcript_1.txt").write_text("hello", encoding="utf-8")
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [ORPHAN_ID], "deleted": []}
+
+
+def test_sweep_orphaned_sessions_adopts_a_dir_with_only_frame_images(tmp_path: Path):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    orphan = tmp_path / ORPHAN_ID
+    orphan.mkdir()
+    frames_dir = orphan / "frames"
+    frames_dir.mkdir()
+    (frames_dir / "frame_001.png").write_bytes(b"\x89PNG")
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [ORPHAN_ID], "deleted": []}
+
+
+def test_sweep_orphaned_sessions_uses_existing_notes_md_title_and_content_when_present(tmp_path: Path):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    orphan = tmp_path / ORPHAN_ID
+    orphan.mkdir()
+    (orphan / "final.webm").write_bytes(b"video bytes")
+    (orphan / "notes.md").write_text("# Sprint Planning\n\n## Key Points\n- x\n", encoding="utf-8")
+
+    sweep_orphaned_sessions(tmp_path)
+
+    loaded = load_sessions(tmp_path)[0]
+    assert loaded["title"] == "Sprint Planning"
+    assert "Sprint Planning" in loaded["notes"]
+    assert loaded["video_path"] == str(orphan / "final.webm")
+
+
+def test_sweep_orphaned_sessions_deletes_an_empty_dir(tmp_path: Path):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    orphan = tmp_path / ORPHAN_ID
+    orphan.mkdir()
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [], "deleted": [ORPHAN_ID]}
+    assert load_sessions(tmp_path) == []
+    assert not orphan.exists()
+
+
+def test_sweep_orphaned_sessions_deletes_a_dir_with_only_junk_files(tmp_path: Path):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    orphan = tmp_path / ORPHAN_ID
+    orphan.mkdir()
+    (orphan / "system.wav").write_bytes(b"x")  # an intermediate, not recognized recording data
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [], "deleted": [ORPHAN_ID]}
+    assert not orphan.exists()
+
+
+def test_sweep_orphaned_sessions_ignores_already_indexed_dirs(tmp_path: Path):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    session_dir = tmp_path / ORPHAN_ID
+    session_dir.mkdir()
+    (session_dir / "final.webm").write_bytes(b"video bytes")
+    append_session(tmp_path, {
+        "id": ORPHAN_ID, "created_at": "2026-01-01T00:00:00+00:00",
+        "title": "Already indexed", "notes": "", "video_path": "", "trashed_at": None,
+    })
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [], "deleted": []}
+    assert load_sessions(tmp_path) == [
+        {
+            "id": ORPHAN_ID, "created_at": "2026-01-01T00:00:00+00:00",
+            "title": "Already indexed", "notes": "", "video_path": "", "trashed_at": None,
+        }
+    ]
+
+
+def test_sweep_orphaned_sessions_ignores_non_session_shaped_directories(tmp_path: Path):
+    """Regression guard: the sweep must never touch a directory whose name
+    isn't a 32-char hex uuid, e.g. anything a user might place in the
+    storage dir by hand, or a future non-session subfolder.
+    """
+    from app.sessions_store import sweep_orphaned_sessions
+
+    unrelated = tmp_path / "not-a-session-id"
+    unrelated.mkdir()
+    (unrelated / "some_file.txt").write_text("do not touch", encoding="utf-8")
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [], "deleted": []}
+    assert unrelated.exists()
+    assert (unrelated / "some_file.txt").exists()
+
+
+def test_sweep_orphaned_sessions_ignores_files_at_the_top_level(tmp_path: Path):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    # sessions_index.json itself lives here, as would any other top-level file.
+    (tmp_path / "sessions_index.json").write_text("[]", encoding="utf-8")
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [], "deleted": []}
+
+
+def test_sweep_orphaned_sessions_missing_store_dir_returns_empty_result(tmp_path: Path):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    result = sweep_orphaned_sessions(tmp_path / "does-not-exist")
+
+    assert result == {"adopted": [], "deleted": []}
+
+
+def test_sweep_orphaned_sessions_one_bad_directory_does_not_abort_the_rest(tmp_path: Path, monkeypatch):
+    """A failure adopting/deleting one orphan (e.g. a permissions error)
+    must not stop the sweep from handling the others.
+    """
+    from app import sessions_store
+    from app.sessions_store import sweep_orphaned_sessions
+
+    bad_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    good_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    (tmp_path / bad_id).mkdir()
+    ((tmp_path / bad_id) / "final.webm").write_bytes(b"x")
+    (tmp_path / good_id).mkdir()
+    ((tmp_path / good_id) / "final.webm").write_bytes(b"x")
+
+    real_adopt = sessions_store._adopt_orphan_session
+
+    def flaky_adopt(store_dir, session_dir):
+        if session_dir.name == bad_id:
+            raise OSError("simulated failure")
+        return real_adopt(store_dir, session_dir)
+
+    monkeypatch.setattr(sessions_store, "_adopt_orphan_session", flaky_adopt)
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [good_id], "deleted": []}

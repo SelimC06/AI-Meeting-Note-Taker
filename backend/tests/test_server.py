@@ -92,6 +92,30 @@ def test_process_rejects_invalid_screen_upload(client: TestClient):
     assert resp.status_code == 400
 
 
+def test_process_leaves_no_orphan_session_dir_on_rejected_upload(client: TestClient):
+    """Regression test for brief 08: the session directory used to be
+    mkdir'd BEFORE the screen upload was validated, so a rejected upload
+    (invalid video here; missing entirely is the same code path) left an
+    empty, unindexed, permanently undeletable orphan folder behind.
+    Validation must now happen in a scratch temp dir before the session
+    folder is ever created.
+    """
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(_tiny_webm_bytes()), "video/webm")},
+    )
+    assert resp.status_code == 400
+    leftover_dirs = [p for p in server_module.STORE.iterdir() if p.is_dir()]
+    assert leftover_dirs == []
+
+
+def test_process_leaves_no_orphan_session_dir_when_screen_is_missing(client: TestClient):
+    resp = client.post("/process")
+    assert resp.status_code == 400
+    leftover_dirs = [p for p in server_module.STORE.iterdir() if p.is_dir()]
+    assert leftover_dirs == []
+
+
 def test_process_is_not_a_coroutine_function():
     """FastAPI runs plain-def endpoints in its threadpool automatically; an
     async def endpoint instead runs directly on the event loop. /process does
@@ -182,6 +206,54 @@ def test_process_job_fails_with_friendly_message_when_mux_fails(client, monkeypa
         "Couldn't combine your audio and video — the recording file may be "
         "corrupted. Try recording again."
     )
+
+    # Regression test for brief 08: a mux failure used to just mark the job
+    # failed and return, leaving the session's already-saved files (screen
+    # webm etc.) on disk with no index entry -- invisible to the UI,
+    # excluded from trash purge, and undeletable via DELETE /sessions/{id}.
+    sessions = client.get("/sessions").json()
+    matching = [s for s in sessions if s["id"] == resp.json()["session_id"]]
+    assert len(matching) == 1
+    assert matching[0]["status"] == "failed"
+    assert "Couldn't combine your audio and video" in matching[0]["notes"]
+
+    del_resp = client.delete(f"/sessions/{resp.json()['session_id']}")
+    assert del_resp.status_code == 200
+
+
+def test_process_job_records_a_failed_session_on_an_unexpected_worker_exception(client, monkeypatch):
+    """Regression test for brief 08: any exception the worker didn't already
+    handle inline (here, to_wav raising before the mux try/except is even
+    reached) used to propagate straight past _run_process_job to jobs.py's
+    generic catch, which marks the job failed but has no idea a session
+    directory exists -- leaving an unindexed orphan dir on disk forever.
+    """
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def broken_to_wav(*args, **kwargs):
+        raise RuntimeError("simulated unexpected crash")
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "to_wav", broken_to_wav)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+
+    job = wait_for_job(client, job_id)
+    assert job["status"] == "failed"
+    assert "simulated unexpected crash" in job["error"]
+
+    sessions = client.get("/sessions").json()
+    matching = [s for s in sessions if s["id"] == resp.json()["session_id"]]
+    assert len(matching) == 1
+    assert matching[0]["status"] == "failed"
 
 
 def test_process_falls_back_to_stub_notes_without_transcription(client, monkeypatch):
@@ -1610,6 +1682,20 @@ def test_purge_expired_trash_wired_to_live_store(client: TestClient):
 
     assert purged == 1
     assert server_module.load_sessions(server_module.STORE) == []
+
+
+def test_sweep_orphaned_sessions_wired_to_live_store(client: TestClient):
+    orphan_id = "c" * 32
+    orphan_dir = server_module.STORE / orphan_id
+    orphan_dir.mkdir()
+    (orphan_dir / "final.webm").write_bytes(b"video bytes")
+
+    result = server_module.sweep_orphaned_sessions(server_module.STORE)
+
+    assert result == {"adopted": [orphan_id], "deleted": []}
+    matching = [s for s in server_module.load_sessions(server_module.STORE) if s["id"] == orphan_id]
+    assert len(matching) == 1
+    assert matching[0]["status"] == "recovered"
 
 
 def test_chat_uses_configured_ollama_model(client: TestClient, monkeypatch):

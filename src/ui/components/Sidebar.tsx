@@ -152,6 +152,34 @@ const Sidebar: React.FC<Props> = ({
 
   const hasList = list !== null && list.length > 0;
 
+  // "done" (or a pre-status-field record, where status is undefined) needs
+  // no badge -- only the degraded cases (job failed but the recording was
+  // preserved, or a directory recovered from an interrupted/crashed run)
+  // are worth calling out.
+  const statusBadge = (s: Session) => {
+    if (s.status === "failed") {
+      return (
+        <span
+          role="img"
+          aria-label="Processing failed"
+          title={s.error ? `Processing failed: ${s.error}` : "Processing failed"}
+          className="ml-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-red-500 align-middle"
+        />
+      );
+    }
+    if (s.status === "recovered") {
+      return (
+        <span
+          role="img"
+          aria-label="Recovered recording"
+          title="Recovered after an interrupted recording (e.g. an app crash or restart)"
+          className="ml-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400 align-middle"
+        />
+      );
+    }
+    return null;
+  };
+
   return (
     <>
       <div
@@ -247,7 +275,10 @@ const Sidebar: React.FC<Props> = ({
                             : "px-2 py-2 hover:bg-line")
                         }
                       >
-                        <div className="truncate">{s.title}</div>
+                        <div className="flex items-center">
+                          <span className="truncate">{s.title}</span>
+                          {statusBadge(s)}
+                        </div>
                         <div className="text-dim">{formatRelativeTime(s.created_at)}</div>
                       </button>
                     ) : (
@@ -259,7 +290,10 @@ const Sidebar: React.FC<Props> = ({
                         title={s.title}
                         className="w-full text-left px-2 py-2 text-xs"
                       >
-                        <div className="truncate">{s.title}</div>
+                        <div className="flex items-center">
+                          <span className="truncate">{s.title}</span>
+                          {statusBadge(s)}
+                        </div>
                         <div className="text-dim">{formatRelativeTime(s.trashed_at ?? s.created_at)}</div>
                       </div>
                     )}

@@ -28,6 +28,7 @@ from .sessions_store import (
     update_session_fields,
     remove_session_permanently,
     purge_expired_trash,
+    sweep_orphaned_sessions,
     compute_storage_usage,
 )
 from .settings_store import (
@@ -149,6 +150,7 @@ _settings = load_settings(SETTINGS_PATH, ROOT / "uploads")
 STORE = Path(_settings["storage_dir"])
 STORE.mkdir(parents=True, exist_ok=True)
 purge_expired_trash(STORE)
+sweep_orphaned_sessions(STORE)
 WHISPER_MODEL = _settings["whisper_model"]
 OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
 
@@ -496,6 +498,29 @@ def chat(session_id: str, body: ChatRequest):
 
     return StreamingResponse(token_stream(), media_type="text/plain")
 
+def _record_failed_session(store: Path, session: Path, error: str) -> None:
+    """Best-effort: append a status:"failed" session record so a failed
+    job's already-saved recording data (screen/system/mic webm, whatever got
+    this far) stays visible and deletable in the UI instead of leaking as an
+    invisible, un-indexed orphan directory forever (brief 08).
+    """
+    try:
+        created_at = datetime.now(timezone.utc).isoformat()
+        record = {
+            "id": session.name,
+            "created_at": created_at,
+            "title": f"Failed recording ({created_at[:10]})",
+            "notes": f"# Recording Failed\n\n_{error}_\n",
+            "video_path": "",
+            "trashed_at": None,
+            "status": "failed",
+            "error": error,
+        }
+        append_session(store, record)
+    except Exception as append_err:
+        log(f"failed to record failed session {session.name}: {append_err}")
+
+
 def _run_process_job(job_id: str) -> None:
     inputs = jobs.get_job_inputs(job_id)
     if inputs is None:
@@ -511,124 +536,137 @@ def _run_process_job(job_id: str) -> None:
     selected_paths = inputs["frame_paths"]
     whisper_model = inputs["whisper_model"]
 
-    jobs.update_job(job_id, stage="muxing")
-
-    system_wav = to_wav(system_webm, session / "system.wav")
-    mic_wav = to_wav(mic_webm, session / "mic.wav")
-    mixed_wav = mix_audios_wav(system_wav, mic_wav, session / "mixed.wav")
-
     try:
-        final_path = mux_video_audio(screen_webm, mixed_wav, session / "final.webm")
-    except Exception as e:
-        log(f"mux failed: {e}")
-        jobs.update_job(
-            job_id,
-            status="failed",
-            error=(
+        jobs.update_job(job_id, stage="muxing")
+
+        system_wav = to_wav(system_webm, session / "system.wav")
+        mic_wav = to_wav(mic_webm, session / "mic.wav")
+        mixed_wav = mix_audios_wav(system_wav, mic_wav, session / "mixed.wav")
+
+        try:
+            final_path = mux_video_audio(screen_webm, mixed_wav, session / "final.webm")
+        except Exception as e:
+            log(f"mux failed: {e}")
+            error = (
                 "Couldn't combine your audio and video — the recording file may be "
                 "corrupted. Try recording again."
-            ),
-        )
-        return
-
-    notes: str = ""
-    txt_path: Optional[str] = None
-    jobs.update_job(job_id, stage="transcribing")
-    if stop_recording_and_transcribe is not None:
-        try:
-            txt_path, _ = stop_recording_and_transcribe(
-                video_path=str(final_path),
-                transcript_prefix=str(session / "transcript_"),
-                model_name=whisper_model,
-                separate_tracks=False,
-                extract_frames_after=True,
-                frames_out_dir=str(session / "frames"),
-                every_n_seconds=5.0,
-                scale_width=960,
-                image_ext="png",
-                quality=2,
-                max_frames=3,
             )
-        except Exception as e:
-            log(f"stop_recording_and_transcribe failed, falling back to raw transcription: {e}")
-            txt_path = None
+            _record_failed_session(store, session, error)
+            jobs.update_job(job_id, status="failed", error=error)
+            return
 
-    jobs.update_job(job_id, stage="summarizing")
-    if txt_path is not None:
-        try:
-            if llava_complete is None:
-                raise RuntimeError("llava_complete import is None (summarizer missing)")
-
-            notes = llava_complete(
-                raw_txt_path=txt_path,
-                out_path=str(session / "notes.md"),
-                frame_paths=selected_paths,
-                max_images=min(3, len(selected_paths)),
-                max_image_px=1280,
-                jpeg_quality=80,
-                max_chars=12000,
-                stream=False,
-                num_ctx=8192,
-                num_predict=800,
-                temperature=0.3,
-            )
-        except Exception as e:
-            log(f"summarization failed, falling back to raw transcript: {e}")
+        notes: str = ""
+        txt_path: Optional[str] = None
+        jobs.update_job(job_id, stage="transcribing")
+        if stop_recording_and_transcribe is not None:
             try:
-                transcript = Path(txt_path).read_text(encoding="utf-8")
-                # Without this, a timed-out (or otherwise failed) summary
-                # silently looks identical to a real AI summary that just
-                # happens to be the raw transcript -- the user has no way to
-                # tell the model never actually ran.
-                if isinstance(e, httpx.TimeoutException):
-                    explanation = (
-                        "_AI summarization timed out (the local model didn't "
-                        "respond in time) -- showing the raw transcript instead._\n\n"
+                txt_path, _ = stop_recording_and_transcribe(
+                    video_path=str(final_path),
+                    transcript_prefix=str(session / "transcript_"),
+                    model_name=whisper_model,
+                    separate_tracks=False,
+                    extract_frames_after=True,
+                    frames_out_dir=str(session / "frames"),
+                    every_n_seconds=5.0,
+                    scale_width=960,
+                    image_ext="png",
+                    quality=2,
+                    max_frames=3,
+                )
+            except Exception as e:
+                log(f"stop_recording_and_transcribe failed, falling back to raw transcription: {e}")
+                txt_path = None
+
+        jobs.update_job(job_id, stage="summarizing")
+        if txt_path is not None:
+            try:
+                if llava_complete is None:
+                    raise RuntimeError("llava_complete import is None (summarizer missing)")
+
+                notes = llava_complete(
+                    raw_txt_path=txt_path,
+                    out_path=str(session / "notes.md"),
+                    frame_paths=selected_paths,
+                    max_images=min(3, len(selected_paths)),
+                    max_image_px=1280,
+                    jpeg_quality=80,
+                    max_chars=12000,
+                    stream=False,
+                    num_ctx=8192,
+                    num_predict=800,
+                    temperature=0.3,
+                )
+            except Exception as e:
+                log(f"summarization failed, falling back to raw transcript: {e}")
+                try:
+                    transcript = Path(txt_path).read_text(encoding="utf-8")
+                    # Without this, a timed-out (or otherwise failed) summary
+                    # silently looks identical to a real AI summary that just
+                    # happens to be the raw transcript -- the user has no way to
+                    # tell the model never actually ran.
+                    if isinstance(e, httpx.TimeoutException):
+                        explanation = (
+                            "_AI summarization timed out (the local model didn't "
+                            "respond in time) -- showing the raw transcript instead._\n\n"
+                        )
+                    else:
+                        explanation = (
+                            "_AI summarization failed -- showing the raw transcript instead._\n\n"
+                        )
+                    notes = (
+                        "# Title: Zoom Meeting\n\n"
+                        + explanation
+                        + "# Transcript (auto)\n"
+                        + (transcript[:12000] or "(empty)")
                     )
-                else:
-                    explanation = (
-                        "_AI summarization failed -- showing the raw transcript instead._\n\n"
-                    )
+                except Exception as read_err:
+                    log(f"failed to read existing transcript {txt_path}: {read_err}")
+
+        if not notes:
+            try:
+                from faster_whisper import WhisperModel
+                model = get_whisper_model(WhisperModel, whisper_model, compute_type="int8")
+                segments, info = model.transcribe(str(final_path), beam_size=1)
+                transcript = "\n".join(s.text.strip() for s in segments if s.text)
                 notes = (
                     "# Title: Zoom Meeting\n\n"
-                    + explanation
-                    + "# Transcript (auto)\n"
+                    "# Transcript (auto)\n"
                     + (transcript[:12000] or "(empty)")
                 )
-            except Exception as read_err:
-                log(f"failed to read existing transcript {txt_path}: {read_err}")
+            except Exception as e:
+                log(f"fallback whisper failed: {e}")
+                notes = (
+                    "# Title: Zoom Meeting\n\n"
+                    "# Key Points\n- Uploaded, mixed and muxed successfully.\n"
+                    f"- Final file: {final_path.name}\n"
+                )
 
-    if not notes:
-        try:
-            from faster_whisper import WhisperModel
-            model = get_whisper_model(WhisperModel, whisper_model, compute_type="int8")
-            segments, info = model.transcribe(str(final_path), beam_size=1)
-            transcript = "\n".join(s.text.strip() for s in segments if s.text)
-            notes = (
-                "# Title: Zoom Meeting\n\n"
-                "# Transcript (auto)\n"
-                + (transcript[:12000] or "(empty)")
-            )
-        except Exception as e:
-            log(f"fallback whisper failed: {e}")
-            notes = (
-                "# Title: Zoom Meeting\n\n"
-                "# Key Points\n- Uploaded, mixed and muxed successfully.\n"
-                f"- Final file: {final_path.name}\n"
-            )
+        jobs.update_job(job_id, stage="saving")
+        record = {
+            "id": session.name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "title": extract_title(notes),
+            "notes": notes,
+            "video_path": str(final_path),
+            "trashed_at": None,
+            "status": "done",
+        }
+        append_session(store, record)
 
-    jobs.update_job(job_id, stage="saving")
-    record = {
-        "id": session.name,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "title": extract_title(notes),
-        "notes": notes,
-        "video_path": str(final_path),
-        "trashed_at": None,
-    }
-    append_session(store, record)
-
-    jobs.update_job(job_id, status="done", notes=notes, video_path=str(final_path))
+        jobs.update_job(job_id, status="done", notes=notes, video_path=str(final_path))
+    except Exception as e:
+        # Backstop for anything above that isn't already handled inline (mux
+        # failure returns early with its own friendly message and record):
+        # to_wav/mix_audios_wav/append_session/etc. raising here used to
+        # propagate straight past this function to jobs.py's generic
+        # worker-loop catch, which marks the job failed but has no idea a
+        # session directory even exists -- leaving a (possibly multi-GB)
+        # orphan dir invisible to the UI, excluded from trash purge, and
+        # undeletable via DELETE /sessions/{id}.
+        log(f"job {job_id} failed unexpectedly: {e}")
+        error = f"Something went wrong while processing this recording: {e}"
+        _record_failed_session(store, session, error)
+        jobs.update_job(job_id, status="failed", error=error)
 
 
 jobs.start_worker(_run_process_job)
@@ -665,13 +703,23 @@ def process(
     store = STORE
     whisper_model = WHISPER_MODEL
 
-    session = store / uuid.uuid4().hex
-    session.mkdir(parents=True, exist_ok=True)
-    log(f"session: {session}")
+    # Validate the screen upload fully before creating the permanent session
+    # directory: staged in a scratch temp dir first (on the same filesystem
+    # as `store`, so the move below is a cheap rename, not a multi-GB copy)
+    # so a rejected upload (missing/invalid video) never leaves a
+    # mkdir'd-but-otherwise-empty session folder behind (brief 08). The temp
+    # dir is removed on the way out either way, success or rejection.
+    with tempfile.TemporaryDirectory(prefix="process-staging-", dir=store) as staging:
+        staged_screen = save_upload(Path(staging), screen, "screen.webm")
+        if not staged_screen:
+            raise HTTPException(400, "valid screen video is required")
 
-    screen_webm = save_upload(session, screen, "screen.webm")
-    if not screen_webm:
-        raise HTTPException(400, "valid screen video is required")
+        session = store / uuid.uuid4().hex
+        session.mkdir(parents=True, exist_ok=True)
+        log(f"session: {session}")
+
+        screen_webm = session / "screen.webm"
+        shutil.move(str(staged_screen), str(screen_webm))
 
     system_webm = save_upload(session, system, "system.webm") if system else None
     mic_webm    = save_upload(session, mic,    "mic.webm")    if mic    else None

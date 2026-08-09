@@ -203,6 +203,47 @@ it("aborts a record() that's still resolving getSeparateCapture() if stop() land
   expect(result.current.status).toBe("idle");
 });
 
+it("stop() resolves Combined blobs assembled from chunks delivered via ondata (not from the recorder's own return value)", async () => {
+  // Regression test for brief 09: recorder.stop() no longer returns a Blob
+  // (the recorder stopped keeping its own duplicate chunk copy) -- the hook
+  // must build the final blobs entirely from what it already collected via
+  // ondata() into segsRef.
+  let screenOnData!: (chunk: Blob) => void;
+  vi.mocked(getSeparateCapture).mockResolvedValueOnce({
+    screen: new MediaStream(),
+    stopAll: vi.fn(),
+  });
+  vi.mocked(getVideoRecorder).mockReturnValueOnce({
+    ondata: (cb) => {
+      screenOnData = cb;
+    },
+    start: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
+    stop: vi.fn().mockResolvedValue(undefined),
+  });
+
+  const { result } = renderHook(() => useThreeTrackSegments());
+  await act(async () => {
+    await result.current.record();
+  });
+
+  const chunk1 = new Blob(["a"]);
+  const chunk2 = new Blob(["b"]);
+  act(() => {
+    screenOnData(chunk1);
+    screenOnData(chunk2);
+  });
+
+  let combined!: Awaited<ReturnType<typeof result.current.stop>>;
+  await act(async () => {
+    combined = await result.current.stop();
+  });
+
+  expect(combined.screen).toBeInstanceOf(Blob);
+  expect(combined.screen?.size).toBe(chunk1.size + chunk2.size);
+});
+
 it("record() releases already-acquired streams if recorder setup fails afterward", async () => {
   const stopAll = vi.fn();
   vi.mocked(getSeparateCapture).mockResolvedValueOnce({

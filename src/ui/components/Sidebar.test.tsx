@@ -59,6 +59,38 @@ it("renders the docked rail", () => {
   expect(screen.getByTestId("docked-rail")).toBeInTheDocument();
 });
 
+it("badges a failed session with its error as the tooltip, but not a normal done session", () => {
+  const failedSession: Session = {
+    ...sessionA,
+    id: "f1",
+    title: "Failed One",
+    status: "failed",
+    error: "Couldn't combine your audio and video",
+  };
+  renderSidebar({ sessions: [sessionA, failedSession] });
+
+  expect(screen.queryByRole("img", { name: "Processing failed" })).toBeInTheDocument();
+  expect(
+    screen.getByRole("img", { name: "Processing failed" })
+  ).toHaveAttribute("title", "Processing failed: Couldn't combine your audio and video");
+});
+
+it("badges a recovered session distinctly from a failed one", () => {
+  const recoveredSession: Session = { ...sessionA, id: "r1", title: "Recovered One", status: "recovered" };
+  renderSidebar({ sessions: [recoveredSession] });
+
+  expect(screen.getByRole("img", { name: "Recovered recording" })).toBeInTheDocument();
+  expect(screen.queryByRole("img", { name: "Processing failed" })).not.toBeInTheDocument();
+});
+
+it("does not badge a session with no status field (pre-existing records) or an explicit done status", () => {
+  const doneSession: Session = { ...sessionA, id: "d1", title: "Done One", status: "done" };
+  renderSidebar({ sessions: [sessionA, doneSession] });
+
+  expect(screen.queryByRole("img", { name: "Processing failed" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("img", { name: "Recovered recording" })).not.toBeInTheDocument();
+});
+
 it("lists sessions and calls onSelect when a row is clicked", () => {
   const props = renderSidebar();
   fireEvent.click(screen.getByText("Sprint Planning"));

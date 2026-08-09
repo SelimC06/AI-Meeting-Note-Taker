@@ -5,6 +5,15 @@ export type Session = {
   notes: string;
   video_path: string;
   trashed_at: string | null;
+  // Absent on session records written before this field existed -- treat
+  // missing/undefined the same as "done" (a normal, fully-processed
+  // session). "failed": the processing job errored out but the recording
+  // data was preserved. "recovered": adopted from an unindexed orphan
+  // directory found on disk at startup (crash/restart mid-job).
+  status?: "done" | "failed" | "recovered";
+  // Only set when status is "failed" -- the error message from the job
+  // that failed, shown as the badge's tooltip in the Sidebar.
+  error?: string;
 };
 
 // Normally :8000, but main.js falls back to a nearby port when 8000 is held

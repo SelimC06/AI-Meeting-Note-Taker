@@ -157,18 +157,22 @@ export function useThreeTrackSegments() {
     }
 
     const s = recRef.current;
+    // Captured now, before the finally block below replaces segsRef.current
+    // with a fresh empty object -- this still points at the live arrays
+    // ondata() pushes into, including the final flush each recorder.stop()
+    // triggers below, so it ends up complete by the time it's read after
+    // the await settles.
     const segs = segsRef.current;
 
-    let screenBlob: Blob | undefined;
-    let systemBlob: Blob | undefined;
-    let micBlob: Blob | undefined;
-
     try {
-      // stop returns a final Blob (flushes last timeslice)
-      [screenBlob, systemBlob, micBlob] = await Promise.all([
-        s?.screen?.stop() ?? Promise.resolve<Blob | undefined>(undefined),
-        s?.system?.stop() ?? Promise.resolve<Blob | undefined>(undefined),
-        s?.mic?.stop()    ?? Promise.resolve<Blob | undefined>(undefined),
+      // Each recorder's stop() flushes its last timeslice via one final
+      // ondataavailable (captured into segs above) before resolving -- the
+      // recorder itself no longer returns a Blob (see recorder.ts), so
+      // segs is the only source of truth for what was captured.
+      await Promise.all([
+        s?.screen?.stop() ?? Promise.resolve(),
+        s?.system?.stop() ?? Promise.resolve(),
+        s?.mic?.stop()    ?? Promise.resolve(),
       ]);
     } catch (e) {
       // A rejected recorder.stop() (e.g. an unexpected InvalidStateError a
@@ -186,21 +190,9 @@ export function useThreeTrackSegments() {
     }
 
     const combined: Combined = {
-      screen:
-        screenBlob ??
-        (segs.screen.length
-          ? new Blob(segs.screen, { type: "video/webm" })
-          : undefined),
-      systemAudio:
-        systemBlob ??
-        (segs.systemAudio.length
-          ? new Blob(segs.systemAudio, { type: "audio/webm" })
-          : undefined),
-      micAudio:
-        micBlob ??
-        (segs.micAudio.length
-          ? new Blob(segs.micAudio, { type: "audio/webm" })
-          : undefined),
+      screen: segs.screen.length ? new Blob(segs.screen, { type: "video/webm" }) : undefined,
+      systemAudio: segs.systemAudio.length ? new Blob(segs.systemAudio, { type: "audio/webm" }) : undefined,
+      micAudio: segs.micAudio.length ? new Blob(segs.micAudio, { type: "audio/webm" }) : undefined,
     };
 
     return combined;

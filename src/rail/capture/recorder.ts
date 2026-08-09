@@ -5,7 +5,12 @@ export type StreamRecorder = {
   start: () => void;
   pause: () => void;
   resume: () => void;
-  stop: () => Promise<Blob>;
+  // Resolves once the recorder has fully stopped -- including the final
+  // ondataavailable flush, which fires before this resolves. Doesn't return
+  // a Blob: the caller (useThreeTrackSegments' segsRef) already retains
+  // every chunk via ondata() below, so this recorder no longer keeps its
+  // own second copy of the whole recording.
+  stop: () => Promise<void>;
   ondata: (cb: (chunk: Blob) => void) => void;
   mimeType: string;
 };
@@ -28,13 +33,11 @@ export function getRecorder(
   const mimeCandidates = Array.isArray(preferredMimes) ? preferredMimes : [preferredMimes];
   const mimeType = pickSupported(mimeCandidates);
 
-  const chunks: Blob[] = [];
   const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
 
   let ondataCb: ((b: Blob) => void) | null = null;
   mr.ondataavailable = (e: BlobEvent) => {
     if (e.data && e.data.size) {
-      chunks.push(e.data);
       ondataCb?.(e.data);
     }
   };
@@ -46,18 +49,22 @@ export function getRecorder(
     pause: () => mr.pause(),
     resume: () => mr.resume(),
     stop: () =>
-      new Promise<Blob>((resolve) => {
+      new Promise<void>((resolve) => {
         // MediaRecorder.stop() throws InvalidStateError if the recorder is
         // already inactive (e.g. called twice, or called after an earlier
         // internal error already stopped it). Treat that as "already
-        // stopped" and resolve with whatever was captured, instead of
-        // letting the throw reject this promise and abort whatever caller
-        // is awaiting cleanup (see useThreeTrackSegments.ts's stop()).
+        // stopped" and resolve immediately, instead of letting the throw
+        // reject this promise and abort whatever caller is awaiting
+        // cleanup (see useThreeTrackSegments.ts's stop()).
         if (mr.state === "inactive") {
-          resolve(new Blob(chunks, { type: mimeType || mr.mimeType }));
+          resolve();
           return;
         }
-        mr.onstop = () => resolve(new Blob(chunks, { type: mimeType || mr.mimeType }));
+        // stop() flushes one final ondataavailable (with whatever's been
+        // buffered since the last timeslice) before firing onstop, so the
+        // caller's ondata callback has already received every chunk by the
+        // time this resolves.
+        mr.onstop = () => resolve();
         mr.stop();
       }),
     ondata: (cb) => {

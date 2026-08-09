@@ -56,11 +56,37 @@ it("stop() resolves instead of throwing when called on an already-inactive recor
   const rec = getRecorder(fakeStream, "video/webm");
 
   rec.start();
-  const firstBlob = await rec.stop();
-  expect(firstBlob).toBeInstanceOf(Blob);
+  await expect(rec.stop()).resolves.toBeUndefined();
 
   // The bug: calling stop() again (e.g. a double-click, or a caller that
   // doesn't track whether stop() already ran) must not throw/reject.
-  const secondBlob = await rec.stop();
-  expect(secondBlob).toBeInstanceOf(Blob);
+  await expect(rec.stop()).resolves.toBeUndefined();
+});
+
+it("ondata fires for every chunk, including the final flush stop() triggers, without the recorder retaining its own copy", () => {
+  const fakeStream = {} as MediaStream;
+  const rec = getRecorder(fakeStream, "video/webm");
+  const received: Blob[] = [];
+  rec.ondata((chunk) => received.push(chunk));
+
+  rec.start();
+  const chunk1 = new Blob(["a"]);
+  const chunk2 = new Blob(["b"]);
+  rec.mediaRecorder.ondataavailable?.({ data: chunk1 } as BlobEvent);
+  rec.mediaRecorder.ondataavailable?.({ data: chunk2 } as BlobEvent);
+
+  expect(received).toEqual([chunk1, chunk2]);
+});
+
+it("ignores an ondataavailable event with a zero-size (or missing) data payload", () => {
+  const fakeStream = {} as MediaStream;
+  const rec = getRecorder(fakeStream, "video/webm");
+  const received: Blob[] = [];
+  rec.ondata((chunk) => received.push(chunk));
+
+  rec.start();
+  rec.mediaRecorder.ondataavailable?.({ data: new Blob([]) } as BlobEvent);
+  rec.mediaRecorder.ondataavailable?.({ data: undefined } as unknown as BlobEvent);
+
+  expect(received).toEqual([]);
 });

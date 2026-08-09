@@ -9,6 +9,8 @@ interface ErrorToastProps {
 const AUTO_DISMISS_MS = 6000;
 
 export default function ErrorToast({ message, onDismiss, action }: ErrorToastProps) {
+  const hasAction = action !== undefined;
+
   useEffect(() => {
     if (message === null) {
       window.electronAPI?.setRailErrorVisible(false);
@@ -17,9 +19,16 @@ export default function ErrorToast({ message, onDismiss, action }: ErrorToastPro
 
     window.electronAPI?.setRailErrorVisible(true);
 
+    // Don't auto-dismiss when there's an action to take (e.g. "retry
+    // upload" after a failed /process POST) -- the underlying data isn't
+    // discarded by dismissal either way, but silently hiding the only
+    // visible way to act on it after 6s would strand the user with no path
+    // back to it short of starting a whole new recording.
+    if (hasAction) return;
+
     const timer = setTimeout(onDismiss, AUTO_DISMISS_MS);
     return () => clearTimeout(timer);
-  }, [message, onDismiss]);
+  }, [message, onDismiss, hasAction]);
 
   if (message === null) return null;
 

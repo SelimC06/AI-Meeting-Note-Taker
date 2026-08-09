@@ -78,6 +78,21 @@ it("does not render an action button when action is omitted", () => {
   expect(queryByRole("button", { name: "open privacy settings" })).toBeNull();
 });
 
+it("does not auto-dismiss when an action is present", () => {
+  vi.useFakeTimers();
+  const onDismiss = vi.fn();
+  render(
+    <ErrorToast
+      message="Couldn't reach the app backend — is it running?"
+      onDismiss={onDismiss}
+      action={{ label: "retry upload", onClick: vi.fn() }}
+    />
+  );
+
+  vi.advanceTimersByTime(60000);
+  expect(onDismiss).not.toHaveBeenCalled();
+});
+
 it("clicking the action button does not also dismiss the toast", () => {
   const onDismiss = vi.fn();
   const onClick = vi.fn();
