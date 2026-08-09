@@ -1,4 +1,5 @@
 import subprocess
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -141,6 +142,32 @@ def test_ffprobe_ok_true_when_streams_present(tmp_path, monkeypatch):
     monkeypatch.setattr(server_module, "run", lambda cmd: _cp(returncode=0, stdout='{"streams": [{}]}'))
 
     assert server_module.ffprobe_ok(p) is True
+
+
+# ---- save_upload -----------------------------------------------------------
+
+class _FakeUploadFile:
+    def __init__(self, data: bytes):
+        self.file = BytesIO(data)
+
+
+def test_save_upload_probes_the_rejected_file_only_once(tmp_path, monkeypatch):
+    """Regression test for brief 06: the rejection path used to call
+    ffprobe_ok(out) twice (once in the condition, once in the log message),
+    running the ffprobe subprocess twice for the same file. It must run once.
+    """
+    probe_calls = []
+
+    def fake_run(cmd):
+        probe_calls.append(cmd)
+        return _cp(returncode=1, stderr="invalid data")
+
+    monkeypatch.setattr(server_module, "run", fake_run)
+
+    result = server_module.save_upload(tmp_path, _FakeUploadFile(b"not a real video"), "screen.webm")
+
+    assert result is None
+    assert len(probe_calls) == 1
 
 
 # ---- ffmpeg_has_encoder ----------------------------------------------------------

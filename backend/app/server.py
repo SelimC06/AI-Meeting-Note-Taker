@@ -178,8 +178,9 @@ def save_upload(dst_dir: Path, uf: Optional[UploadFile], name: str) -> Optional[
     with out.open("wb") as f:
         shutil.copyfileobj(uf.file, f)
     size = out.stat().st_size
-    if size == 0 or not ffprobe_ok(out):
-        log(f"skip {name}: size={size}, valid={ffprobe_ok(out)}")
+    valid = size != 0 and ffprobe_ok(out)
+    if not valid:
+        log(f"skip {name}: size={size}, valid={valid}")
         try:
             out.unlink()
         except Exception:
@@ -613,7 +614,7 @@ jobs.start_worker(_run_process_job)
 
 
 @app.post("/process", status_code=202)
-async def process(
+def process(
     screen: UploadFile | None = File(None),   # required logically, but optional type so 422 doesn't fire
     system: UploadFile | None = File(None),   # optional
     mic:    UploadFile | None = File(None),   # optional
@@ -628,6 +629,13 @@ async def process(
     Saves the uploads synchronously, then hands the slow ffmpeg/Whisper/
     LLaVA pipeline off to the background job queue (see _run_process_job)
     and returns immediately with a job id to poll via GET /jobs/{job_id}.
+
+    Plain def, not async def: the body does multi-GB shutil.copyfileobj
+    writes and blocking ffprobe subprocess calls with no `await` anywhere,
+    so as an async def it ran that I/O directly on the event loop and
+    stalled every other request (/health, /sessions, job polling) for the
+    duration of an upload. FastAPI runs plain-def endpoints in its
+    threadpool automatically, which fixes that without any other change.
     """
     # Bind STORE (and WHISPER_MODEL below) to locals once, at the top, so
     # this request sees one consistent snapshot of settings -- a PATCH

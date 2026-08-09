@@ -90,6 +90,71 @@ def test_process_rejects_invalid_screen_upload(client: TestClient):
     assert resp.status_code == 400
 
 
+def test_process_is_not_a_coroutine_function():
+    """FastAPI runs plain-def endpoints in its threadpool automatically; an
+    async def endpoint instead runs directly on the event loop. /process does
+    multi-GB synchronous file copies and blocking ffprobe subprocess calls
+    with no `await`, so it must stay a plain def or every other request
+    (/health, /sessions, job polling) stalls for the duration of an upload.
+    """
+    import inspect
+
+    assert not inspect.iscoroutinefunction(server_module.process)
+
+
+def test_health_stays_responsive_while_process_upload_is_slow(client, monkeypatch):
+    """Regression test for brief 06: with /process as `async def`, a slow
+    synchronous upload ran directly on the event loop and starved every other
+    request. Simulates a slow upload by blocking inside save_upload, and
+    asserts a concurrent /health request still gets served promptly instead
+    of queuing up behind it.
+    """
+    import threading
+
+    upload_entered = threading.Event()
+    release_upload = threading.Event()
+
+    def slow_save_upload(dst_dir, uf, name):
+        upload_entered.set()
+        assert release_upload.wait(timeout=10), "test itself stalled waiting to release the upload"
+        return None  # treated as an invalid screen upload -> /process eventually 400s
+
+    monkeypatch.setattr(server_module, "save_upload", slow_save_upload)
+
+    results = {}
+
+    def do_upload():
+        results["response"] = client.post(
+            "/process",
+            files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+        )
+
+    upload_thread = threading.Thread(target=do_upload)
+    upload_thread.start()
+    try:
+        assert upload_entered.wait(timeout=5), "/process never reached save_upload"
+
+        start = time.monotonic()
+        health_resp = client.get("/health")
+        elapsed = time.monotonic() - start
+
+        assert health_resp.status_code == 200
+        # Generous but decisive: if /process's blocking work still ran on the
+        # event loop, /health couldn't even be scheduled until slow_save_upload
+        # gave up at its own 10s wait, so this cleanly separates "responded
+        # promptly while /process was blocked" from "queued up behind it"
+        # without being sensitive to ordinary test-harness scheduling noise.
+        assert elapsed < 8.0, (
+            f"/health took {elapsed:.2f}s while /process was mid-upload -- "
+            "looks like it's stuck behind /process on the event loop again"
+        )
+    finally:
+        release_upload.set()
+        upload_thread.join(timeout=10)
+
+    assert results["response"].status_code == 400
+
+
 def test_process_job_fails_with_friendly_message_when_mux_fails(client, monkeypatch):
     def fake_save_upload(dst_dir, uf, name):
         out = dst_dir / name
