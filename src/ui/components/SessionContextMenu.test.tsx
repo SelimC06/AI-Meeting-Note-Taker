@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import SessionContextMenu from "./SessionContextMenu";
 import type { Session } from "../api";
 
@@ -35,6 +35,7 @@ it("active view: shows notes/export/rename/trash and calls callbacks", () => {
       onTrash={onTrash}
       onRestore={() => {}}
       onDeleteForever={() => {}}
+      onExportError={() => {}}
     />
   );
 
@@ -65,6 +66,7 @@ it("trash view: shows restore, and delete forever requires confirmation before c
       onTrash={() => {}}
       onRestore={onRestore}
       onDeleteForever={onDeleteForever}
+      onExportError={() => {}}
     />
   );
 
@@ -96,6 +98,7 @@ it("trash view: delete-forever confirmation can be cancelled", () => {
       onTrash={() => {}}
       onRestore={() => {}}
       onDeleteForever={onDeleteForever}
+      onExportError={() => {}}
     />
   );
 
@@ -104,6 +107,98 @@ it("trash view: delete-forever confirmation can be cancelled", () => {
 
   expect(onDeleteForever).not.toHaveBeenCalled();
   expect(screen.getByText("[delete forever]")).toBeInTheDocument();
+});
+
+it("export notes: fetches the URL, closes the menu, and downloads the response as a blob", async () => {
+  const onClose = vi.fn();
+  const onExportError = vi.fn();
+  const blob = new Blob(["# notes"], { type: "text/markdown" });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: true,
+      headers: new Headers({ "Content-Disposition": 'attachment; filename="sprint-planning.md"' }),
+      blob: () => Promise.resolve(blob),
+    })
+  );
+  vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn(() => "blob:fake"), revokeObjectURL: vi.fn() });
+
+  render(
+    <SessionContextMenu
+      session={session}
+      view="active"
+      x={10}
+      y={10}
+      onClose={onClose}
+      onOpenNotes={() => {}}
+      onRename={() => {}}
+      onTrash={() => {}}
+      onRestore={() => {}}
+      onDeleteForever={() => {}}
+      onExportError={onExportError}
+    />
+  );
+
+  fireEvent.click(screen.getByText("[export notes]"));
+  await waitFor(() => expect(URL.createObjectURL).toHaveBeenCalledWith(blob));
+
+  expect(onClose).toHaveBeenCalled();
+  expect(onExportError).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});
+
+it("export recording: surfaces a backend-offline error and does not close prematurely on failure", async () => {
+  const onExportError = vi.fn();
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+
+  render(
+    <SessionContextMenu
+      session={session}
+      view="active"
+      x={10}
+      y={10}
+      onClose={() => {}}
+      onOpenNotes={() => {}}
+      onRename={() => {}}
+      onTrash={() => {}}
+      onRestore={() => {}}
+      onDeleteForever={() => {}}
+      onExportError={onExportError}
+    />
+  );
+
+  fireEvent.click(screen.getByText("[export recording]"));
+  await waitFor(() =>
+    expect(onExportError).toHaveBeenCalledWith("Couldn't export recording — backend offline")
+  );
+  vi.unstubAllGlobals();
+});
+
+it("export notes: surfaces an HTTP error status", async () => {
+  const onExportError = vi.fn();
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+
+  render(
+    <SessionContextMenu
+      session={session}
+      view="active"
+      x={10}
+      y={10}
+      onClose={() => {}}
+      onOpenNotes={() => {}}
+      onRename={() => {}}
+      onTrash={() => {}}
+      onRestore={() => {}}
+      onDeleteForever={() => {}}
+      onExportError={onExportError}
+    />
+  );
+
+  fireEvent.click(screen.getByText("[export notes]"));
+  await waitFor(() =>
+    expect(onExportError).toHaveBeenCalledWith("Couldn't export notes — request failed: 404")
+  );
+  vi.unstubAllGlobals();
 });
 
 it("closes on outside click and on Escape", () => {
@@ -122,6 +217,7 @@ it("closes on outside click and on Escape", () => {
         onTrash={() => {}}
         onRestore={() => {}}
         onDeleteForever={() => {}}
+        onExportError={() => {}}
       />
     </div>
   );

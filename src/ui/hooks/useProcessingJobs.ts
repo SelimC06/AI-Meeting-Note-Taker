@@ -10,6 +10,13 @@ export type ProcessingJob = {
 
 const POLL_INTERVAL_MS = 1500;
 
+// A single rejected getJobStatus (e.g. a fetch TypeError during a backend
+// restart the job itself actually survives) used to be treated as fatal --
+// this many CONSECUTIVE failed polls for the same job (~7.5s at the poll
+// interval above) are required before it's actually declared lost, so a
+// transient blip doesn't fail a job that's still running fine.
+const LOST_TRACK_FAILURE_THRESHOLD = 5;
+
 function toProcessingJob(job: JobStatus): ProcessingJob {
   return { id: job.id, stage: job.stage, status: job.status, error: job.error };
 }
@@ -18,6 +25,19 @@ export function useProcessingJobs() {
   const [jobs, setJobs] = useState<ProcessingJob[]>([]);
   const jobsRef = useRef<ProcessingJob[]>(jobs);
   jobsRef.current = jobs;
+  const failureCountsRef = useRef<Map<string, number>>(new Map());
+  // Only main.js's mainWindow ever receives backend:status pushes (see
+  // preload.js/main.js), so this is a no-op in the rail renderer -- fine,
+  // it just means the pause below never triggers there and every poll
+  // failure counts normally, same as before this hook cared about it.
+  const backendRestartingRef = useRef(false);
+
+  useEffect(() => {
+    const unsubscribe = window.backendAPI?.onStatus((status: BackendStatus) => {
+      backendRestartingRef.current = status.state === "restarting";
+    });
+    return () => unsubscribe?.();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,33 +71,42 @@ export function useProcessingJobs() {
       );
       if (active.length === 0) return;
 
-      const updates = await Promise.all(
-        active.map((j) =>
-          getJobStatus(j.id).catch(() => ({ lostTrackOf: j.id, lastStage: j.stage }))
-        )
+      const results = await Promise.all(
+        active.map(async (j) => {
+          try {
+            const status = await getJobStatus(j.id);
+            failureCountsRef.current.delete(j.id);
+            return { id: j.id, kind: "updated" as const, status };
+          } catch {
+            if (backendRestartingRef.current) {
+              // The backend lifecycle already told us it's restarting --
+              // this is an expected pause, not a real failure, so it
+              // doesn't count toward the lost-track threshold at all.
+              return { id: j.id, kind: "skip" as const };
+            }
+            const count = (failureCountsRef.current.get(j.id) ?? 0) + 1;
+            if (count >= LOST_TRACK_FAILURE_THRESHOLD) {
+              failureCountsRef.current.delete(j.id);
+              return { id: j.id, kind: "lost" as const, lastStage: j.stage };
+            }
+            failureCountsRef.current.set(j.id, count);
+            return { id: j.id, kind: "skip" as const };
+          }
+        })
       );
       if (cancelled) return;
       setJobs((prev) =>
         prev.map((j) => {
-          const updated = updates.find(
-            (u) => "id" in u && u.id === j.id
-          ) as JobStatus | undefined;
-          if (updated) return toProcessingJob(updated);
-
-          const lost = updates.find(
-            (u) => "lostTrackOf" in u && u.lostTrackOf === j.id
-          ) as { lostTrackOf: string; lastStage: ProcessingJob["stage"] } | undefined;
-          if (lost) {
-            return {
-              id: j.id,
-              stage: lost.lastStage,
-              status: "failed",
-              error:
-                "Lost track of this recording — the app backend restarted while it was processing.",
-            };
-          }
-
-          return j;
+          const result = results.find((r) => r.id === j.id);
+          if (!result || result.kind === "skip") return j;
+          if (result.kind === "updated") return toProcessingJob(result.status);
+          return {
+            id: j.id,
+            stage: result.lastStage,
+            status: "failed",
+            error:
+              "Lost track of this recording — the app backend restarted while it was processing.",
+          };
         })
       );
     };
@@ -100,6 +129,7 @@ export function useProcessingJobs() {
   }, []);
 
   const removeJob = useCallback((jobId: string) => {
+    failureCountsRef.current.delete(jobId);
     setJobs((prev) => prev.filter((j) => j.id !== jobId));
   }, []);
 

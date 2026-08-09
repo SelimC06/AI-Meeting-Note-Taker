@@ -9,8 +9,16 @@ declare global {
   }
 
   type BackendStatus =
+    // Sent once at launch, before the initial health check resolves --
+    // lets BackendStatusBanner render a loading state instead of nothing
+    // while the window is shown immediately rather than gated on health.
+    | { state: "starting" }
     | { state: "restarting"; attempt: number; maxAttempts: number }
     | { state: "up" }
+    // The initial health check (not a crash-triggered recovery) succeeded.
+    // Distinct from "up" so the banner doesn't say "reconnected" on a
+    // perfectly normal first launch.
+    | { state: "ready" }
     | { state: "failed"; logTail: string };
 
   type UpdaterStatus =

@@ -221,6 +221,108 @@ it("right-click in trash view offers restore, which calls restoreSession and rel
   expect(props.reloadSessions).toHaveBeenCalled();
 });
 
+it("shows a dismissible error banner and restores selection when trash fails while offline", async () => {
+  vi.mocked(trashSession).mockRejectedValue(new TypeError("Failed to fetch"));
+  const props = renderSidebar({ selectedId: "a1" });
+
+  fireEvent.contextMenu(screen.getByText("Sprint Planning"));
+  fireEvent.click(screen.getByText("[trash]"));
+
+  await waitFor(() =>
+    expect(screen.getByText("Couldn't move to trash — backend offline")).toBeInTheDocument()
+  );
+  // Optimistic deselect must be rolled back once the trash call is known
+  // to have failed.
+  expect(props.onSelect).toHaveBeenLastCalledWith("a1");
+
+  fireEvent.click(screen.getByRole("button", { name: "dismiss error" }));
+  expect(screen.queryByText("Couldn't move to trash — backend offline")).not.toBeInTheDocument();
+});
+
+it("shows a distinct error for a non-network (HTTP) trash failure", async () => {
+  vi.mocked(trashSession).mockRejectedValue(new Error("Failed to trash session: 500"));
+  renderSidebar();
+
+  fireEvent.contextMenu(screen.getByText("Sprint Planning"));
+  fireEvent.click(screen.getByText("[trash]"));
+
+  await waitFor(() =>
+    expect(
+      screen.getByText("Couldn't move to trash — Failed to trash session: 500")
+    ).toBeInTheDocument()
+  );
+});
+
+it("shows an error and restores selection when delete forever fails", async () => {
+  vi.mocked(getSessions).mockResolvedValue([
+    { ...sessionA, trashed_at: "2026-08-02T00:00:00Z" },
+  ]);
+  vi.mocked(deleteSessionForever).mockRejectedValue(new TypeError("Failed to fetch"));
+  const props = renderSidebar({ view: "trash", selectedId: "a1" });
+
+  const row = await screen.findByText("Sprint Planning");
+  fireEvent.contextMenu(row);
+  fireEvent.click(screen.getByText("[delete forever]"));
+  fireEvent.click(screen.getByText("[confirm]"));
+
+  await waitFor(() =>
+    expect(screen.getByText("Couldn't delete — backend offline")).toBeInTheDocument()
+  );
+  expect(props.onSelect).toHaveBeenLastCalledWith("a1");
+});
+
+it("shows an error when restore fails", async () => {
+  vi.mocked(getSessions).mockResolvedValue([
+    { ...sessionA, trashed_at: "2026-08-02T00:00:00Z" },
+  ]);
+  vi.mocked(restoreSession).mockRejectedValue(new TypeError("Failed to fetch"));
+  renderSidebar({ view: "trash" });
+
+  const row = await screen.findByText("Sprint Planning");
+  fireEvent.contextMenu(row);
+  fireEvent.click(screen.getByText("[restore]"));
+
+  await waitFor(() =>
+    expect(screen.getByText("Couldn't restore — backend offline")).toBeInTheDocument()
+  );
+});
+
+it("shows an error when rename fails", async () => {
+  vi.mocked(renameSession).mockRejectedValue(new TypeError("Failed to fetch"));
+  renderSidebar();
+
+  fireEvent.contextMenu(screen.getByText("Sprint Planning"));
+  fireEvent.click(screen.getByText("[rename]"));
+  const input = screen.getByDisplayValue("Sprint Planning");
+  fireEvent.change(input, { target: { value: "Renamed" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  await waitFor(() =>
+    expect(screen.getByText("Couldn't rename — backend offline")).toBeInTheDocument()
+  );
+});
+
+it("undo restores the toast and shows an error when undoing trash fails", async () => {
+  vi.mocked(trashSession).mockResolvedValue({ ...sessionA, trashed_at: "2026-08-03T00:00:00Z" });
+  vi.mocked(restoreSession).mockRejectedValue(new TypeError("Failed to fetch"));
+  renderSidebar();
+
+  fireEvent.contextMenu(screen.getByText("Sprint Planning"));
+  fireEvent.click(screen.getByText("[trash]"));
+  await waitFor(() => expect(screen.getByText('trashed "Sprint Planning"')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByText("[undo]"));
+  // The toast is optimistically dismissed the instant undo is clicked.
+  expect(screen.queryByText('trashed "Sprint Planning"')).not.toBeInTheDocument();
+
+  await waitFor(() =>
+    expect(screen.getByText("Couldn't undo trash — backend offline")).toBeInTheDocument()
+  );
+  // Rolled back so the user can try again instead of losing the only path
+  // back to the trashed session.
+  expect(screen.getByText('trashed "Sprint Planning"')).toBeInTheDocument();
+});
+
 it("right-click in trash view offers delete forever, which requires confirmation", async () => {
   vi.mocked(getSessions).mockResolvedValue([
     { ...sessionA, trashed_at: "2026-08-02T00:00:00Z" },

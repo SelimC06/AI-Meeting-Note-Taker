@@ -12,10 +12,40 @@ interface Props {
   onTrash: (session: Session) => void;
   onRestore: (session: Session) => void;
   onDeleteForever: (session: Session) => void;
+  onExportError: (message: string) => void;
 }
 
 const MENU_WIDTH = 180;
 const MENU_HEIGHT_ESTIMATE = 200;
+
+// A plain <a href download> gives no way to know the request failed --
+// with the backend down, clicking export silently did nothing. Fetching it
+// ourselves lets a failure surface through onExportError, same as every
+// other session action; on success the response becomes a Blob and is
+// downloaded through a throwaway object-URL link instead.
+async function exportViaFetch(url: string, label: string, onExportError: (message: string) => void) {
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      onExportError(`Couldn't export ${label} — request failed: ${resp.status}`);
+      return;
+    }
+    const blob = await resp.blob();
+    const disposition = resp.headers.get("Content-Disposition") ?? "";
+    const filenameMatch = disposition.match(/filename="?([^"]+)"?/);
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filenameMatch?.[1] ?? label;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  } catch (e) {
+    const detail = e instanceof TypeError ? "backend offline" : e instanceof Error ? e.message : String(e);
+    onExportError(`Couldn't export ${label} — ${detail}`);
+  }
+}
 
 const SessionContextMenu: React.FC<Props> = ({
   session,
@@ -28,6 +58,7 @@ const SessionContextMenu: React.FC<Props> = ({
   onTrash,
   onRestore,
   onDeleteForever,
+  onExportError,
 }) => {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -62,12 +93,24 @@ const SessionContextMenu: React.FC<Props> = ({
       <button className={itemClass} onClick={() => onOpenNotes(session)}>
         [notes]
       </button>
-      <a href={exportSessionNotesUrl(session.id)} download className={itemClass}>
+      <button
+        className={itemClass}
+        onClick={() => {
+          exportViaFetch(exportSessionNotesUrl(session.id), "notes", onExportError);
+          onClose();
+        }}
+      >
         [export notes]
-      </a>
-      <a href={exportSessionZipUrl(session.id)} download className={itemClass}>
+      </button>
+      <button
+        className={itemClass}
+        onClick={() => {
+          exportViaFetch(exportSessionZipUrl(session.id), "recording", onExportError);
+          onClose();
+        }}
+      >
         [export recording]
-      </a>
+      </button>
 
       {view === "active" && (
         <>

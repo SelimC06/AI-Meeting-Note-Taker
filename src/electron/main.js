@@ -5,6 +5,7 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import { resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, ensurePortFree } from './backend.js';
 import { attemptRecovery, isRecovering } from './backendRecovery.js';
+import { nextWatchdogState, probeHealthOnce, WATCHDOG_INTERVAL_MS } from './backendWatchdog.js';
 import { armAutoUpdate, getLastStatus, installUpdate } from './updater.js';
 import {
     computeRailBounds,
@@ -636,6 +637,47 @@ let BACKEND_URL = null;
 
 let recoveryConfig = null;
 
+function sendBackendStatus(payload) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('backend:status', payload);
+    }
+}
+
+// Detects a backend that's hung but hasn't exited -- armCrashMonitor's
+// 'exit' listener never fires for that case, so without this a deadlock
+// left the app showing "stopped" forever with no automatic recovery.
+// Skips a tick entirely (rather than probing) while a recovery is already
+// in progress or the app is quitting, so it never fights attemptRecovery's
+// own retry loop or spawns a process after shutdown has begun.
+let watchdogTimer = null;
+let watchdogConsecutiveFailures = 0;
+
+function stopHealthWatchdog() {
+    if (watchdogTimer) {
+        clearInterval(watchdogTimer);
+        watchdogTimer = null;
+    }
+}
+
+function startHealthWatchdog() {
+    stopHealthWatchdog();
+    watchdogConsecutiveFailures = 0;
+    watchdogTimer = setInterval(async () => {
+        if (!recoveryConfig || isRecovering() || shuttingDown) return;
+        const ok = await probeHealthOnce(recoveryConfig.backendUrl);
+        const next = nextWatchdogState(watchdogConsecutiveFailures, ok);
+        watchdogConsecutiveFailures = next.consecutiveFailures;
+        if (next.shouldRestart) {
+            watchdogConsecutiveFailures = 0;
+            // ensurePortFree inside attemptRecovery kills whatever is
+            // currently bound to the port (the hung process, since its exe
+            // matches) before spawning a fresh one -- no separate kill step
+            // needed here.
+            await attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo: null });
+        }
+    }, WATCHDOG_INTERVAL_MS);
+}
+
 // A backend orphaned from a prior launch of *this app* can still hold the preferred port;
 // ensurePortFree clears that safely (only killing a PID whose executable matches
 // expectedExePath). If the port is instead held by some unrelated process (a user's own dev
@@ -686,25 +728,18 @@ app.whenReady().then(async () => {
     };
     const backendProcess = startBackend(backend.command, backend.args, backend.cwd, backendEnv);
 
-    // Packaged mode gets a longer timeout: a first launch after install can hit
-    // slower disk I/O and antivirus scanning of freshly-written files, and the
-    // frozen backend's measured cold start (~7.6s) leaves thin margin under 15s.
-    // Dev mode launches an already-installed venv python, which is fast and
-    // doesn't have this risk, so its timeout stays unchanged.
-    const healthTimeoutMs = app.isPackaged ? 30000 : 15000;
-
-    try {
-        await waitForHealth(BACKEND_URL, healthTimeoutMs, backendProcess);
-    } catch (err) {
-        const logTail = getBackendLogTail();
-        const detail = logTail
-            ? `${err?.message ?? err}\n\nBackend output:\n${logTail}`
-            : String(err?.message ?? err);
-        dialog.showErrorBox('Backend failed to start', detail);
-        await stopBackend();
-        app.quit();
-        return;
-    }
+    // Show the window right away instead of blocking on backend health: a
+    // cold first launch (antivirus scanning freshly-written files) can take
+    // up to healthTimeoutMs below, and gating window creation on that left
+    // users staring at nothing for the whole wait, looking like the app
+    // never launched. BackendStatusBanner (driven by the backend:status
+    // events below) renders "starting"/"failed" as a loading state instead
+    // -- the renderer already handles a down backend everywhere else, so
+    // there's nothing left that actually needs the gate.
+    createWindow();
+    createRailWindow();
+    armAutoUpdate(mainWindow);
+    sendBackendStatus({ state: 'starting' });
 
     recoveryConfig = {
         pythonExe: backend.command,
@@ -715,13 +750,37 @@ app.whenReady().then(async () => {
         logDir: path.join(app.getPath('userData'), 'logs'),
         isShuttingDown: () => shuttingDown,
     };
+    // Armed before waitForHealth settles, not after -- a crash during the
+    // initial health wait used to go unrecovered (the app just quit via the
+    // catch block below); now it's handled the same as any later crash.
     armCrashMonitor(backendProcess, (code, signal) => {
         attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo: { exitCode: code, signal } });
     });
 
-    createWindow();
-    createRailWindow();
-    armAutoUpdate(mainWindow);
+    // Packaged mode gets a longer timeout: a first launch after install can hit
+    // slower disk I/O and antivirus scanning of freshly-written files, and the
+    // frozen backend's measured cold start (~7.6s) leaves thin margin under 15s.
+    // Dev mode launches an already-installed venv python, which is fast and
+    // doesn't have this risk, so its timeout stays unchanged.
+    const healthTimeoutMs = app.isPackaged ? 30000 : 15000;
+
+    try {
+        await waitForHealth(BACKEND_URL, healthTimeoutMs, backendProcess);
+        sendBackendStatus({ state: 'ready' });
+    } catch (err) {
+        // No dialog + app.quit() here anymore: the window already exists and
+        // the lifecycle-driven "failed" banner (with its Retry button, wired
+        // to the same recovery path the watchdog below uses) gives the user
+        // a way forward without restarting the whole app.
+        const logTail = getBackendLogTail();
+        const detail = logTail
+            ? `${err?.message ?? err}\n\nBackend output:\n${logTail}`
+            : String(err?.message ?? err);
+        console.error('[backend] failed to become healthy on startup:', detail);
+        sendBackendStatus({ state: 'failed', logTail: detail });
+    }
+
+    startHealthWatchdog();
 });
 
 ipcMain.handle('updater:install', () => installUpdate());
@@ -731,12 +790,11 @@ ipcMain.handle('app:getVersion', () => app.getVersion());
 
 ipcMain.handle('backend:restart', async () => {
     if (!recoveryConfig || isRecovering()) return;
-    try {
-        const res = await fetch(`${recoveryConfig.backendUrl}/health`);
-        if (res.ok) return; // already healthy — don't spawn a second process on the same port
-    } catch {
-        // not reachable, proceed with recovery
-    }
+    // Timed via AbortSignal (probeHealthOnce) -- a plain fetch with no
+    // timeout would hang this handler forever against exactly the kind of
+    // hung-but-accepting-connections backend this button exists to recover.
+    const ok = await probeHealthOnce(recoveryConfig.backendUrl);
+    if (ok) return; // already healthy — don't spawn a second process on the same port
     await attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo: null });
 });
 
@@ -778,6 +836,8 @@ app.on('before-quit', (e) => {
     // top-level window, so this is set in time either way -- set
     // unconditionally and immediately, regardless of the guard below.
     isQuitting = true;
+    // No more watchdog-triggered restarts once quitting has begun.
+    stopHealthWatchdog();
     // Set immediately and unconditionally too -- an in-flight recovery attempt
     // (or one that starts between now and the backend actually being stopped
     // below) must never spawn a fresh backend process once quitting has begun.

@@ -14,6 +14,7 @@ vi.mock("../api", async () => {
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -121,7 +122,7 @@ it("polls getJobStatus for active jobs and updates their stage", async () => {
   ]);
 });
 
-it("marks a job failed with a lost-track error when getJobStatus rejects (e.g. 404 after backend restart)", async () => {
+it("marks a job failed with a lost-track error only after 5 consecutive rejected polls", async () => {
   vi.useFakeTimers();
   vi.mocked(api.listJobs).mockResolvedValue([]);
   vi.mocked(api.getJobStatus).mockRejectedValue(new Error("Failed to fetch job status: 404"));
@@ -135,10 +136,18 @@ it("marks a job failed with a lost-track error when getJobStatus rejects (e.g. 4
     result.current.addJob("job-1");
   });
 
+  // 4 consecutive failed polls: still tracked as running, not yet lost.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500 * 4);
+  });
+  expect(result.current.jobs).toEqual([
+    { id: "job-1", stage: null, status: "queued", error: null },
+  ]);
+
+  // 5th consecutive failure crosses the threshold.
   await act(async () => {
     await vi.advanceTimersByTimeAsync(1500);
   });
-
   expect(result.current.jobs).toEqual([
     {
       id: "job-1",
@@ -146,6 +155,83 @@ it("marks a job failed with a lost-track error when getJobStatus rejects (e.g. 4
       status: "failed",
       error: "Lost track of this recording — the app backend restarted while it was processing.",
     },
+  ]);
+});
+
+it("tolerates a transient poll failure and keeps the job running once a later poll succeeds", async () => {
+  vi.useFakeTimers();
+  vi.mocked(api.listJobs).mockResolvedValue([]);
+  vi.mocked(api.getJobStatus)
+    .mockRejectedValueOnce(new Error("Failed to fetch job status: network error"))
+    .mockRejectedValueOnce(new Error("Failed to fetch job status: network error"))
+    .mockResolvedValue({
+      id: "job-1", session_id: "s1", status: "running", stage: "summarizing",
+      error: null, notes: null, video_path: null, created_at: "2026-08-06T00:00:00Z",
+    });
+
+  const { result } = renderHook(() => useProcessingJobs());
+  await act(async () => {
+    await Promise.resolve();
+  });
+
+  act(() => {
+    result.current.addJob("job-1");
+  });
+
+  // Two failures, well under the 5-failure threshold, then a success.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500 * 3);
+  });
+
+  expect(result.current.jobs).toEqual([
+    { id: "job-1", stage: "summarizing", status: "running", error: null },
+  ]);
+
+  // The failure counter reset on that success -- two more failures now
+  // shouldn't be anywhere near enough to declare it lost.
+  vi.mocked(api.getJobStatus).mockRejectedValue(new Error("Failed to fetch job status: network error"));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500 * 2);
+  });
+  expect(result.current.jobs).toEqual([
+    { id: "job-1", stage: "summarizing", status: "running", error: null },
+  ]);
+});
+
+it("does not count failed polls toward the lost-track threshold while the backend lifecycle reports restarting", async () => {
+  vi.useFakeTimers();
+  let statusListener: ((status: BackendStatus) => void) | null = null;
+  vi.stubGlobal("backendAPI", {
+    onStatus: (cb: (status: BackendStatus) => void) => {
+      statusListener = cb;
+      return () => {
+        statusListener = null;
+      };
+    },
+    restart: vi.fn(),
+  });
+
+  vi.mocked(api.listJobs).mockResolvedValue([]);
+  vi.mocked(api.getJobStatus).mockRejectedValue(new Error("Failed to fetch job status: network error"));
+
+  const { result } = renderHook(() => useProcessingJobs());
+  await act(async () => {
+    await Promise.resolve();
+  });
+  act(() => statusListener?.({ state: "restarting", attempt: 1, maxAttempts: 3 }));
+
+  act(() => {
+    result.current.addJob("job-1");
+  });
+
+  // Far more than 5 failed polls, but they're all paused (not counted)
+  // while the backend is known to be restarting.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500 * 10);
+  });
+
+  expect(result.current.jobs).toEqual([
+    { id: "job-1", stage: null, status: "queued", error: null },
   ]);
 });
 

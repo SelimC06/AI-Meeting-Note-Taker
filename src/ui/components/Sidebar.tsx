@@ -26,6 +26,21 @@ interface Props {
   onSelect: (id: string | null) => void;
 }
 
+// Distinguishes "the fetch itself never landed" (offline/backend down --
+// browsers throw a bare TypeError for that, e.g. Chromium's "Failed to
+// fetch") from a request that reached the backend and got a real HTTP error
+// back (api.ts already builds a descriptive Error for those), so the banner
+// can say something more useful than a generic failure.
+function describeActionError(action: string, e: unknown): string {
+  if (e instanceof TypeError) {
+    return `Couldn't ${action} — backend offline`;
+  }
+  const detail = e instanceof Error ? e.message : String(e);
+  return `Couldn't ${action} — ${detail}`;
+}
+
+const ACTION_ERROR_AUTO_DISMISS_MS = 6000;
+
 const Sidebar: React.FC<Props> = ({
   view,
   collapsed,
@@ -41,7 +56,18 @@ const Sidebar: React.FC<Props> = ({
   const [undoToast, setUndoToast] = useState<{ id: string; title: string } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ session: Session; x: number; y: number } | null>(null);
   const [notesSession, setNotesSession] = useState<Session | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const undoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const actionErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showActionError = (message: string) => {
+    setActionError(message);
+    if (actionErrorTimeoutRef.current !== null) clearTimeout(actionErrorTimeoutRef.current);
+    actionErrorTimeoutRef.current = setTimeout(() => {
+      setActionError(null);
+      actionErrorTimeoutRef.current = null;
+    }, ACTION_ERROR_AUTO_DISMISS_MS);
+  };
 
   const trashList = useSessions(view === "trash", true);
 
@@ -61,6 +87,7 @@ const Sidebar: React.FC<Props> = ({
   useEffect(() => {
     return () => {
       if (undoTimeoutRef.current !== null) clearTimeout(undoTimeoutRef.current);
+      if (actionErrorTimeoutRef.current !== null) clearTimeout(actionErrorTimeoutRef.current);
     };
   }, []);
 
@@ -84,7 +111,8 @@ const Sidebar: React.FC<Props> = ({
 
   const handleTrash = async (s: Session) => {
     setContextMenu(null);
-    if (selectedId === s.id) onSelect(null);
+    const wasSelected = selectedId === s.id;
+    if (wasSelected) onSelect(null);
     try {
       await trashSession(s.id);
       reloadSessions();
@@ -96,40 +124,47 @@ const Sidebar: React.FC<Props> = ({
       }, 6000);
     } catch (e) {
       console.error("[Sidebar] trash failed:", e);
-      reloadSessions();
+      if (wasSelected) onSelect(s.id);
+      showActionError(describeActionError("move to trash", e));
     }
   };
 
-  const handleUndo = async (id: string) => {
+  const handleUndo = async (id: string, title: string) => {
     setUndoToast(null);
     try {
       await restoreSession(id);
+      reloadSessions();
     } catch (e) {
       console.error("[Sidebar] undo failed:", e);
+      setUndoToast({ id, title });
+      showActionError(describeActionError("undo trash", e));
     }
-    reloadSessions();
   };
 
   const handleRestore = async (s: Session) => {
     setContextMenu(null);
     try {
       await restoreSession(s.id);
+      trashList.reload();
+      reloadSessions();
     } catch (e) {
       console.error("[Sidebar] restore failed:", e);
+      showActionError(describeActionError("restore", e));
     }
-    trashList.reload();
-    reloadSessions();
   };
 
   const handleDeleteForever = async (s: Session) => {
     setContextMenu(null);
-    if (selectedId === s.id) onSelect(null);
+    const wasSelected = selectedId === s.id;
+    if (wasSelected) onSelect(null);
     try {
       await deleteSessionForever(s.id);
+      trashList.reload();
     } catch (e) {
       console.error("[Sidebar] delete forever failed:", e);
+      if (wasSelected) onSelect(s.id);
+      showActionError(describeActionError("delete", e));
     }
-    trashList.reload();
   };
 
   const startRename = (s: Session) => {
@@ -144,10 +179,11 @@ const Sidebar: React.FC<Props> = ({
     if (!title) return;
     try {
       await renameSession(id, title);
+      reloadSessions();
     } catch (e) {
       console.error("[Sidebar] rename failed:", e);
+      showActionError(describeActionError("rename", e));
     }
-    reloadSessions();
   };
 
   const hasList = list !== null && list.length > 0;
@@ -202,11 +238,30 @@ const Sidebar: React.FC<Props> = ({
             />
           </div>
 
+          {actionError && (
+            <div className="flex items-center justify-between px-2 py-1.5 text-xs bg-void border-b border-red-500 text-red-400">
+              <span className="truncate">{actionError}</span>
+              <button
+                aria-label="dismiss error"
+                onClick={() => {
+                  setActionError(null);
+                  if (actionErrorTimeoutRef.current !== null) {
+                    clearTimeout(actionErrorTimeoutRef.current);
+                    actionErrorTimeoutRef.current = null;
+                  }
+                }}
+                className="text-red-400 hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal shrink-0 ml-1"
+              >
+                [x]
+              </button>
+            </div>
+          )}
+
           {undoToast && (
             <div className="flex items-center justify-between px-2 py-1.5 text-xs bg-void border-b border-signal">
               <span className="truncate">trashed "{undoToast.title}"</span>
               <button
-                onClick={() => handleUndo(undoToast.id)}
+                onClick={() => handleUndo(undoToast.id, undoToast.title)}
                 className="text-signal hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-signal shrink-0 ml-1"
               >
                 [undo]
@@ -320,6 +375,7 @@ const Sidebar: React.FC<Props> = ({
           onTrash={handleTrash}
           onRestore={handleRestore}
           onDeleteForever={handleDeleteForever}
+          onExportError={showActionError}
         />
       )}
 

@@ -9,6 +9,28 @@ const BackendStatusBanner: React.FC = () => {
   const baseClasses =
     "absolute top-0 left-0 right-0 z-50 px-3 py-1.5 text-xs flex items-center justify-between gap-2";
 
+  if (state.phase === "starting") {
+    return (
+      <div className={`${baseClasses} bg-panel border-b border-line text-dim`}>
+        <span>Starting backend…</span>
+      </div>
+    );
+  }
+
+  if (state.phase === "unresponsive") {
+    return (
+      <div className={`${baseClasses} bg-panel border-b border-line text-dim`}>
+        <span>Backend is not responding.</span>
+        <button
+          className="text-signal underline"
+          onClick={() => window.backendAPI?.restart()}
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   if (state.phase === "restarting") {
     return (
       <div className={`${baseClasses} bg-panel border-b border-line text-dim`}>
