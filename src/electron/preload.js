@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('windowControls', {
   },
 
   pushRailStatus: (status) => ipcRenderer.invoke('rail:pushStatus', status),
+  notifyStopAndSaveComplete: () => ipcRenderer.send('rail:stopAndSaveComplete'),
   onRailStatus: (callback) => {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('rail:status', listener);

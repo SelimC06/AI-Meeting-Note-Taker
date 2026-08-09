@@ -470,6 +470,56 @@ it("calls the record handler when a toggleRecord command arrives from the dashbo
   expect(record).toHaveBeenCalledTimes(1);
 });
 
+it("calls stop (not record) for a stopForClose command while recording, and acks when it resolves", async () => {
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  const notifyStopAndSaveComplete = vi.fn();
+  vi.stubGlobal("windowControls", {
+    pushRailStatus: vi.fn(),
+    onRailCommand,
+    notifyStopAndSaveComplete,
+  });
+  const record = vi.fn().mockResolvedValue(undefined);
+  const stop = vi.fn().mockResolvedValue({});
+  mockHook({ status: "recording", record, stop, error: null });
+
+  render(<RailApp />);
+  commandCallback?.("stopForClose");
+
+  await waitFor(() => {
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+  expect(record).not.toHaveBeenCalled();
+  expect(notifyStopAndSaveComplete).toHaveBeenCalledTimes(1);
+});
+
+it("acks a stopForClose command immediately without starting a new recording when already idle", () => {
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  const notifyStopAndSaveComplete = vi.fn();
+  vi.stubGlobal("windowControls", {
+    pushRailStatus: vi.fn(),
+    onRailCommand,
+    notifyStopAndSaveComplete,
+  });
+  const record = vi.fn().mockResolvedValue(undefined);
+  const stop = vi.fn().mockResolvedValue({});
+  mockHook({ status: "idle", record, stop });
+
+  render(<RailApp />);
+  commandCallback?.("stopForClose");
+
+  expect(record).not.toHaveBeenCalled();
+  expect(stop).not.toHaveBeenCalled();
+  expect(notifyStopAndSaveComplete).toHaveBeenCalledTimes(1);
+});
+
 it("calls pause when a pause command arrives while recording", () => {
   let commandCallback: ((action: string) => void) | undefined;
   const onRailCommand = vi.fn((cb: (action: string) => void) => {

@@ -19,6 +19,7 @@ import {
 } from './railGeometry.js';
 import { sanitizeCaptureSourceTypes } from './captureSources.js';
 import { distReactPath } from './paths.js';
+import { shouldPromptBeforeClose, hasActiveJob } from './closeGuard.js';
 
 let railErrorVisible = false;
 let isRailFloatDragging = false;
@@ -26,6 +27,39 @@ let lastDockSlotClientRect = null;
 let railMoveSettleTimer = null;
 let railPopOutTimer = null;
 let isQuitting = false;
+
+// Last status the rail renderer reported via rail:pushStatus -- lets the
+// close/quit guards below know whether a capture is live without having to
+// ask the (possibly about-to-be-destroyed) rail window directly.
+let lastRailStatus = 'idle';
+// Set once the user has confirmed closing (via performGuardedClose below,
+// or there was nothing to guard) so the guarded 'close' handler lets a
+// second, self-triggered mainWindow.close() through instead of looping.
+let closeConfirmed = false;
+// Set right before a controlled quit (app:quit's handler, after
+// performGuardedClose resolves) explicitly calls app.quit() after
+// destroying all windows itself. Destroying the last window also fires
+// 'window-all-closed', which normally calls app.quit() on its own --
+// without this flag that's a second, redundant app.quit() call.
+let quitRequested = false;
+// Reentrancy guard so a second close/quit gesture (another click, a rapid
+// double-invoke) arriving while performGuardedClose() is already running
+// doesn't start a second, overlapping copy of the same recording-guard
+// dialog.
+let closeInProgress = false;
+// Set once before-quit's active-job wait has already run once for this
+// quit sequence, so a redundant app.quit() call (see quitRequested above,
+// and the belt-and-suspenders reentrancy guard below) doesn't wait twice
+// or re-check jobs that already finished.
+let quitConfirmed = false;
+// Reentrancy guard for before-quit's async wait-for-jobs flow -- in case
+// app.quit() is somehow called a second time while it's still resolving.
+let beforeQuitInFlight = false;
+// Resolved by the rail:stopAndSaveComplete ack below once RailApp's
+// stop-triggered upload handoff (or the empty-recording no-op path)
+// finishes, so the close/quit guards know when it's actually safe to
+// destroy the rail window instead of guessing with a fixed delay.
+let pendingStopAck = null;
 
 // Mirrors the height calculation in the rail:setErrorVisible handler below,
 // so the floating window sized during a drag (beginFloatDrag/dragMove)
@@ -264,8 +298,16 @@ ipcMain.handle('rail:command', (_event, action) => {
 });
 
 ipcMain.handle('rail:pushStatus', (_event, status) => {
+    lastRailStatus = status?.status ?? 'idle';
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('rail:status', status);
+});
+
+// Acked by RailApp.tsx once a stop triggered by stopAndSaveRailRecording()
+// below (the "Stop && Save" dialog choice) has finished its upload handoff
+// -- or immediately, on the empty-recording no-op path.
+ipcMain.on('rail:stopAndSaveComplete', () => {
+    pendingStopAck?.resolve();
 });
 
 ipcMain.handle('rail:beginFloatDrag', (_event, slotRect) => {
@@ -357,6 +399,79 @@ ipcMain.handle('shell:openPrivacySettings', (_event, kind) => {
 });
 
 
+// Waits for the rail:stopAndSaveComplete ack (see the ipcMain.on handler
+// above), or gives up after timeoutMs so a renderer that never acks (crash,
+// unexpected error path) can't hang the close/quit flow forever. Generous
+// on purpose, not a typical wait: the ack fires only after the full /process
+// upload completes (RailApp.tsx), which can take a while for a large
+// screen recording -- too short a cap here would destroy the rail window
+// mid-upload and silently discard the very recording the user chose to save.
+function waitForStopAck(timeoutMs = 120000) {
+    return new Promise((resolve) => {
+        pendingStopAck = { resolve };
+        setTimeout(resolve, timeoutMs);
+    }).finally(() => {
+        pendingStopAck = null;
+    });
+}
+
+// Tells the rail to stop -- RailApp.tsx's handleStopForClose handles the
+// upload handoff -- and waits for it to finish, so the caller can safely
+// destroy windows afterward without discarding the just-stopped capture.
+// Deliberately NOT 'toggleRecord': lastRailStatus here is a cached copy of
+// the renderer's real status (updated one IPC round-trip behind), so by the
+// time this fires it could already be stale. A toggle command trusts
+// nothing about current status and would start a brand-new recording
+// instead of stopping one if the rail had already gone idle in the
+// meantime; 'stopForClose' is a no-op (and acks immediately) when there's
+// nothing to stop.
+async function stopAndSaveRailRecording() {
+    if (!railWindow || railWindow.isDestroyed()) return;
+    const acked = waitForStopAck();
+    railWindow.webContents.send('rail:command', 'stopForClose');
+    await acked;
+}
+
+// dialog.showMessageBox's (window, options) and (options) overloads are
+// resolved by argument count, not by checking for a nullish first arg -- so
+// passing `mainWindow ?? undefined` positionally would break if mainWindow
+// is null (e.g. already destroyed by the time before-quit's check runs).
+function showMessageBox(options) {
+    return mainWindow && !mainWindow.isDestroyed()
+        ? dialog.showMessageBox(mainWindow, options)
+        : dialog.showMessageBox(options);
+}
+
+// Shown by the guarded close/quit paths below when a capture is live.
+// Returns true if the user chose to stop & save (and closing should
+// proceed), false if they cancelled.
+async function confirmCloseWithDialog() {
+    const result = await showMessageBox({
+        type: 'warning',
+        buttons: ['Stop && Save', 'Cancel'],
+        defaultId: 0,
+        cancelId: 1,
+        title: 'Recording in progress',
+        message: 'A recording is in progress',
+        detail: 'Stop and save the recording before closing, or cancel to keep recording.',
+    });
+    return result.response === 0;
+}
+
+// Shared by the mainWindow 'close' handler and the app:quit IPC handler:
+// just the recording guard (Stop && Save / Cancel) -- the active-job wait
+// happens later, silently, in before-quit (see waitForActiveJobsToFinish),
+// after windows are already gone. Returns true if the close should
+// proceed, false if the user cancelled.
+async function performGuardedClose() {
+    if (shouldPromptBeforeClose(lastRailStatus)) {
+        const proceed = await confirmCloseWithDialog();
+        if (!proceed) return false;
+        await stopAndSaveRailRecording();
+    }
+    return true;
+}
+
 function createWindow() {
     mainWindow = new BrowserWindow({
         width: 800,
@@ -400,6 +515,35 @@ function createWindow() {
         mainWindow.focus();
     });
 
+    // Cancellable, unlike 'closed' below -- lets us intercept a close
+    // gesture (title-bar X, Alt+F4) while a capture is live and ask before
+    // the rail window (and its in-memory MediaRecorder buffers) gets
+    // destroyed. Skipped once closeConfirmed is set, so the mainWindow.close()
+    // call at the end of the guarded flow actually goes through instead of
+    // looping back into this same prompt. closeInProgress guards against a
+    // second close gesture (or the app:quit IPC handler) starting an
+    // overlapping second run while this one is still resolving.
+    mainWindow.on('close', (e) => {
+        if (isQuitting || closeConfirmed) return;
+        if (closeInProgress) {
+            e.preventDefault();
+            return;
+        }
+        if (!shouldPromptBeforeClose(lastRailStatus)) return;
+        e.preventDefault();
+        closeInProgress = true;
+        (async () => {
+            try {
+                const proceed = await performGuardedClose();
+                if (!proceed) return;
+                closeConfirmed = true;
+                mainWindow?.close();
+            } finally {
+                closeInProgress = false;
+            }
+        })();
+    });
+
     mainWindow.on('closed', () => {
         if (railWindow && !railWindow.isDestroyed()) {
             railWindow.destroy();
@@ -434,11 +578,26 @@ ipcMain.handle('system:getStats', async () => {
 });
 
 ipcMain.handle('win:minimize', () => mainWindow && mainWindow.minimize());
-ipcMain.handle('app:quit', () => {
-    for (const w of BrowserWindow.getAllWindows()) {
-        if (!w.isDestroyed()) w.destroy();
+ipcMain.handle('app:quit', async () => {
+    // Guards against a second app:quit invocation (a rapid double-click on
+    // the close button, or the native 'close' handler above already
+    // running) starting an overlapping second guarded-close sequence.
+    if (closeInProgress) return;
+    closeInProgress = true;
+    try {
+        const proceed = await performGuardedClose();
+        if (!proceed) return;
+        // Set before destroying windows, not after -- destroying the last
+        // one below synchronously fires 'window-all-closed', which needs
+        // to see this flag already set to skip its own app.quit() call.
+        quitRequested = true;
+        for (const w of BrowserWindow.getAllWindows()) {
+            if (!w.isDestroyed()) w.destroy();
+        }
+        app.quit();
+    } finally {
+        closeInProgress = false;
     }
-    app.quit();
 });
 
 const BACKEND_PORT = '8000';
@@ -525,15 +684,80 @@ ipcMain.handle('backend:restart', async () => {
     await attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo: null });
 });
 
-app.on('before-quit', () => {
+// Best-effort check for a still-running transcription job, used only to
+// decide whether before-quit below should warn before killing the backend.
+// Short-timeouts and swallows errors -- an unreachable/slow backend should
+// never block quitting, just skip the warning.
+async function fetchActiveJobsForQuitGuard() {
+    try {
+        const res = await fetch(`${BACKEND_URL}/jobs`, { signal: AbortSignal.timeout(1500) });
+        if (!res.ok) return [];
+        return await res.json();
+    } catch {
+        return [];
+    }
+}
+
+const QUIT_JOB_POLL_INTERVAL_MS = 2000;
+// A safety cap, not an expected wait -- if a job is somehow still
+// queued/running after 5 minutes (stuck backend, huge recording), quitting
+// proceeds anyway rather than trapping the user in a windowless app forever.
+const QUIT_JOB_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
+
+async function waitForActiveJobsToFinish(timeoutMs = QUIT_JOB_WAIT_TIMEOUT_MS) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const jobs = await fetchActiveJobsForQuitGuard();
+        if (!hasActiveJob(jobs)) return;
+        await new Promise((resolve) => setTimeout(resolve, QUIT_JOB_POLL_INTERVAL_MS));
+    }
+}
+
+app.on('before-quit', (e) => {
     // Lets the rail window's 'close' handler distinguish "the user is
     // quitting the whole app / the OS is shutting down" (let it close for
     // real) from "an isolated close gesture aimed at just this window"
     // (Alt+F4 on the rail specifically, which should only hide/dock it).
     // 'before-quit' fires ahead of Electron delivering 'close' to every
-    // top-level window, so this is set in time either way.
+    // top-level window, so this is set in time either way -- set
+    // unconditionally and immediately, regardless of the guard below.
     isQuitting = true;
-    stopBackend();
+
+    if (quitConfirmed) {
+        stopBackend();
+        return;
+    }
+    if (beforeQuitInFlight) {
+        // A previous app.quit() call's wait-for-jobs flow is still
+        // resolving -- don't start a second one. Just keep preventing
+        // default; the in-flight flow will call app.quit() again once it's
+        // done, which re-enters this handler and (with quitConfirmed now
+        // true) lets the real quit through.
+        e.preventDefault();
+        return;
+    }
+    // Silently let any still-running transcription job finish before the
+    // backend gets stopped below -- no dialog, no extra window, it just
+    // waits (capped so a stuck job can't trap the app open forever).
+    e.preventDefault();
+    beforeQuitInFlight = true;
+    (async () => {
+        try {
+            const jobs = await fetchActiveJobsForQuitGuard();
+            if (hasActiveJob(jobs)) {
+                await waitForActiveJobsToFinish();
+            }
+        } catch {
+            // Proceed with quitting regardless of what went wrong above.
+        } finally {
+            quitConfirmed = true;
+            beforeQuitInFlight = false;
+            app.quit();
+        }
+    })();
 });
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('window-all-closed', () => {
+    if (quitRequested) return; // app:quit's handler already called app.quit() itself
+    if (process.platform !== 'darwin') app.quit();
+});
 app.on('activate', () => { if (!mainWindow) createWindow(); });

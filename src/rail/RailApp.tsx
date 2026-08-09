@@ -75,19 +75,19 @@ export default function RailApp() {
         previousErrorRef.current = displayError;
     }, [displayError]);
 
-    const handleRecordClick = async () => {
-        if (isProcessing) return;
-
+    // Stops the current recording and uploads it. Acked unconditionally on
+    // every exit (empty segments, success, or failure) so main.js's guarded
+    // close/quit flow — which triggers this via a "stopForClose"
+    // rail:command and awaits the ack — never hangs waiting for one that
+    // was never coming. See stopAndSaveRailRecording() in main.js.
+    const stopAndUpload = async () => {
         try {
-            if (status === "idle") {
-                setProcessError(null);
-                await record();
-        } else if (status === "recording" || status === "paused" || status === "starting") {
-                const blobs = await stop();
+            const blobs = await stop();
 
-            // status === "starting" (or a recording that produced no
-            // segments) resolves stop() to an empty Combined -- nothing to
-            // upload, so skip the POST instead of sending an empty FormData.
+            // A recording that produced no segments (or a stop that landed
+            // while still "starting") resolves stop() to an empty Combined
+            // -- nothing to upload, so skip the POST instead of sending an
+            // empty FormData.
             if (!blobs.screen && !blobs.systemAudio && !blobs.micAudio) {
                 return;
             }
@@ -122,9 +122,45 @@ export default function RailApp() {
             } finally {
                 setIsProcessing(false);
             }
+        } finally {
+            window.windowControls?.notifyStopAndSaveComplete?.();
         }
+    };
+
+    const handleRecordClick = async () => {
+        if (isProcessing) return;
+
+        try {
+            if (status === "idle") {
+                setProcessError(null);
+                await record();
+            } else if (status === "recording" || status === "paused" || status === "starting") {
+                await stopAndUpload();
+            }
         } catch (err) {
             console.error("record/stop error", err);
+            setProcessError(err instanceof Error ? err.message : String(err));
+        }
+    };
+
+    // Handles main.js's "stopForClose" rail:command (see
+    // stopAndSaveRailRecording() there) -- deliberately NOT routed through
+    // handleRecordClick's status==="idle" branch, since that would start a
+    // brand-new recording if main's cached rail status is stale (already
+    // idle here, but main hasn't heard about it yet over the rail:pushStatus
+    // round-trip). Idle here — or a manual stop's own upload already in
+    // flight — means there's nothing for this close to stop, so just ack
+    // immediately instead of hanging main's guarded close on an ack that
+    // was never coming.
+    const handleStopForClose = async () => {
+        if (isProcessing || (status !== "recording" && status !== "paused" && status !== "starting")) {
+            window.windowControls?.notifyStopAndSaveComplete?.();
+            return;
+        }
+        try {
+            await stopAndUpload();
+        } catch (err) {
+            console.error("stopForClose error", err);
             setProcessError(err instanceof Error ? err.message : String(err));
         }
     };
@@ -155,14 +191,15 @@ export default function RailApp() {
         });
     }, [status, elapsed, levels, displayError, isProcessing]);
 
-    const commandHandlersRef = useRef({ handleRecordClick, handlePauseClick, handlePlayClick });
-    commandHandlersRef.current = { handleRecordClick, handlePauseClick, handlePlayClick };
+    const commandHandlersRef = useRef({ handleRecordClick, handlePauseClick, handlePlayClick, handleStopForClose });
+    commandHandlersRef.current = { handleRecordClick, handlePauseClick, handlePlayClick, handleStopForClose };
 
     useEffect(() => {
         const unsubscribe = window.windowControls?.onRailCommand?.((action) => {
             if (action === "toggleRecord") commandHandlersRef.current.handleRecordClick();
             else if (action === "pause") commandHandlersRef.current.handlePauseClick();
             else if (action === "resume") commandHandlersRef.current.handlePlayClick();
+            else if (action === "stopForClose") commandHandlersRef.current.handleStopForClose();
         });
         return unsubscribe;
     }, []);

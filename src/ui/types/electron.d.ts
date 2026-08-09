@@ -36,7 +36,11 @@ declare global {
     isProcessing: boolean;
   };
 
-  type RailCommandAction = "toggleRecord" | "pause" | "resume";
+  // "stopForClose": sent only by main.js's guarded close/quit flow
+  // (stopAndSaveRailRecording) -- stops an active recording the same way a
+  // manual stop does, but is a safe no-op (acks immediately, doesn't start
+  // anything) if the rail is already idle, unlike "toggleRecord".
+  type RailCommandAction = "toggleRecord" | "pause" | "resume" | "stopForClose";
 
   type RailRect = { x: number; y: number; width: number; height: number };
 
@@ -49,6 +53,11 @@ declare global {
       sendRailCommand: (action: RailCommandAction) => Promise<void>;
       onRailCommand: (callback: (action: RailCommandAction) => void) => () => void;
       pushRailStatus: (status: RailStatus) => Promise<void>;
+      // Acks a stop the main process itself triggered (the close/quit
+      // "Stop && Save" dialog) once the upload handoff (or the
+      // empty-recording no-op) has finished — see main.js's
+      // stopAndSaveRailRecording / rail:stopAndSaveComplete.
+      notifyStopAndSaveComplete: () => void;
       onRailStatus: (callback: (status: RailStatus) => void) => () => void;
       beginRailFloatDrag: (slotRect: RailRect) => Promise<void>;
       railFloatDragMove: () => void;
