@@ -520,6 +520,69 @@ it("acks a stopForClose command immediately without starting a new recording whe
   expect(notifyStopAndSaveComplete).toHaveBeenCalledTimes(1);
 });
 
+it("waits for an already in-flight upload instead of acking immediately when stopForClose arrives mid-upload", async () => {
+  // Regression test: status flips back to "idle" as soon as a manual
+  // stop()'s own stopAndUpload() call resolves stop(), well before its
+  // POST /process upload finishes. A stopForClose arriving in that window
+  // used to see status "idle" and isProcessing true and ack immediately
+  // instead of waiting -- letting main.js destroy this window (and the
+  // in-flight request with it) mid-upload.
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  const notifyStopAndSaveComplete = vi.fn();
+  vi.stubGlobal("windowControls", {
+    pushRailStatus: vi.fn(),
+    onRailCommand,
+    notifyStopAndSaveComplete,
+  });
+
+  const record = vi.fn().mockResolvedValue(undefined);
+  const stop = vi.fn().mockResolvedValue({ screen: new Blob(["x"]) });
+
+  let resolveFetch: (value: unknown) => void = () => {};
+  const fetchPromise = new Promise((resolve) => {
+    resolveFetch = resolve;
+  });
+  vi.stubGlobal("fetch", vi.fn().mockReturnValue(fetchPromise));
+
+  mockHook({ status: "recording", record, stop, error: null });
+
+  const { container, rerender } = render(<RailApp />);
+  const recordButton = container.querySelectorAll("button")[0];
+  fireEvent.click(recordButton); // manual stop -> stopAndUpload() -> stop() then a still-pending fetch()
+
+  await waitFor(() => {
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  // The hook's own status is idle again post-stop() even though the upload
+  // is still in flight -- rerender to match, same as main.js would see via
+  // rail:pushStatus (status: "idle", isProcessing: true).
+  mockHook({ status: "idle", record, stop, error: null });
+  rerender(<RailApp />);
+
+  commandCallback?.("stopForClose");
+
+  // Must NOT ack yet -- that would let main.js destroy this window mid-upload --
+  // and must not have started a second stop/upload.
+  await act(() => Promise.resolve());
+  expect(notifyStopAndSaveComplete).not.toHaveBeenCalled();
+  expect(stop).toHaveBeenCalledTimes(1);
+
+  resolveFetch({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ job_id: "job-1", session_id: "session-1" }),
+  });
+
+  await waitFor(() => {
+    expect(notifyStopAndSaveComplete).toHaveBeenCalledTimes(1);
+  });
+});
+
 it("calls pause when a pause command arrives while recording", () => {
   let commandCallback: ((action: string) => void) | undefined;
   const onRailCommand = vi.fn((cb: (action: string) => void) => {

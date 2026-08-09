@@ -19,7 +19,7 @@ import {
 } from './railGeometry.js';
 import { sanitizeCaptureSourceTypes } from './captureSources.js';
 import { distReactPath } from './paths.js';
-import { shouldPromptBeforeClose, hasActiveJob } from './closeGuard.js';
+import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob } from './closeGuard.js';
 
 let railErrorVisible = false;
 let isRailFloatDragging = false;
@@ -32,6 +32,12 @@ let isQuitting = false;
 // close/quit guards below know whether a capture is live without having to
 // ask the (possibly about-to-be-destroyed) rail window directly.
 let lastRailStatus = 'idle';
+// Last isProcessing flag from the same rail:pushStatus payload -- status
+// flips back to "idle" as soon as a stopped recording's stop() resolves,
+// well before its POST /process upload (still running in the rail
+// renderer) actually finishes, so shouldPromptBeforeClose(lastRailStatus)
+// alone misses that window entirely. needsCloseGuard() below checks both.
+let lastRailIsProcessing = false;
 // Set once the user has confirmed closing (via performGuardedClose below,
 // or there was nothing to guard) so the guarded 'close' handler lets a
 // second, self-triggered mainWindow.close() through instead of looping.
@@ -308,6 +314,7 @@ ipcMain.handle('rail:command', (_event, action) => {
 
 ipcMain.handle('rail:pushStatus', (_event, status) => {
     lastRailStatus = status?.status ?? 'idle';
+    lastRailIsProcessing = !!status?.isProcessing;
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('rail:status', status);
 });
@@ -477,6 +484,16 @@ async function performGuardedClose() {
         const proceed = await confirmCloseWithDialog();
         if (!proceed) return false;
         await stopAndSaveRailRecording();
+        return true;
+    }
+    if (lastRailIsProcessing) {
+        // The recording itself already stopped (by the user's own manual
+        // stop, not this close) and its upload is mid-flight -- there's
+        // nothing to confirm here (no "keep recording" to cancel back into),
+        // so just wait for that same upload to finish before windows get
+        // destroyed, the same way before-quit silently waits out a
+        // transcription job rather than popping a dialog for it.
+        await stopAndSaveRailRecording();
     }
     return true;
 }
@@ -528,20 +545,21 @@ function createWindow() {
     });
 
     // Cancellable, unlike 'closed' below -- lets us intercept a close
-    // gesture (title-bar X, Alt+F4) while a capture is live and ask before
-    // the rail window (and its in-memory MediaRecorder buffers) gets
-    // destroyed. Skipped once closeConfirmed is set, so the mainWindow.close()
-    // call at the end of the guarded flow actually goes through instead of
-    // looping back into this same prompt. closeInProgress guards against a
-    // second close gesture (or the app:quit IPC handler) starting an
-    // overlapping second run while this one is still resolving.
+    // gesture (title-bar X, Alt+F4) while a capture is live, or its
+    // just-stopped recording is still uploading, and guard before the rail
+    // window (and its in-memory MediaRecorder buffers / in-flight upload)
+    // gets destroyed. Skipped once closeConfirmed is set, so the
+    // mainWindow.close() call at the end of the guarded flow actually goes
+    // through instead of looping back into this same prompt. closeInProgress
+    // guards against a second close gesture (or the app:quit IPC handler)
+    // starting an overlapping second run while this one is still resolving.
     mainWindow.on('close', (e) => {
         if (isQuitting || closeConfirmed) return;
         if (closeInProgress) {
             e.preventDefault();
             return;
         }
-        if (!shouldPromptBeforeClose(lastRailStatus)) return;
+        if (!needsCloseGuard(lastRailStatus, lastRailIsProcessing)) return;
         e.preventDefault();
         closeInProgress = true;
         (async () => {

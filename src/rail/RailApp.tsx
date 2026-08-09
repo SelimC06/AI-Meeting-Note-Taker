@@ -75,55 +75,75 @@ export default function RailApp() {
         previousErrorRef.current = displayError;
     }, [displayError]);
 
+    // Tracks the currently-running stopAndUpload() call, if any, so
+    // handleStopForClose (below) can wait for an upload a manual stop
+    // already kicked off instead of either starting a second one or acking
+    // immediately while it's still in flight -- a close/quit arriving in
+    // that window used to slip past the guard entirely and kill the rail
+    // window (and the in-flight POST /process with it) mid-upload.
+    const inFlightUploadRef = useRef<Promise<void> | null>(null);
+
     // Stops the current recording and uploads it. Acked unconditionally on
     // every exit (empty segments, success, or failure) so main.js's guarded
     // close/quit flow — which triggers this via a "stopForClose"
     // rail:command and awaits the ack — never hangs waiting for one that
     // was never coming. See stopAndSaveRailRecording() in main.js.
     const stopAndUpload = async () => {
-        try {
-            const blobs = await stop();
-
-            // A recording that produced no segments (or a stop that landed
-            // while still "starting") resolves stop() to an empty Combined
-            // -- nothing to upload, so skip the POST instead of sending an
-            // empty FormData.
-            if (!blobs.screen && !blobs.systemAudio && !blobs.micAudio) {
-                return;
-            }
-
-            const formData = new FormData();
-            if (blobs.screen) {
-                formData.append("screen", blobs.screen, "screen.webm");
-            }
-            if (blobs.systemAudio) {
-                formData.append("system", blobs.systemAudio, "system.webm");
-            }
-            if (blobs.micAudio) {
-                formData.append("mic", blobs.micAudio, "mic.webm");
-            }
-
-            setIsProcessing(true);
+        const run = async () => {
             try {
-                let result: { job_id: string; session_id: string };
-                try {
-                    result = await startProcessing(formData);
-                } catch (networkErr) {
-                    if (networkErr instanceof TypeError) {
-                        throw new Error("Couldn't reach the app backend — is it running?");
-                    }
-                    throw networkErr;
+                const blobs = await stop();
+
+                // A recording that produced no segments (or a stop that landed
+                // while still "starting") resolves stop() to an empty Combined
+                // -- nothing to upload, so skip the POST instead of sending an
+                // empty FormData.
+                if (!blobs.screen && !blobs.systemAudio && !blobs.micAudio) {
+                    return;
                 }
 
-                addJob(result.job_id);
-            } catch (err) {
-                console.error("/process failed", err);
-                setProcessError(err instanceof Error ? err.message : String(err));
+                const formData = new FormData();
+                if (blobs.screen) {
+                    formData.append("screen", blobs.screen, "screen.webm");
+                }
+                if (blobs.systemAudio) {
+                    formData.append("system", blobs.systemAudio, "system.webm");
+                }
+                if (blobs.micAudio) {
+                    formData.append("mic", blobs.micAudio, "mic.webm");
+                }
+
+                setIsProcessing(true);
+                try {
+                    let result: { job_id: string; session_id: string };
+                    try {
+                        result = await startProcessing(formData);
+                    } catch (networkErr) {
+                        if (networkErr instanceof TypeError) {
+                            throw new Error("Couldn't reach the app backend — is it running?");
+                        }
+                        throw networkErr;
+                    }
+
+                    addJob(result.job_id);
+                } catch (err) {
+                    console.error("/process failed", err);
+                    setProcessError(err instanceof Error ? err.message : String(err));
+                } finally {
+                    setIsProcessing(false);
+                }
             } finally {
-                setIsProcessing(false);
+                window.windowControls?.notifyStopAndSaveComplete?.();
             }
+        };
+
+        const promise = run();
+        inFlightUploadRef.current = promise;
+        try {
+            await promise;
         } finally {
-            window.windowControls?.notifyStopAndSaveComplete?.();
+            if (inFlightUploadRef.current === promise) {
+                inFlightUploadRef.current = null;
+            }
         }
     };
 
@@ -148,12 +168,26 @@ export default function RailApp() {
     // handleRecordClick's status==="idle" branch, since that would start a
     // brand-new recording if main's cached rail status is stale (already
     // idle here, but main hasn't heard about it yet over the rail:pushStatus
-    // round-trip). Idle here — or a manual stop's own upload already in
-    // flight — means there's nothing for this close to stop, so just ack
-    // immediately instead of hanging main's guarded close on an ack that
-    // was never coming.
+    // round-trip).
     const handleStopForClose = async () => {
-        if (isProcessing || (status !== "recording" && status !== "paused" && status !== "starting")) {
+        if (inFlightUploadRef.current) {
+            // A manual stop already kicked off stopAndUpload and it's mid-
+            // flight (isProcessing) -- wait for that same operation instead
+            // of starting a new one or acking immediately, or the close
+            // would destroy this window (and the in-flight POST /process
+            // with it) mid-upload. Its own finally sends the ack once it
+            // settles, so nothing further to do here either way.
+            try {
+                await inFlightUploadRef.current;
+            } catch {
+                // stopAndUpload already reports its own errors via setProcessError.
+            }
+            return;
+        }
+        if (status !== "recording" && status !== "paused" && status !== "starting") {
+            // Nothing recording and nothing uploading -- ack immediately
+            // instead of hanging main's guarded close on an ack that was
+            // never coming.
             window.windowControls?.notifyStopAndSaveComplete?.();
             return;
         }
