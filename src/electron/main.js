@@ -60,6 +60,15 @@ let beforeQuitInFlight = false;
 // finishes, so the close/quit guards know when it's actually safe to
 // destroy the rail window instead of guessing with a fixed delay.
 let pendingStopAck = null;
+// Set in before-quit, before anything else -- lets the crash-recovery loop
+// (attemptRecovery's isShuttingDown check) abort immediately instead of
+// spawning a fresh backend process after the user has already asked to quit.
+let shuttingDown = false;
+// The port the backend actually ended up bound to (see resolveBackendPort
+// below) -- 8000 unless that was held by a foreign process, in which case a
+// nearby fallback port was used instead. Threaded into each window's loadFile
+// query so the renderer's BACKEND_URL (src/ui/api.ts) points at the right port.
+let resolvedBackendPort = null;
 
 // Mirrors the height calculation in the rail:setErrorVisible handler below,
 // so the floating window sized during a drag (beginFloatDrag/dragMove)
@@ -275,7 +284,7 @@ function createRailWindow() {
         railWindow = null;
         return;
     }
-    railWindow.loadFile(railFile);
+    railWindow.loadFile(railFile, resolvedBackendPort ? { query: { backendPort: String(resolvedBackendPort) } } : undefined);
 
     railWindow.webContents.on('did-finish-load', () => {
         const bounds = computeAndCacheRailBounds(mainWindow);
@@ -506,7 +515,10 @@ function createWindow() {
             railMoveSettleTimer = null;
         }
     });
-    mainWindow.loadFile(distReactPath(app.getAppPath(), 'index.html'));
+    mainWindow.loadFile(
+        distReactPath(app.getAppPath(), 'index.html'),
+        resolvedBackendPort ? { query: { backendPort: String(resolvedBackendPort) } } : undefined
+    );
 
     mainWindow.once("ready-to-show", () => {
         if (!app.isPackaged) {
@@ -600,10 +612,27 @@ ipcMain.handle('app:quit', async () => {
     }
 });
 
-const BACKEND_PORT = '8000';
-const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+const BACKEND_PREFERRED_PORT = 8000;
+const BACKEND_MAX_PORTS_TO_TRY = 20;
+let BACKEND_URL = null;
 
 let recoveryConfig = null;
+
+// A backend orphaned from a prior launch of *this app* can still hold the preferred port;
+// ensurePortFree clears that safely (only killing a PID whose executable matches
+// expectedExePath). If the port is instead held by some unrelated process (a user's own dev
+// server), it's left alone and this tries the next port up instead of silently killing it.
+async function resolveBackendPort(expectedExePath) {
+    for (let offset = 0; offset < BACKEND_MAX_PORTS_TO_TRY; offset++) {
+        const candidate = BACKEND_PREFERRED_PORT + offset;
+        const free = await ensurePortFree(candidate, expectedExePath);
+        if (free) return candidate;
+    }
+    throw new Error(
+        `Ports ${BACKEND_PREFERRED_PORT}-${BACKEND_PREFERRED_PORT + BACKEND_MAX_PORTS_TO_TRY - 1} ` +
+        'are all in use by other applications.'
+    );
+}
 
 app.whenReady().then(async () => {
     const projectRoot = app.getAppPath();
@@ -617,18 +646,26 @@ app.whenReady().then(async () => {
         return;
     }
 
+    let backendPort;
+    try {
+        backendPort = await resolveBackendPort(backend.command);
+    } catch (err) {
+        dialog.showErrorBox('Backend port unavailable', err.message);
+        app.quit();
+        return;
+    }
+    resolvedBackendPort = backendPort;
+    BACKEND_URL = `http://127.0.0.1:${backendPort}`;
+
     const backendEnv = {
         ...process.env,
-        PORT: BACKEND_PORT,
+        PORT: String(backendPort),
         ...(app.isPackaged ? {
             APP_DATA_DIR: app.getPath('userData'),
             FFMPEG_BIN: path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe'),
             FFPROBE_BIN: path.join(process.resourcesPath, 'ffmpeg', 'ffprobe.exe'),
         } : {}),
     };
-    // A backend orphaned from a prior launch can still hold this port; clear it
-    // before spawning so this launch's health check can't be fooled by a stale process.
-    await ensurePortFree(Number(BACKEND_PORT));
     const backendProcess = startBackend(backend.command, backend.args, backend.cwd, backendEnv);
 
     // Packaged mode gets a longer timeout: a first launch after install can hit
@@ -646,7 +683,7 @@ app.whenReady().then(async () => {
             ? `${err?.message ?? err}\n\nBackend output:\n${logTail}`
             : String(err?.message ?? err);
         dialog.showErrorBox('Backend failed to start', detail);
-        stopBackend();
+        await stopBackend();
         app.quit();
         return;
     }
@@ -658,6 +695,7 @@ app.whenReady().then(async () => {
         env: backendEnv,
         backendUrl: BACKEND_URL,
         logDir: path.join(app.getPath('userData'), 'logs'),
+        isShuttingDown: () => shuttingDown,
     };
     armCrashMonitor(backendProcess, (code, signal) => {
         attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo: { exitCode: code, signal } });
@@ -722,8 +760,18 @@ app.on('before-quit', (e) => {
     // top-level window, so this is set in time either way -- set
     // unconditionally and immediately, regardless of the guard below.
     isQuitting = true;
+    // Set immediately and unconditionally too -- an in-flight recovery attempt
+    // (or one that starts between now and the backend actually being stopped
+    // below) must never spawn a fresh backend process once quitting has begun.
+    shuttingDown = true;
 
     if (quitConfirmed) {
+        // Not awaited deliberately -- this handler doesn't preventDefault here,
+        // so Electron proceeds to quit right after this returns. stopBackend's
+        // taskkill is still spawned synchronously before that happens, and it
+        // runs as its own OS process, so it finishes killing the backend (and
+        // its ffmpeg children) independently of whether Electron has already
+        // exited by the time it completes.
         stopBackend();
         return;
     }

@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { resolveVenvPython, resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree } from './backend.js';
+import { resolveVenvPython, resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree, getProcessExecutablePath } from './backend.js';
 
 function makeTmpProjectRoot() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'backend-test-'));
@@ -146,7 +146,7 @@ test('startBackend passes a custom env through to the spawned process', async ()
 test('stopBackend kills a running process', async () => {
     const child = startBackend(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], process.cwd());
     const exited = new Promise((resolve) => child.once('exit', resolve));
-    stopBackend();
+    await stopBackend();
     await exited;
     assert.notEqual(child.exitCode === null && child.signalCode === null, true);
 });
@@ -261,10 +261,12 @@ function getFreePort() {
     });
 }
 
-test('ensurePortFree kills a process listening on the given port (orphaned zombie scenario)', async () => {
+test('ensurePortFree kills a process listening on the given port when it matches expectedExePath (orphaned zombie scenario)', async () => {
     const port = await getFreePort();
     // Spawned directly via child_process, NOT through startBackend/stopBackend — this
-    // simulates a backend process orphaned from an earlier, unrelated app launch.
+    // simulates a backend process orphaned from an earlier, unrelated app launch. Its real
+    // executable is process.execPath, so that's passed as expectedExePath to simulate it
+    // being recognized as a previous instance of *our* backend.
     const orphan = spawn(process.execPath, [
         '-e',
         `require('node:net').createServer().listen(${port}, '127.0.0.1', () => console.log('listening'));`,
@@ -280,7 +282,8 @@ test('ensurePortFree kills a process listening on the given port (orphaned zombi
             });
         });
 
-        await ensurePortFree(port, 'win32');
+        const freed = await ensurePortFree(port, process.execPath, 'win32');
+        assert.equal(freed, true);
 
         assert.ok(orphan.exitCode !== null || orphan.signalCode !== null, 'orphan process should have been killed');
 
@@ -298,9 +301,59 @@ test('ensurePortFree kills a process listening on the given port (orphaned zombi
     }
 });
 
-test('ensurePortFree resolves without error when nothing is listening on the port', async () => {
+test('ensurePortFree does not kill a foreign process and reports the port as still occupied', async () => {
     const port = await getFreePort();
-    await assert.doesNotReject(() => ensurePortFree(port, 'win32'));
+    // Same orphan-on-a-port setup as above, but this time it represents some unrelated
+    // process (a user's own dev server) -- the mocked lookup always returns a path that
+    // does not match expectedExePath, so it must be left alone.
+    const foreign = spawn(process.execPath, [
+        '-e',
+        `require('node:net').createServer().listen(${port}, '127.0.0.1', () => console.log('listening'));`,
+    ]);
+    try {
+        await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('foreign process did not start listening in time')), 3000);
+            foreign.stdout.on('data', (data) => {
+                if (data.toString().includes('listening')) {
+                    clearTimeout(timer);
+                    resolve();
+                }
+            });
+        });
+
+        const fakeLookup = async () => 'C:\\Some\\Other\\App\\unrelated.exe';
+        const freed = await ensurePortFree(port, 'C:\\Program Files\\App\\app-backend.exe', 'win32', 1000, fakeLookup);
+
+        assert.equal(freed, false);
+        assert.equal(foreign.exitCode, null, 'foreign process should not have been killed');
+        assert.equal(foreign.signalCode, null, 'foreign process should not have been killed');
+    } finally {
+        if (foreign.exitCode === null && foreign.signalCode === null) {
+            foreign.kill();
+        }
+    }
+});
+
+test('ensurePortFree resolves to true without error when nothing is listening on the port', async () => {
+    const port = await getFreePort();
+    const freed = await ensurePortFree(port, process.execPath, 'win32');
+    assert.equal(freed, true);
+});
+
+test('getProcessExecutablePath resolves the real executable path of a running process', async () => {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
+    try {
+        await new Promise((resolve) => setTimeout(resolve, 200)); // let the process fully start
+        const resolvedPath = await getProcessExecutablePath(child.pid, 'win32');
+        assert.equal(path.resolve(resolvedPath).toLowerCase(), path.resolve(process.execPath).toLowerCase());
+    } finally {
+        child.kill();
+    }
+});
+
+test('getProcessExecutablePath returns null for a pid that does not exist', async () => {
+    const resolvedPath = await getProcessExecutablePath(999999, 'win32');
+    assert.equal(resolvedPath, null);
 });
 
 function tryBind(port) {
@@ -347,7 +400,8 @@ test(
             }
             assert.ok(boundOk, 'real backend never bound to the test port within 20s');
 
-            await ensurePortFree(port, 'win32');
+            const freed = await ensurePortFree(port, REAL_BACKEND_EXE, 'win32');
+            assert.equal(freed, true);
 
             // The whole point: by the time ensurePortFree resolves, the port
             // must actually be free — not just "probably free after a guess".

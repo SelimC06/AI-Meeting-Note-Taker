@@ -54,12 +54,33 @@ export function getBackendLogTail() {
     return backendLogTail.join('\n');
 }
 
-export function stopBackend() {
-    intentionalStop = true;
-    if (backendProcess && backendProcess.exitCode === null && !backendProcess.killed) {
-        backendProcess.kill();
+// Tree-kills a process on Windows (taskkill /T) so ffmpeg grandchildren the
+// backend spawned die with it instead of surviving as orphans -- a plain
+// .kill() only ever signals the direct child. Falls back to a plain kill if
+// taskkill itself fails (process already gone, no permissions, etc.) so the
+// child isn't left dangling either way.
+async function killProcessTree(pid, platform) {
+    if (platform === 'win32') {
+        try {
+            await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F']);
+            return;
+        } catch {
+            // fall through to a plain kill below
+        }
     }
+    try {
+        process.kill(pid);
+    } catch {
+        // already gone
+    }
+}
+
+export async function stopBackend(platform = process.platform) {
+    intentionalStop = true;
+    const proc = backendProcess;
     backendProcess = null;
+    if (!proc || proc.exitCode !== null || proc.killed) return;
+    await killProcessTree(proc.pid, platform);
 }
 
 export function armCrashMonitor(childProcess, onCrash) {
@@ -104,32 +125,79 @@ async function findPidsListeningOnPort(port, platform) {
     }
 }
 
+// Resolves the on-disk executable backing a running PID, so ensurePortFree can tell a
+// previous instance of *our own* backend apart from some unrelated process (a user's own
+// dev server, etc.) that happens to be listening on the same port.
+export async function getProcessExecutablePath(pid, platform = process.platform) {
+    if (platform === 'win32') {
+        try {
+            const { stdout } = await execFileAsync('powershell', [
+                '-NoProfile',
+                '-NonInteractive',
+                '-Command',
+                `(Get-Process -Id ${Number(pid)} -ErrorAction Stop).Path`,
+            ]);
+            return stdout.trim() || null;
+        } catch {
+            return null;
+        }
+    }
+    try {
+        return await fs.promises.readlink(`/proc/${pid}/exe`);
+    } catch {
+        return null;
+    }
+}
+
+function samePath(a, b) {
+    if (!a || !b) return false;
+    return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+}
+
 // A prior launch's backend process can outlive its Electron parent (crash, force-close,
 // or a kill that didn't propagate) and stay bound to the backend port. Every later launch
 // then health-checks successfully against that stale process while the freshly spawned one
 // fails to bind and crash-loops forever. Clearing the port before every spawn — both the
 // initial launch and each crash-recovery attempt — makes this self-healing.
 //
+// But a PID listening on the port isn't necessarily ours — a user could have their own dev
+// server bound to :8000. Only PIDs whose executable matches expectedExePath (the exact
+// command we're about to spawn) are killed; anything else is left alone, and the port is
+// reported as still occupied (false) so the caller can fall back to a different port instead
+// of silently terminating someone else's process.
+//
 // After sending the kill signal, the OS can take a while to actually release the socket —
 // measured against the real frozen backend binary, this took ~600ms, well past any short
 // fixed delay. So we poll for the port to actually be free rather than guessing a duration.
-export async function ensurePortFree(port, platform = process.platform, releaseTimeoutMs = 5000) {
+export async function ensurePortFree(
+    port,
+    expectedExePath,
+    platform = process.platform,
+    releaseTimeoutMs = 5000,
+    getExecutablePathFn = getProcessExecutablePath
+) {
     const pids = await findPidsListeningOnPort(port, platform);
+    if (pids.length === 0) return true;
+
+    let killedAny = false;
     for (const pid of pids) {
-        try {
-            process.kill(pid);
-        } catch {
-            // already gone
+        const exePath = await getExecutablePathFn(pid, platform);
+        if (!samePath(exePath, expectedExePath)) continue;
+        await killProcessTree(pid, platform);
+        killedAny = true;
+    }
+
+    if (killedAny) {
+        const deadline = Date.now() + releaseTimeoutMs;
+        while (Date.now() < deadline) {
+            const stillListening = await findPidsListeningOnPort(port, platform);
+            if (stillListening.length === 0) return true;
+            await new Promise((resolve) => setTimeout(resolve, 100));
         }
     }
-    if (pids.length === 0) return;
 
-    const deadline = Date.now() + releaseTimeoutMs;
-    while (Date.now() < deadline) {
-        const stillListening = await findPidsListeningOnPort(port, platform);
-        if (stillListening.length === 0) return;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    const remaining = await findPidsListeningOnPort(port, platform);
+    return remaining.length === 0;
 }
 
 export function waitForHealth(url, timeoutMs, childProcess = null) {

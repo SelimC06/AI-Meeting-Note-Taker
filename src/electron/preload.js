@@ -1,5 +1,16 @@
 const { contextBridge, ipcRenderer} = require('electron');
 
+// main.js resolves the backend to a fallback port when the preferred one
+// (8000) is held by some other, unrelated process (see resolveBackendPort /
+// ensurePortFree) and threads the actual port through as a query param on
+// each window's loadFile call -- read it here so the renderer's BACKEND_URL
+// (src/ui/api.ts) can point at wherever the backend actually ended up.
+const backendPortParam = new URL(location.href).searchParams.get('backendPort');
+
+contextBridge.exposeInMainWorld('BACKEND_CONFIG', {
+  port: backendPortParam ? Number(backendPortParam) : null,
+});
+
 contextBridge.exposeInMainWorld('windowControls', {
   minimize: () => ipcRenderer.invoke('win:minimize'),
   close: () => ipcRenderer.invoke('app:quit'),

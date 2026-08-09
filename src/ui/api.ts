@@ -7,8 +7,14 @@ export type Session = {
   trashed_at: string | null;
 };
 
+// Normally :8000, but main.js falls back to a nearby port when 8000 is held
+// by some unrelated process (see resolveBackendPort/ensurePortFree there) and
+// threads the actual port through via window.BACKEND_CONFIG (preload.js).
+// VITE_MEETING_API_URL still wins outright for the plain-vite-dev-server case,
+// where there's no Electron preload to read it from.
 export const BACKEND_URL =
-  import.meta.env.VITE_MEETING_API_URL ?? "http://localhost:8000";
+  import.meta.env.VITE_MEETING_API_URL ??
+  `http://localhost:${window.BACKEND_CONFIG?.port ?? 8000}`;
 
 export async function getSessions(includeTrashed = false): Promise<Session[]> {
   const url = includeTrashed

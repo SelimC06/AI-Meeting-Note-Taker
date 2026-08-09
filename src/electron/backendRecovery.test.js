@@ -339,3 +339,60 @@ test('attemptRecovery clears a stale orphaned process squatting on the port befo
         fs.rmSync(logDir, { recursive: true, force: true });
     }
 });
+
+test('attemptRecovery aborts immediately without spawning a backend when isShuttingDown() is already true', async () => {
+    const logDir = makeTmpLogDir();
+    const win = makeFakeWindow();
+    try {
+        await attemptRecovery({
+            pythonExe: process.execPath,
+            args: ['-e', 'process.exit(1)'],
+            cwd: process.cwd(),
+            env: process.env,
+            backendUrl: 'http://127.0.0.1:1',
+            mainWindow: win,
+            logDir,
+            crashInfo: { exitCode: 1, signal: null },
+            delays: [0, 10, 10],
+            isShuttingDown: () => true,
+        });
+        assert.deepEqual(win.sent, []);
+        assert.equal(isRecovering(), false);
+    } finally {
+        stopBackend();
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});
+
+test('attemptRecovery stops between attempts once isShuttingDown() flips true, instead of spawning another backend', async () => {
+    const logDir = makeTmpLogDir();
+    const win = makeFakeWindow();
+    let shuttingDown = false;
+    try {
+        const recoveryPromise = attemptRecovery({
+            pythonExe: process.execPath,
+            args: ['-e', 'process.exit(1)'],
+            cwd: process.cwd(),
+            env: process.env,
+            backendUrl: 'http://127.0.0.1:1',
+            mainWindow: win,
+            logDir,
+            crashInfo: { exitCode: 1, signal: null },
+            delays: [0, 300, 300],
+            isShuttingDown: () => shuttingDown,
+        });
+        // Attempt 1 fires immediately and fails fast (the child exits(1) right
+        // away). Flip the flag partway through attempt 2's 300ms backoff so the
+        // loop aborts before spawning a second backend process.
+        setTimeout(() => { shuttingDown = true; }, 100);
+        await recoveryPromise;
+
+        const states = win.sent.map((s) => s.payload.state);
+        assert.equal(states.filter((s) => s === 'restarting').length, 1);
+        assert.ok(!states.includes('failed'), 'should abort quietly, not report failure once quitting has begun');
+        assert.equal(isRecovering(), false);
+    } finally {
+        stopBackend();
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});

@@ -47,6 +47,10 @@ declare global {
   type RailPopState = { popped: boolean };
 
   interface Window {
+    // The port the backend actually bound to -- normally 8000, but a fallback
+    // port when that was held by a foreign process (see main.js's
+    // resolveBackendPort / ensurePortFree). null outside Electron (e.g. tests).
+    BACKEND_CONFIG?: { port: number | null };
     windowControls?: {
       minimize: () => void;
       close: () => void;

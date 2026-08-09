@@ -36,8 +36,10 @@ export async function attemptRecovery({
     crashInfo = null,
     delays = [0, 3000, 8000],
     healthTimeoutMs = 15000,
+    isShuttingDown = () => false,
 }) {
     if (recovering) return;
+    if (isShuttingDown()) return;
     recovering = true;
     try {
         if (crashInfo) {
@@ -49,27 +51,30 @@ export async function attemptRecovery({
         }
         const maxAttempts = delays.length;
         for (let i = 0; i < maxAttempts; i++) {
+            if (isShuttingDown()) return;
             const attempt = i + 1;
             if (delays[i] > 0) {
                 await new Promise((resolve) => setTimeout(resolve, delays[i]));
             }
+            if (isShuttingDown()) return;
             sendStatus(mainWindow, { state: 'restarting', attempt, maxAttempts });
             try {
-                await ensurePortFree(Number(new URL(backendUrl).port));
+                const freed = await ensurePortFree(Number(new URL(backendUrl).port), pythonExe);
+                if (!freed) throw new Error('backend port is held by another process');
                 const child = startBackend(pythonExe, args, cwd, env);
                 await waitForHealth(backendUrl, healthTimeoutMs, child);
                 armCrashMonitor(child, (code, signal) => {
-                    attemptRecovery({ pythonExe, args, cwd, env, backendUrl, mainWindow, logDir, crashInfo: { exitCode: code, signal }, delays, healthTimeoutMs });
+                    attemptRecovery({ pythonExe, args, cwd, env, backendUrl, mainWindow, logDir, crashInfo: { exitCode: code, signal }, delays, healthTimeoutMs, isShuttingDown });
                 });
                 sendStatus(mainWindow, { state: 'up' });
                 return;
             } catch {
                 // this attempt failed; kill the child we just spawned so it doesn't
                 // linger as an orphaned process before the next attempt starts.
-                stopBackend();
+                await stopBackend();
             }
         }
-        sendStatus(mainWindow, { state: 'failed', logTail: getBackendLogTail() });
+        if (!isShuttingDown()) sendStatus(mainWindow, { state: 'failed', logTail: getBackendLogTail() });
     } finally {
         recovering = false;
     }
