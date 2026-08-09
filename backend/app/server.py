@@ -1,6 +1,7 @@
 from __future__ import annotations
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse, Response, FileResponse
+from starlette.background import BackgroundTask
 from .audit import AuditMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.types import Scope, Receive, Send
@@ -9,7 +10,6 @@ from pathlib import Path
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, timezone
-import io
 import shutil
 import subprocess
 import tempfile
@@ -770,31 +770,43 @@ def export_session_zip(session_id: str):
     if not session_dir.exists():
         raise HTTPException(404, "Session files not found")
 
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        final_webm = session_dir / "final.webm"
-        if final_webm.exists():
-            zf.write(final_webm, arcname="final.webm")
+    # Built on disk, not in an io.BytesIO -- final.webm alone can be up to the
+    # 2 GB upload cap, and zipfile.ZipFile.write() already streams file
+    # contents internally, so buffering the whole archive in memory (then
+    # copying it again via getvalue()) just to hand it to Response() peaked
+    # at ~2x archive size for no reason. FileResponse below streams it back
+    # off disk in constant memory, and the BackgroundTask cleans up the temp
+    # file once the response has actually been sent.
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    tmp_path = tmp.name
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            final_webm = session_dir / "final.webm"
+            if final_webm.exists():
+                zf.write(final_webm, arcname="final.webm")
 
-        notes_md = session_dir / "notes.md"
-        if notes_md.exists():
-            zf.write(notes_md, arcname="notes.md")
-        else:
-            zf.writestr("notes.md", record.get("notes", ""))
+            notes_md = session_dir / "notes.md"
+            if notes_md.exists():
+                zf.write(notes_md, arcname="notes.md")
+            else:
+                zf.writestr("notes.md", record.get("notes", ""))
 
-        for transcript in sorted(session_dir.glob("transcript_*.txt")):
-            zf.write(transcript, arcname=transcript.name)
+            for transcript in sorted(session_dir.glob("transcript_*.txt")):
+                zf.write(transcript, arcname=transcript.name)
 
-        frames_dir = session_dir / "frames"
-        if frames_dir.is_dir():
-            for frame in sorted(frames_dir.glob("*.png")):
-                zf.write(frame, arcname=f"frames/{frame.name}")
+            frames_dir = session_dir / "frames"
+            if frames_dir.is_dir():
+                for frame in sorted(frames_dir.glob("*.png")):
+                    zf.write(frame, arcname=f"frames/{frame.name}")
+    finally:
+        tmp.close()
 
     filename = _slugify_filename(record.get("title") or "session") + ".zip"
-    return Response(
-        content=buffer.getvalue(),
+    return FileResponse(
+        tmp_path,
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        filename=filename,
+        background=BackgroundTask(os.unlink, tmp_path),
     )
 
 

@@ -1,6 +1,8 @@
 import io
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 import httpx
 import pytest
@@ -1688,6 +1690,60 @@ def test_export_zip_contains_final_webm_and_notes(client: TestClient):
     assert "notes.md" in names
     assert "transcript_1.txt" in names
     assert zf.read("notes.md").decode("utf-8") == "# notes here"
+
+
+def test_export_zip_streams_a_large_file_from_disk_without_buffering_it_whole(client: TestClient):
+    """Regression test for brief 07: the export endpoint used to build the
+    whole archive in an io.BytesIO and then copy it again via getvalue(),
+    peaking at ~2x archive size in memory. It must now build the zip on disk
+    (tempfile) and return it via FileResponse, and clean up the temp file
+    once the response has been sent.
+    """
+    import zipfile
+    import io as io_module
+    from app.sessions_store import append_session
+
+    session_dir = server_module.STORE / "abc"
+    session_dir.mkdir()
+    # 50 MB of zeros -- large enough that the old buffer.getvalue() double-copy
+    # would be a meaningfully wasteful allocation, small enough to keep the
+    # test fast.
+    large_video = b"\x00" * (50 * 1024 * 1024)
+    (session_dir / "final.webm").write_bytes(large_video)
+    (session_dir / "transcript_1.txt").write_text("hello", encoding="utf-8")
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Big Meeting", "notes": "# notes here",
+        "video_path": str(session_dir / "final.webm"), "trashed_at": None,
+    })
+
+    tmp_paths_used = []
+    real_named_temp_file = tempfile.NamedTemporaryFile
+
+    def spying_named_temp_file(*args, **kwargs):
+        f = real_named_temp_file(*args, **kwargs)
+        tmp_paths_used.append(f.name)
+        return f
+
+    with mock.patch("app.server.tempfile.NamedTemporaryFile", side_effect=spying_named_temp_file):
+        resp = client.get("/sessions/abc/export/zip")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+    assert "big-meeting" in resp.headers["content-disposition"].lower()
+
+    zf = zipfile.ZipFile(io_module.BytesIO(resp.content))
+    names = set(zf.namelist())
+    assert "final.webm" in names
+    assert "notes.md" in names
+    assert "transcript_1.txt" in names
+    assert zf.read("final.webm") == large_video
+
+    # The temp file used to build the archive must be cleaned up by the
+    # BackgroundTask after the response was sent, not left behind.
+    assert len(tmp_paths_used) == 1
+    assert not Path(tmp_paths_used[0]).exists()
 
 
 def test_export_zip_404_for_unknown_id(client: TestClient):
