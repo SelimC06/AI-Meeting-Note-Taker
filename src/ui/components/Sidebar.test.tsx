@@ -142,6 +142,27 @@ it("renders with zero width when collapsed", () => {
   expect(outer?.className).toContain("w-0");
 });
 
+it("shows the load-failure banner when a sessions error is present and the backend is up", () => {
+  renderSidebar({ sessions: null, sessionsError: "Failed to fetch", backendUp: true });
+  expect(screen.getByText(/failed to load: Failed to fetch/i)).toBeInTheDocument();
+});
+
+it("shows a neutral loading state instead of the fetch error while the backend isn't up yet (G9)", () => {
+  // Regression test: useSessions' very first fetch lands as connection-
+  // refused during a normal cold start, before the backend lifecycle has
+  // reported healthy -- without gating on backendUp, that showed
+  // "failed to load" on every single launch instead of a loading state.
+  renderSidebar({ sessions: null, sessionsError: "Failed to fetch", backendUp: false });
+
+  expect(screen.queryByText(/failed to load/i)).not.toBeInTheDocument();
+  expect(screen.getByText(/loading/i)).toBeInTheDocument();
+});
+
+it("defaults backendUp to true when the prop is omitted", () => {
+  renderSidebar({ sessions: null, sessionsError: "Failed to fetch" });
+  expect(screen.getByText(/failed to load: Failed to fetch/i)).toBeInTheDocument();
+});
+
 it("shows a processing row for an active job and reloads sessions once it finishes", async () => {
   vi.useFakeTimers();
   vi.mocked(listJobs).mockResolvedValue([

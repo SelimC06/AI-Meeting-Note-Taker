@@ -6,9 +6,15 @@ interface Props {
   sessions: Session[] | null;
   sessionsError: string | null;
   selectedId: string | null;
+  // See Sidebar's identically-named prop -- same G9 fix, same reasoning:
+  // suppresses the "couldn't load meetings" error during the brief window
+  // before the backend lifecycle first reports healthy, showing the
+  // neutral loading state instead. Defaults true for callers/tests that
+  // don't care about the distinction.
+  backendUp?: boolean;
 }
 
-const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId }) => {
+const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId, backendUp = true }) => {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -83,13 +89,13 @@ const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId }) => {
 
   return (
     <div className="flex-1 min-w-0 h-full p-4 flex flex-col text-phosphor [-webkit-app-region:no-drag]">
-      {sessions === null && sessionsError != null && (
+      {sessions === null && sessionsError != null && backendUp && (
         <div className="flex-1 flex items-center justify-center text-xs text-red-400 text-center px-4">
           couldn't load meetings: {sessionsError}
         </div>
       )}
 
-      {sessions === null && sessionsError == null && (
+      {sessions === null && (sessionsError == null || !backendUp) && (
         <div className="flex-1 flex items-center justify-center text-xs text-dim">
           loading<span className="cursor-blink">▌</span>
         </div>

@@ -37,10 +37,20 @@ export async function attemptRecovery({
     delays = [0, 3000, 8000],
     healthTimeoutMs = 15000,
     isShuttingDown = () => false,
+    // Optional side-channel invoked with every status payload alongside the
+    // webContents.send above -- lets a caller (main.js) keep its own cache
+    // of the current status authoritative even though this function talks
+    // to the renderer directly, including for the recursive re-arm below
+    // (a newly-recovered child crashing again later).
+    onStatus = null,
 }) {
     if (recovering) return;
     if (isShuttingDown()) return;
     recovering = true;
+    const publish = (payload) => {
+        sendStatus(mainWindow, payload);
+        onStatus?.(payload);
+    };
     try {
         if (crashInfo) {
             try {
@@ -57,16 +67,16 @@ export async function attemptRecovery({
                 await new Promise((resolve) => setTimeout(resolve, delays[i]));
             }
             if (isShuttingDown()) return;
-            sendStatus(mainWindow, { state: 'restarting', attempt, maxAttempts });
+            publish({ state: 'restarting', attempt, maxAttempts });
             try {
                 const freed = await ensurePortFree(Number(new URL(backendUrl).port), pythonExe);
                 if (!freed) throw new Error('backend port is held by another process');
                 const child = startBackend(pythonExe, args, cwd, env);
                 await waitForHealth(backendUrl, healthTimeoutMs, child);
                 armCrashMonitor(child, (code, signal) => {
-                    attemptRecovery({ pythonExe, args, cwd, env, backendUrl, mainWindow, logDir, crashInfo: { exitCode: code, signal }, delays, healthTimeoutMs, isShuttingDown });
+                    attemptRecovery({ pythonExe, args, cwd, env, backendUrl, mainWindow, logDir, crashInfo: { exitCode: code, signal }, delays, healthTimeoutMs, isShuttingDown, onStatus });
                 });
-                sendStatus(mainWindow, { state: 'up' });
+                publish({ state: 'up' });
                 return;
             } catch {
                 // this attempt failed; kill the child we just spawned so it doesn't
@@ -74,7 +84,7 @@ export async function attemptRecovery({
                 await stopBackend();
             }
         }
-        if (!isShuttingDown()) sendStatus(mainWindow, { state: 'failed', logTail: getBackendLogTail() });
+        if (!isShuttingDown()) publish({ state: 'failed', logTail: getBackendLogTail() });
     } finally {
         recovering = false;
     }

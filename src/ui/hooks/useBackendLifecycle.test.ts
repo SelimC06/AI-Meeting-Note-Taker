@@ -5,7 +5,7 @@ import { checkHealth } from "../api";
 
 vi.mock("../api");
 
-function stubBackendAPI() {
+function stubBackendAPI(initialStatus: BackendStatus | null = null) {
   let listener: ((status: BackendStatus) => void) | null = null;
   vi.stubGlobal("backendAPI", {
     onStatus: (cb: (status: BackendStatus) => void) => {
@@ -14,6 +14,7 @@ function stubBackendAPI() {
         listener = null;
       };
     },
+    getStatus: vi.fn().mockResolvedValue(initialStatus),
     restart: vi.fn().mockResolvedValue(undefined),
   });
   return {
@@ -143,6 +144,71 @@ it("does not go 'unresponsive' while phase is 'starting' -- a normal cold-start 
     await vi.advanceTimersByTimeAsync(20000);
   });
   expect(result.current).toEqual({ phase: "starting" });
+});
+
+it("adopts 'starting' fetched via getStatus() on mount, closing the gap where the first push arrives before onStatus is wired up", async () => {
+  stubBackendAPI({ state: "starting" });
+  vi.mocked(checkHealth).mockResolvedValue(true);
+
+  const { result } = renderHook(() => useBackendLifecycle());
+
+  await waitFor(() => expect(result.current).toEqual({ phase: "starting" }));
+});
+
+it("adopts 'failed' with its log tail fetched via getStatus() on mount", async () => {
+  stubBackendAPI({ state: "failed", logTail: "boom" });
+  vi.mocked(checkHealth).mockResolvedValue(true);
+
+  const { result } = renderHook(() => useBackendLifecycle());
+
+  await waitFor(() => expect(result.current).toEqual({ phase: "failed", logTail: "boom" }));
+});
+
+it("stays healthy when getStatus() resolves null (main hasn't sent anything yet)", async () => {
+  stubBackendAPI(null);
+  vi.mocked(checkHealth).mockResolvedValue(true);
+
+  const { result } = renderHook(() => useBackendLifecycle());
+  await waitFor(() => expect(window.backendAPI?.getStatus).toHaveBeenCalled());
+
+  expect(result.current).toEqual({ phase: "healthy" });
+});
+
+it("ignores a stale getStatus() pull that resolves after a fresher onStatus push already landed", async () => {
+  let resolveGetStatus!: (status: BackendStatus | null) => void;
+  const backend = (() => {
+    let listener: ((status: BackendStatus) => void) | null = null;
+    vi.stubGlobal("backendAPI", {
+      onStatus: (cb: (status: BackendStatus) => void) => {
+        listener = cb;
+        return () => {
+          listener = null;
+        };
+      },
+      getStatus: vi.fn(
+        () => new Promise<BackendStatus | null>((resolve) => (resolveGetStatus = resolve))
+      ),
+      restart: vi.fn().mockResolvedValue(undefined),
+    });
+    return { emit: (status: BackendStatus) => listener?.(status) };
+  })();
+  vi.mocked(checkHealth).mockResolvedValue(true);
+
+  const { result } = renderHook(() => useBackendLifecycle());
+
+  // A fresher push (e.g. the recovery loop already moved on to
+  // "restarting") lands before the mount-time pull's IPC round-trip
+  // resolves.
+  act(() => backend.emit({ state: "restarting", attempt: 1, maxAttempts: 3 }));
+  expect(result.current).toEqual({ phase: "restarting", attempt: 1, maxAttempts: 3 });
+
+  // The stale pull, resolving with what used to be current ("starting"),
+  // must not clobber the fresher push above.
+  await act(async () => {
+    resolveGetStatus({ state: "starting" });
+    await Promise.resolve();
+  });
+  expect(result.current).toEqual({ phase: "restarting", attempt: 1, maxAttempts: 3 });
 });
 
 it("does not override 'restarting' with 'unresponsive' while a main-driven recovery is in progress", async () => {

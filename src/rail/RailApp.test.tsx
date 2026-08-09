@@ -643,6 +643,225 @@ it("waits for an already in-flight upload instead of acking immediately when sto
   });
 });
 
+it("does not start a second stopAndUpload when stopForClose arrives while stop() itself is still resolving (G4)", async () => {
+  // Regression test: inFlightUploadRef used to only get set inside
+  // runUpload, which stopAndUpload doesn't reach until AFTER its own
+  // `await stop()` has already resolved. A stopForClose arriving during
+  // that recorder-flush window saw inFlightUploadRef still null AND status
+  // still "recording" (stop() hasn't resolved yet) -- falling through both
+  // of handleStopForClose's early-return checks and calling stopAndUpload a
+  // SECOND time concurrently, which would call stop() twice and produce a
+  // truncated duplicate upload.
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  const notifyStopAndSaveComplete = vi.fn();
+  vi.stubGlobal("windowControls", {
+    pushRailStatus: vi.fn(),
+    onRailCommand,
+    notifyStopAndSaveComplete,
+  });
+
+  const record = vi.fn().mockResolvedValue(undefined);
+  let resolveStop: (value: { screen: Blob }) => void = () => {};
+  const stopPromise = new Promise<{ screen: Blob }>((resolve) => {
+    resolveStop = resolve;
+  });
+  const stop = vi.fn().mockReturnValue(stopPromise);
+  mockHook({ status: "recording", record, stop, error: null });
+
+  let resolveFetch: (value: unknown) => void = () => {};
+  const fetchPromise = new Promise((resolve) => {
+    resolveFetch = resolve;
+  });
+  vi.stubGlobal("fetch", vi.fn().mockReturnValue(fetchPromise));
+
+  const { container } = render(<RailApp />);
+  const recordButton = container.querySelectorAll("button")[0];
+  fireEvent.click(recordButton); // manual stop -> stopAndUpload() -> await stop() (still pending)
+
+  // Status is STILL "recording" (no rerender -- stop() hasn't resolved, the
+  // hook's own state hasn't changed) when stopForClose arrives.
+  commandCallback?.("stopForClose");
+  await act(() => Promise.resolve());
+
+  // Must not have started a second stop -- inFlightUploadRef was already
+  // set synchronously when the manual click called stopAndUpload(), before
+  // stop() itself even began resolving.
+  expect(stop).toHaveBeenCalledTimes(1);
+  expect(notifyStopAndSaveComplete).not.toHaveBeenCalled();
+
+  resolveStop({ screen: new Blob(["x"]) });
+  await waitFor(() => {
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+  });
+
+  resolveFetch({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ job_id: "job-1", session_id: "session-1" }),
+  });
+
+  // Exactly one ack -- both the manual click's stopAndUpload and the
+  // stopForClose command are waiting on the SAME in-flight operation, whose
+  // own finally sends the single ack for both.
+  await waitFor(() => {
+    expect(notifyStopAndSaveComplete).toHaveBeenCalledTimes(1);
+  });
+});
+
+it("pushes hasPendingUpload:true after a failed upload and false again once a retry succeeds (G3)", async () => {
+  const pushRailStatus = vi.fn();
+  vi.stubGlobal("windowControls", { pushRailStatus, onRailCommand: vi.fn(() => () => {}) });
+
+  const record = vi.fn().mockResolvedValue(undefined);
+  const stop = vi.fn().mockResolvedValue({ screen: new Blob(["x"]) });
+  mockHook({ status: "recording", record, stop, error: null });
+
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce({ ok: false, status: 500, text: () => Promise.resolve("boom") })
+    .mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ job_id: "job-1", session_id: "session-1" }),
+    });
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { container, getByRole } = render(<RailApp />);
+  fireEvent.click(container.querySelectorAll("button")[0]);
+
+  await waitFor(() => {
+    expect(pushRailStatus).toHaveBeenCalledWith(expect.objectContaining({ hasPendingUpload: true }));
+  });
+
+  fireEvent.click(getByRole("button", { name: "retry upload" }));
+
+  await waitFor(() => {
+    expect(pushRailStatus).toHaveBeenLastCalledWith(
+      expect.objectContaining({ hasPendingUpload: false })
+    );
+  });
+});
+
+it("retryUploadForClose command re-POSTs the pending upload and acks once it resolves (G3)", async () => {
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  const notifyStopAndSaveComplete = vi.fn();
+  vi.stubGlobal("windowControls", {
+    pushRailStatus: vi.fn(),
+    onRailCommand,
+    notifyStopAndSaveComplete,
+  });
+
+  const record = vi.fn().mockResolvedValue(undefined);
+  const stop = vi.fn().mockResolvedValue({ screen: new Blob(["x"]) });
+  mockHook({ status: "recording", record, stop, error: null });
+
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce({ ok: false, status: 500, text: () => Promise.resolve("boom") })
+    .mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ job_id: "job-1", session_id: "session-1" }),
+    });
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { container } = render(<RailApp />);
+  fireEvent.click(container.querySelectorAll("button")[0]); // manual stop -> failed upload
+
+  // stopAndUpload acks unconditionally on its own exit (success or
+  // failure) -- one ack already happened for that completed operation
+  // before the retry command below starts a second, independent one.
+  await waitFor(() => expect(notifyStopAndSaveComplete).toHaveBeenCalledTimes(1));
+
+  commandCallback?.("retryUploadForClose");
+
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(notifyStopAndSaveComplete).toHaveBeenCalledTimes(2));
+
+  const [firstCall, secondCall] = fetchMock.mock.calls;
+  expect((firstCall[1].body as FormData).get("screen")).toBe(
+    (secondCall[1].body as FormData).get("screen")
+  );
+});
+
+it("retryUploadForClose acks immediately without fetching when nothing is pending (G3)", () => {
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  const notifyStopAndSaveComplete = vi.fn();
+  vi.stubGlobal("windowControls", {
+    pushRailStatus: vi.fn(),
+    onRailCommand,
+    notifyStopAndSaveComplete,
+  });
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
+  mockHook({ status: "idle" });
+
+  render(<RailApp />);
+  commandCallback?.("retryUploadForClose");
+
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(notifyStopAndSaveComplete).toHaveBeenCalledTimes(1);
+});
+
+it("retryUploadForClose waits for (and does not double-ack) an already in-flight upload (G3)", async () => {
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  const notifyStopAndSaveComplete = vi.fn();
+  vi.stubGlobal("windowControls", {
+    pushRailStatus: vi.fn(),
+    onRailCommand,
+    notifyStopAndSaveComplete,
+  });
+
+  const record = vi.fn().mockResolvedValue(undefined);
+  const stop = vi.fn().mockResolvedValue({ screen: new Blob(["x"]) });
+
+  let resolveFetch: (value: unknown) => void = () => {};
+  const fetchPromise = new Promise((resolve) => {
+    resolveFetch = resolve;
+  });
+  vi.stubGlobal("fetch", vi.fn().mockReturnValue(fetchPromise));
+
+  mockHook({ status: "recording", record, stop, error: null });
+
+  const { container } = render(<RailApp />);
+  fireEvent.click(container.querySelectorAll("button")[0]); // manual stop -> upload in flight
+
+  await waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
+
+  commandCallback?.("retryUploadForClose");
+
+  // Must not ack while the original (in-flight) upload is still pending --
+  // that upload's own finally already owns the single ack for it.
+  await act(() => Promise.resolve());
+  expect(notifyStopAndSaveComplete).not.toHaveBeenCalled();
+
+  resolveFetch({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ job_id: "job-1", session_id: "session-1" }),
+  });
+
+  await waitFor(() => {
+    expect(notifyStopAndSaveComplete).toHaveBeenCalledTimes(1);
+  });
+});
+
 it("calls pause when a pause command arrives while recording", () => {
   let commandCallback: ((action: string) => void) | undefined;
   const onRailCommand = vi.fn((cb: (action: string) => void) => {

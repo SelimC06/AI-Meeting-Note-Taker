@@ -90,46 +90,60 @@ export default function RailApp() {
     // resent as-is. Cleared on a successful upload (initial or retried).
     const pendingUploadRef = useRef<FormData | null>(null);
 
-    // POSTs formData to /process, tracked via inFlightUploadRef regardless
-    // of whether this is the upload right after a stop or a manual retry of
-    // a previously failed one -- either way, a close/quit arriving mid-
-    // upload must wait for it (see handleStopForClose).
-    const runUpload = async (formData: FormData) => {
-        const attempt = async () => {
-            setIsProcessing(true);
-            try {
-                let result: { job_id: string; session_id: string };
-                try {
-                    result = await startProcessing(formData);
-                } catch (networkErr) {
-                    if (networkErr instanceof TypeError) {
-                        throw new Error("Couldn't reach the app backend — is it running?");
-                    }
-                    throw networkErr;
-                }
-
-                pendingUploadRef.current = null;
-                setProcessError(null);
-                addJob(result.job_id);
-            } catch (err) {
-                console.error("/process failed", err);
-                // Keep the FormData around instead of discarding it -- the
-                // recording it holds is otherwise unrecoverable.
-                pendingUploadRef.current = formData;
-                setProcessError(err instanceof Error ? err.message : String(err));
-            } finally {
-                setIsProcessing(false);
-            }
-        };
-
-        const promise = attempt();
+    // Runs `fn` while inFlightUploadRef reflects it for fn's ENTIRE
+    // duration -- assigned synchronously, before fn() does anything async,
+    // not after some earlier await inside it. This restores the pattern
+    // from commit 2645240 (F1): the retry rework had regressed it by only
+    // setting inFlightUploadRef inside runUpload itself, which stopAndUpload
+    // doesn't reach until AFTER its own `await stop()` has already resolved.
+    // A stopForClose arriving during that recorder-flush window used to see
+    // inFlightUploadRef still null AND status still "recording"/"paused"/
+    // "starting" (stop() hasn't resolved yet) -- falling through both of
+    // handleStopForClose's early-return checks and calling stopAndUpload a
+    // SECOND time concurrently, producing a truncated duplicate upload.
+    // Calling fn() and assigning the ref happen synchronously here, so
+    // nothing else can run (this is single-threaded JS) until at least the
+    // first await inside fn -- any concurrent check of inFlightUploadRef
+    // always sees it already set.
+    function trackInFlight(fn: () => Promise<void>): Promise<void> {
+        const promise = fn();
         inFlightUploadRef.current = promise;
-        try {
-            await promise;
-        } finally {
+        return promise.finally(() => {
             if (inFlightUploadRef.current === promise) {
                 inFlightUploadRef.current = null;
             }
+        });
+    }
+
+    // POSTs formData to /process. Callers are responsible for tracking this
+    // via trackInFlight themselves (stopAndUpload wraps its whole
+    // stop()+upload span; handleRetryUpload/handleRetryUploadForClose wrap
+    // just this call) -- see trackInFlight above for why the assignment
+    // can't live in here.
+    const runUpload = async (formData: FormData) => {
+        setIsProcessing(true);
+        try {
+            let result: { job_id: string; session_id: string };
+            try {
+                result = await startProcessing(formData);
+            } catch (networkErr) {
+                if (networkErr instanceof TypeError) {
+                    throw new Error("Couldn't reach the app backend — is it running?");
+                }
+                throw networkErr;
+            }
+
+            pendingUploadRef.current = null;
+            setProcessError(null);
+            addJob(result.job_id);
+        } catch (err) {
+            console.error("/process failed", err);
+            // Keep the FormData around instead of discarding it -- the
+            // recording it holds is otherwise unrecoverable.
+            pendingUploadRef.current = formData;
+            setProcessError(err instanceof Error ? err.message : String(err));
+        } finally {
+            setIsProcessing(false);
         }
     };
 
@@ -138,52 +152,53 @@ export default function RailApp() {
     // close/quit flow — which triggers this via a "stopForClose"
     // rail:command and awaits the ack — never hangs waiting for one that
     // was never coming. See stopAndSaveRailRecording() in main.js.
-    const stopAndUpload = async () => {
-        try {
-            const blobs = await stop();
+    const stopAndUpload = () =>
+        trackInFlight(async () => {
+            try {
+                const blobs = await stop();
 
-            // A recording that produced no segments (or a stop that landed
-            // while still "starting") resolves stop() to an empty Combined
-            // -- nothing to upload, so skip the POST instead of sending an
-            // empty FormData.
-            if (!blobs.screen && !blobs.systemAudio && !blobs.micAudio) {
-                return;
-            }
+                // A recording that produced no segments (or a stop that
+                // landed while still "starting") resolves stop() to an
+                // empty Combined -- nothing to upload, so skip the POST
+                // instead of sending an empty FormData.
+                if (!blobs.screen && !blobs.systemAudio && !blobs.micAudio) {
+                    return;
+                }
 
-            const formData = new FormData();
-            if (blobs.screen) {
-                formData.append("screen", blobs.screen, "screen.webm");
-            }
-            if (blobs.systemAudio) {
-                formData.append("system", blobs.systemAudio, "system.webm");
-            }
-            if (blobs.micAudio) {
-                formData.append("mic", blobs.micAudio, "mic.webm");
-            }
+                const formData = new FormData();
+                if (blobs.screen) {
+                    formData.append("screen", blobs.screen, "screen.webm");
+                }
+                if (blobs.systemAudio) {
+                    formData.append("system", blobs.systemAudio, "system.webm");
+                }
+                if (blobs.micAudio) {
+                    formData.append("mic", blobs.micAudio, "mic.webm");
+                }
 
-            await runUpload(formData);
-        } finally {
-            window.windowControls?.notifyStopAndSaveComplete?.();
-        }
-    };
+                await runUpload(formData);
+            } finally {
+                window.windowControls?.notifyStopAndSaveComplete?.();
+            }
+        });
 
     // Re-POSTs the FormData from the most recent failed upload. Fire-and-
     // forget from the caller's perspective (ErrorToast's action.onClick is
-    // synchronous) -- runUpload tracks it via inFlightUploadRef the same as
-    // any other upload. Acks on its own once settled, same as
+    // synchronous) -- trackInFlight covers it via inFlightUploadRef the same
+    // as any other upload. Acks on its own once settled, same as
     // stopAndUpload does, so a close/quit that arrives while a retry is
     // mid-flight (handleStopForClose's inFlightUploadRef wait below) isn't
     // left waiting on an ack nothing would otherwise ever send.
     const handleRetryUpload = () => {
         const formData = pendingUploadRef.current;
         if (!formData || isProcessing) return;
-        void (async () => {
+        void trackInFlight(async () => {
             try {
                 await runUpload(formData);
             } finally {
                 window.windowControls?.notifyStopAndSaveComplete?.();
             }
-        })();
+        });
     };
 
     // True only while there's a distinct, currently-displayed upload error
@@ -205,6 +220,38 @@ export default function RailApp() {
         } catch (err) {
             console.error("record/stop error", err);
             setProcessError(err instanceof Error ? err.message : String(err));
+        }
+    };
+
+    // Handles main.js's "retryUploadForClose" rail:command (see
+    // retryRailUploadAndWait() there), sent when the user picks "Retry and
+    // wait" on the pending-upload close dialog (G3). Acks unconditionally on
+    // every exit for the same reason stopAndUpload does: main awaits this
+    // ack before destroying the rail window, and must never hang on one that
+    // was never coming. Deliberately doesn't ack after an already-in-flight
+    // upload (the first branch) -- that operation (stopAndUpload or a
+    // manually-clicked retry) already guarantees its own single ack once it
+    // settles, so acking again here would double-ack.
+    const handleRetryUploadForClose = async () => {
+        if (inFlightUploadRef.current) {
+            try {
+                await inFlightUploadRef.current;
+            } catch {
+                // runUpload already reports its own errors via setProcessError.
+            }
+            return;
+        }
+        const formData = pendingUploadRef.current;
+        if (!formData) {
+            // Nothing pending -- either it never failed, or it already
+            // resolved (succeeded/discarded) by the time this arrived.
+            window.windowControls?.notifyStopAndSaveComplete?.();
+            return;
+        }
+        try {
+            await trackInFlight(() => runUpload(formData));
+        } finally {
+            window.windowControls?.notifyStopAndSaveComplete?.();
         }
     };
 
@@ -270,11 +317,29 @@ export default function RailApp() {
             level: levels,
             recordError: displayError?.message ?? null,
             isProcessing,
+            hasPendingUpload: pendingUploadRef.current !== null,
         });
+        // pendingUploadRef itself isn't reactive, but every place that
+        // mutates it (runUpload's success/failure branches) also calls
+        // setProcessError in the same synchronous block, so displayError
+        // changing is a reliable proxy for "re-read the ref" -- same
+        // pattern canRetryUpload above already relies on.
     }, [status, elapsed, levels, displayError, isProcessing]);
 
-    const commandHandlersRef = useRef({ handleRecordClick, handlePauseClick, handlePlayClick, handleStopForClose });
-    commandHandlersRef.current = { handleRecordClick, handlePauseClick, handlePlayClick, handleStopForClose };
+    const commandHandlersRef = useRef({
+        handleRecordClick,
+        handlePauseClick,
+        handlePlayClick,
+        handleStopForClose,
+        handleRetryUploadForClose,
+    });
+    commandHandlersRef.current = {
+        handleRecordClick,
+        handlePauseClick,
+        handlePlayClick,
+        handleStopForClose,
+        handleRetryUploadForClose,
+    };
 
     useEffect(() => {
         const unsubscribe = window.windowControls?.onRailCommand?.((action) => {
@@ -282,6 +347,7 @@ export default function RailApp() {
             else if (action === "pause") commandHandlersRef.current.handlePauseClick();
             else if (action === "resume") commandHandlersRef.current.handlePlayClick();
             else if (action === "stopForClose") commandHandlersRef.current.handleStopForClose();
+            else if (action === "retryUploadForClose") commandHandlersRef.current.handleRetryUploadForClose();
         });
         return unsubscribe;
     }, []);

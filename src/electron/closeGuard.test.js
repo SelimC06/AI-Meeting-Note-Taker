@@ -33,6 +33,19 @@ test('needsCloseGuard is false when idle and nothing is uploading', () => {
     assert.equal(needsCloseGuard(undefined, undefined), false);
 });
 
+test('needsCloseGuard is true when idle and not processing but a failed upload is still pending retry (G3)', () => {
+    // The bug this guards against: a failed upload leaves its blob in
+    // pendingUploadRef with status back to "idle" and isProcessing false --
+    // without hasPendingUpload, close proceeds with no dialog and destroys
+    // the rail window (and the only copy of that recording) silently.
+    assert.equal(needsCloseGuard('idle', false, true), true);
+});
+
+test('needsCloseGuard is false when idle, not processing, and nothing is pending', () => {
+    assert.equal(needsCloseGuard('idle', false, false), false);
+    assert.equal(needsCloseGuard('idle', false, undefined), false);
+});
+
 test('hasActiveJob is true when any job is queued or running', () => {
     assert.equal(hasActiveJob([{ status: 'queued' }]), true);
     assert.equal(hasActiveJob([{ status: 'done' }, { status: 'running' }]), true);

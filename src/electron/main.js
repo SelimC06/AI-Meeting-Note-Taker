@@ -39,6 +39,12 @@ let lastRailStatus = 'idle';
 // renderer) actually finishes, so shouldPromptBeforeClose(lastRailStatus)
 // alone misses that window entirely. needsCloseGuard() below checks both.
 let lastRailIsProcessing = false;
+// Last hasPendingUpload flag from the same rail:pushStatus payload -- true
+// while a previously FAILED upload's blob is still only held in the rail
+// renderer's memory (status back to "idle", isProcessing false), offered
+// back via the "retry upload" toast action. Without this, closing here
+// proceeded with no guard at all and silently discarded that recording (G3).
+let lastRailHasPendingUpload = false;
 // Set once the user has confirmed closing (via performGuardedClose below,
 // or there was nothing to guard) so the guarded 'close' handler lets a
 // second, self-triggered mainWindow.close() through instead of looping.
@@ -316,6 +322,7 @@ ipcMain.handle('rail:command', (_event, action) => {
 ipcMain.handle('rail:pushStatus', (_event, status) => {
     lastRailStatus = status?.status ?? 'idle';
     lastRailIsProcessing = !!status?.isProcessing;
+    lastRailHasPendingUpload = !!status?.hasPendingUpload;
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('rail:status', status);
 });
@@ -449,6 +456,17 @@ async function stopAndSaveRailRecording() {
     await acked;
 }
 
+// Tells the rail to retry a previously failed upload (RailApp.tsx's
+// handleRetryUploadForClose) and waits for it to finish, the same
+// ack-based handoff stopAndSaveRailRecording uses -- reuses waitForStopAck
+// since it's the same rail:stopAndSaveComplete channel either way.
+async function retryRailUploadAndWait() {
+    if (!railWindow || railWindow.isDestroyed()) return;
+    const acked = waitForStopAck();
+    railWindow.webContents.send('rail:command', 'retryUploadForClose');
+    await acked;
+}
+
 // dialog.showMessageBox's (window, options) and (options) overloads are
 // resolved by argument count, not by checking for a nullish first arg -- so
 // passing `mainWindow ?? undefined` positionally would break if mainWindow
@@ -475,6 +493,24 @@ async function confirmCloseWithDialog() {
     return result.response === 0;
 }
 
+// Shown by the guarded close/quit paths below when a previously failed
+// upload's blob is still only held in the rail renderer's memory (G3).
+// Unlike confirmCloseWithDialog, there's no "keep the app open" option here
+// -- closing is going ahead either way; this only decides whether to wait
+// out one more retry attempt first or just let the blob go.
+async function confirmPendingUploadDialog() {
+    const result = await showMessageBox({
+        type: 'warning',
+        buttons: ['Retry and wait', 'Discard and close'],
+        defaultId: 0,
+        cancelId: 1,
+        title: 'Recording not uploaded',
+        message: "A recording hasn't been uploaded yet",
+        detail: 'This recording failed to upload and is only held in memory. Retry and wait for it to finish, or discard it and close now.',
+    });
+    return result.response === 0 ? 'retry' : 'discard';
+}
+
 // Shared by the mainWindow 'close' handler and the app:quit IPC handler:
 // just the recording guard (Stop && Save / Cancel) -- the active-job wait
 // happens later, silently, in before-quit (see waitForActiveJobsToFinish),
@@ -495,6 +531,19 @@ async function performGuardedClose() {
         // destroyed, the same way before-quit silently waits out a
         // transcription job rather than popping a dialog for it.
         await stopAndSaveRailRecording();
+        return true;
+    }
+    if (lastRailHasPendingUpload) {
+        // Nothing is actively recording or uploading right now -- this is a
+        // PREVIOUSLY failed upload whose blob would otherwise be silently
+        // discarded when the rail window is destroyed (G3).
+        const choice = await confirmPendingUploadDialog();
+        if (choice === 'retry') {
+            await retryRailUploadAndWait();
+        }
+        // 'discard' (or a retry that fails again) proceeds to close either
+        // way -- the user already chose to close, this dialog only decided
+        // whether to wait out one more attempt first.
     }
     return true;
 }
@@ -532,6 +581,13 @@ function createWindow() {
             clearTimeout(railMoveSettleTimer);
             railMoveSettleTimer = null;
         }
+        // Belt-and-braces alongside backend:getStatus (called on mount by
+        // useBackendLifecycle): a fresh load/reload's listener can still
+        // miss a status sent in the same tick as this event, so re-push
+        // whatever we last sent once the renderer is definitely ready.
+        if (lastBackendStatus && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('backend:status', lastBackendStatus);
+        }
     });
     mainWindow.loadFile(
         distReactPath(app.getAppPath(), 'index.html'),
@@ -560,7 +616,7 @@ function createWindow() {
             e.preventDefault();
             return;
         }
-        if (!needsCloseGuard(lastRailStatus, lastRailIsProcessing)) return;
+        if (!needsCloseGuard(lastRailStatus, lastRailIsProcessing, lastRailHasPendingUpload)) return;
         e.preventDefault();
         closeInProgress = true;
         (async () => {
@@ -637,11 +693,15 @@ let BACKEND_URL = null;
 
 let recoveryConfig = null;
 
-function sendBackendStatus(payload) {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('backend:status', payload);
-    }
-}
+// Cached so a renderer that mounts (or reloads) AFTER a status was sent can
+// still learn the current state instead of being stuck on whatever default
+// it started with. webContents.send fires-and-forgets -- Electron does not
+// buffer it for listeners that register later, so the very first
+// {state:'starting'} sent right after createWindow() was previously lost on
+// every single launch (the renderer's listener isn't wired up that fast),
+// leaving the lifecycle hook at its "healthy" default while the backend was
+// actually still coming up.
+let lastBackendStatus = null;
 
 // Detects a backend that's hung but hasn't exited -- armCrashMonitor's
 // 'exit' listener never fires for that case, so without this a deadlock
@@ -659,6 +719,44 @@ function stopHealthWatchdog() {
     }
 }
 
+// Central hook for EVERY backend:status push, whether it comes from main.js
+// itself (sendBackendStatus below) or from inside attemptRecovery (wired
+// through recoveryConfig.onStatus, including its own recursive re-arm for a
+// newly-recovered child that crashes again later) -- keeps lastBackendStatus
+// authoritative regardless of source, and is the single place that stops the
+// watchdog once a recovery cycle has exhausted its attempts. Without this,
+// the watchdog kept ticking after landing on "failed", counted another
+// ~15s of failures against the still-dead backend, and launched a brand new
+// recovery cycle -- forever.
+//
+// Also the single place that forwards the push to railWindow: previously
+// only mainWindow ever received backend:status (both here and inside
+// backendRecovery.js's own direct send), leaving the rail's
+// useProcessingJobs restart-pause permanently inert -- "Lost track of this
+// recording" could flash there during a backend restart the job actually
+// survives. attemptRecovery still sends to mainWindow itself; routing the
+// rail side through this shared hook (rather than threading mainWindow-only
+// logic through backendRecovery.js too) means every status source gets the
+// rail covered for free.
+function cacheBackendStatus(payload) {
+    lastBackendStatus = payload;
+    if (payload.state === 'failed') {
+        stopHealthWatchdog();
+    }
+    if (railWindow && !railWindow.isDestroyed()) {
+        railWindow.webContents.send('backend:status', payload);
+    }
+}
+
+function sendBackendStatus(payload) {
+    cacheBackendStatus(payload);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('backend:status', payload);
+    }
+}
+
+ipcMain.handle('backend:getStatus', () => lastBackendStatus);
+
 function startHealthWatchdog() {
     stopHealthWatchdog();
     watchdogConsecutiveFailures = 0;
@@ -672,10 +770,24 @@ function startHealthWatchdog() {
             // ensurePortFree inside attemptRecovery kills whatever is
             // currently bound to the port (the hung process, since its exe
             // matches) before spawning a fresh one -- no separate kill step
-            // needed here.
+            // needed here. cacheBackendStatus (via recoveryConfig.onStatus)
+            // stops this very watchdog if the cycle ends in "failed".
             await attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo: null });
         }
     }, WATCHDOG_INTERVAL_MS);
+}
+
+// Runs a recovery attempt and, only if it actually succeeded (not "failed"
+// -- exhausted retries), resumes the watchdog. Shared by every
+// attemptRecovery call site in this file so a successful manual Retry (or a
+// crash-triggered recovery mid-session) always leaves ongoing monitoring
+// running afterward, while a failed one leaves it off until the user
+// explicitly retries again.
+async function runRecovery(crashInfo) {
+    await attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo });
+    if (lastBackendStatus?.state !== 'failed') {
+        startHealthWatchdog();
+    }
 }
 
 // A backend orphaned from a prior launch of *this app* can still hold the preferred port;
@@ -741,6 +853,13 @@ app.whenReady().then(async () => {
     armAutoUpdate(mainWindow);
     sendBackendStatus({ state: 'starting' });
 
+    // Packaged mode gets a longer timeout: a first launch after install can hit
+    // slower disk I/O and antivirus scanning of freshly-written files, and the
+    // frozen backend's measured cold start (~7.6s) leaves thin margin under 15s.
+    // Dev mode launches an already-installed venv python, which is fast and
+    // doesn't have this risk, so its timeout stays unchanged.
+    const healthTimeoutMs = app.isPackaged ? 30000 : 15000;
+
     recoveryConfig = {
         pythonExe: backend.command,
         args: backend.args,
@@ -749,29 +868,44 @@ app.whenReady().then(async () => {
         backendUrl: BACKEND_URL,
         logDir: path.join(app.getPath('userData'), 'logs'),
         isShuttingDown: () => shuttingDown,
+        // Recovery's own health wait must tolerate the same slow cold start
+        // the initial launch does -- attemptRecovery's hardcoded 15s default
+        // was shorter than the packaged 30s above, so on a machine with a
+        // >15s (but <30s) cold start, the watchdog killed a backend that was
+        // still legitimately booting and could never recover in the window
+        // it was given, looping forever.
+        healthTimeoutMs,
+        // Keeps main.js's lastBackendStatus cache (and the watchdog-pause
+        // hook below) authoritative for every push, including the ones
+        // attemptRecovery sends directly rather than through
+        // sendBackendStatus.
+        onStatus: cacheBackendStatus,
     };
     // Armed before waitForHealth settles, not after -- a crash during the
     // initial health wait used to go unrecovered (the app just quit via the
     // catch block below); now it's handled the same as any later crash.
     armCrashMonitor(backendProcess, (code, signal) => {
-        attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo: { exitCode: code, signal } });
+        runRecovery({ exitCode: code, signal });
     });
-
-    // Packaged mode gets a longer timeout: a first launch after install can hit
-    // slower disk I/O and antivirus scanning of freshly-written files, and the
-    // frozen backend's measured cold start (~7.6s) leaves thin margin under 15s.
-    // Dev mode launches an already-installed venv python, which is fast and
-    // doesn't have this risk, so its timeout stays unchanged.
-    const healthTimeoutMs = app.isPackaged ? 30000 : 15000;
 
     try {
         await waitForHealth(BACKEND_URL, healthTimeoutMs, backendProcess);
         sendBackendStatus({ state: 'ready' });
+        // Only armed once the backend has actually proven healthy at least
+        // once (per-launch grace period) -- starting it unconditionally
+        // used to mean a backend that was still slowly cold-starting past
+        // even the 30s packaged timeout got the watchdog counting failures
+        // against it immediately, before the user ever got a chance to
+        // just wait it out via Retry.
+        startHealthWatchdog();
     } catch (err) {
         // No dialog + app.quit() here anymore: the window already exists and
         // the lifecycle-driven "failed" banner (with its Retry button, wired
-        // to the same recovery path the watchdog below uses) gives the user
-        // a way forward without restarting the whole app.
+        // to the same recovery path the watchdog uses) gives the user a way
+        // forward without restarting the whole app. The watchdog stays off
+        // until that Retry succeeds (backend:restart below) instead of
+        // immediately starting to count failures against a backend that
+        // just failed its very first health check.
         const logTail = getBackendLogTail();
         const detail = logTail
             ? `${err?.message ?? err}\n\nBackend output:\n${logTail}`
@@ -779,8 +913,6 @@ app.whenReady().then(async () => {
         console.error('[backend] failed to become healthy on startup:', detail);
         sendBackendStatus({ state: 'failed', logTail: detail });
     }
-
-    startHealthWatchdog();
 });
 
 ipcMain.handle('updater:install', () => installUpdate());
@@ -794,8 +926,14 @@ ipcMain.handle('backend:restart', async () => {
     // timeout would hang this handler forever against exactly the kind of
     // hung-but-accepting-connections backend this button exists to recover.
     const ok = await probeHealthOnce(recoveryConfig.backendUrl);
-    if (ok) return; // already healthy — don't spawn a second process on the same port
-    await attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo: null });
+    if (ok) {
+        // Already healthy -- don't spawn a second process on the same port,
+        // but this is still a valid point to resume the watchdog if an
+        // earlier failed cycle had paused it (G2).
+        startHealthWatchdog();
+        return;
+    }
+    await runRecovery(null);
 });
 
 // Best-effort check for a still-running transcription job, used only to

@@ -51,7 +51,14 @@ export function useOllamaReadiness(
   }, []);
 
   useEffect(() => {
-    check();
+    // Skip the check while inactive (e.g. the backend hasn't reported
+    // healthy yet) -- getOllamaModels maps a connection-refused fetch
+    // (backend still booting) to the same {ok:false} shape as "Ollama
+    // isn't installed", so checking too early misreads a normal cold start
+    // as a setup problem. The activation effect below runs the first real
+    // check once `active` actually flips true; state stays "checking"
+    // (rendered as nothing by OllamaOnboardingGate) until then.
+    if (active) check();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

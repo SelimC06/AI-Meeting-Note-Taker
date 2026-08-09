@@ -42,13 +42,23 @@ declare global {
     // anyway) — DockedRail.tsx's remote-control copy needs to know this
     // too, or clicking it silently does nothing with no feedback.
     isProcessing: boolean;
+    // True while a previously FAILED upload's FormData/Blobs are still only
+    // held in the rail renderer's memory (pendingUploadRef), offered back
+    // via the "retry upload" toast action. Status is "idle" and isProcessing
+    // is false in this state, so without this flag main.js's close guard
+    // can't tell a pending-retry recording apart from one with nothing left
+    // to lose (G3).
+    hasPendingUpload: boolean;
   };
 
   // "stopForClose": sent only by main.js's guarded close/quit flow
   // (stopAndSaveRailRecording) -- stops an active recording the same way a
   // manual stop does, but is a safe no-op (acks immediately, doesn't start
   // anything) if the rail is already idle, unlike "toggleRecord".
-  type RailCommandAction = "toggleRecord" | "pause" | "resume" | "stopForClose";
+  // "retryUploadForClose": sent by the pending-upload close dialog's "Retry
+  // and wait" choice (retryRailUploadAndWait in main.js) -- re-POSTs the
+  // held FormData the same way the toast's own "retry upload" button does.
+  type RailCommandAction = "toggleRecord" | "pause" | "resume" | "stopForClose" | "retryUploadForClose";
 
   type RailRect = { x: number; y: number; width: number; height: number };
 
@@ -95,6 +105,12 @@ declare global {
     };
     backendAPI?: {
       onStatus: (callback: (status: BackendStatus) => void) => () => void;
+      // Pull side of the pull+push handshake: onStatus alone can miss the
+      // very first push (sent before the renderer's listener is wired up),
+      // so callers fetch the current state once on mount instead of
+      // trusting a "healthy" default. null if main hasn't sent any status
+      // yet.
+      getStatus: () => Promise<BackendStatus | null>;
       restart: () => Promise<void>;
     };
     updaterAPI?: {

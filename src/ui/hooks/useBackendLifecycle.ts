@@ -16,27 +16,53 @@ export type BackendLifecycleState =
 const HEALTH_POLL_INTERVAL_MS = 3000;
 const UNRESPONSIVE_THRESHOLD_MS = 10000;
 
+function mapStatusToPhase(status: BackendStatus): BackendLifecycleState {
+  if (status.state === "starting") return { phase: "starting" };
+  if (status.state === "restarting") {
+    return { phase: "restarting", attempt: status.attempt, maxAttempts: status.maxAttempts };
+  }
+  if (status.state === "up") return { phase: "reconnected" };
+  if (status.state === "ready") return { phase: "healthy" };
+  return { phase: "failed", logTail: status.logTail };
+}
+
 export function useBackendLifecycle(): BackendLifecycleState {
   const [state, setState] = useState<BackendLifecycleState>({ phase: "healthy" });
   const stateRef = useRef(state);
   stateRef.current = state;
   const firstFailureAtRef = useRef<number | null>(null);
+  // Guards the pull (getStatus) below against clobbering a more recent push
+  // (onStatus) that arrived first -- the pull's IPC round-trip can resolve
+  // after a status event that landed in the meantime.
+  const receivedPushRef = useRef(false);
 
   useEffect(() => {
     const unsubscribe = window.backendAPI?.onStatus((status: BackendStatus) => {
-      if (status.state === "starting") {
-        setState({ phase: "starting" });
-      } else if (status.state === "restarting") {
-        setState({ phase: "restarting", attempt: status.attempt, maxAttempts: status.maxAttempts });
-      } else if (status.state === "up") {
-        setState({ phase: "reconnected" });
-      } else if (status.state === "ready") {
-        setState({ phase: "healthy" });
-      } else if (status.state === "failed") {
-        setState({ phase: "failed", logTail: status.logTail });
-      }
+      receivedPushRef.current = true;
+      setState(mapStatusToPhase(status));
     });
     return () => unsubscribe?.();
+  }, []);
+
+  // Pull side of the pull+push handshake (see backendAPI.getStatus): main.js
+  // sends {state:'starting'} synchronously right after creating the window,
+  // well before this component mounts and registers the onStatus listener
+  // above -- Electron does not buffer webContents.send, so that first push
+  // is silently dropped on every single launch, and this hook would
+  // otherwise sit on its "healthy" default while the backend is still
+  // coming up (showing a live dashboard against a connection-refused
+  // backend, or worse, flipping to "unresponsive" and offering a Retry that
+  // races/kills a normal cold start). Fetching the current state once on
+  // mount closes that gap.
+  useEffect(() => {
+    let cancelled = false;
+    window.backendAPI?.getStatus().then((status) => {
+      if (cancelled || receivedPushRef.current || !status) return;
+      setState(mapStatusToPhase(status));
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {

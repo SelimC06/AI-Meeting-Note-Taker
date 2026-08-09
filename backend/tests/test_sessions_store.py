@@ -279,6 +279,55 @@ def test_remove_session_permanently_tolerates_missing_folder(tmp_path: Path):
     assert load_sessions(tmp_path) == []
 
 
+def test_remove_session_permanently_tombstones_a_dir_rmtree_could_not_fully_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression test for G5: on Windows a locked file (AV scanner, media
+    player, search indexer, an in-flight export) makes
+    shutil.rmtree(ignore_errors=True) fail silently -- the dir survives,
+    unindexed. Without a tombstone, the next startup's sweep would adopt it
+    right back into the index as a "Recovered" session, resurrecting a
+    recording the user explicitly, permanently deleted.
+    """
+    from app.sessions_store import remove_session_permanently, TOMBSTONE_FILENAME
+
+    session_dir = tmp_path / "aaa"
+    session_dir.mkdir()
+    (session_dir / "final.webm").write_bytes(b"video bytes")
+    append_session(tmp_path, {
+        "id": "aaa", "created_at": "2026-08-01T10:00:00+00:00",
+        "title": "T", "notes": "", "video_path": "", "trashed_at": None,
+    })
+
+    # Simulate a locked file: rmtree "succeeds" (no exception, since real
+    # Windows rmtree(ignore_errors=True) doesn't raise either) but leaves
+    # the directory behind.
+    monkeypatch.setattr("app.sessions_store.shutil.rmtree", lambda *a, **k: None)
+
+    ok = remove_session_permanently(tmp_path, "aaa")
+
+    assert ok is True
+    assert load_sessions(tmp_path) == []  # index entry is still gone
+    assert session_dir.exists()  # the locked dir survives
+    assert (session_dir / TOMBSTONE_FILENAME).exists()
+
+
+def test_remove_session_permanently_does_not_tombstone_a_successfully_removed_dir(tmp_path: Path):
+    from app.sessions_store import remove_session_permanently
+
+    session_dir = tmp_path / "aaa"
+    session_dir.mkdir()
+    (session_dir / "final.webm").write_bytes(b"video bytes")
+    append_session(tmp_path, {
+        "id": "aaa", "created_at": "2026-08-01T10:00:00+00:00",
+        "title": "T", "notes": "", "video_path": "", "trashed_at": None,
+    })
+
+    remove_session_permanently(tmp_path, "aaa")
+
+    assert not session_dir.exists()  # nothing left to hold a tombstone in
+
+
 def test_purge_expired_trash_removes_only_old_trashed_sessions(tmp_path: Path):
     from app.sessions_store import purge_expired_trash
 
@@ -561,3 +610,192 @@ def test_sweep_orphaned_sessions_one_bad_directory_does_not_abort_the_rest(tmp_p
     result = sweep_orphaned_sessions(tmp_path)
 
     assert result == {"adopted": [good_id], "deleted": []}
+
+
+def test_sweep_orphaned_sessions_retries_and_removes_a_tombstoned_dir_once_unlocked(tmp_path: Path):
+    """Regression test for G5: a tombstoned dir (rmtree failed last time
+    because a file was locked) must be retried, not adopted -- even though
+    it still contains recording data that would otherwise qualify it for
+    adoption.
+    """
+    from app.sessions_store import sweep_orphaned_sessions, TOMBSTONE_FILENAME
+
+    orphan = tmp_path / ORPHAN_ID
+    orphan.mkdir()
+    (orphan / "final.webm").write_bytes(b"video bytes")
+    (orphan / TOMBSTONE_FILENAME).touch()
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [], "deleted": [ORPHAN_ID]}
+    assert load_sessions(tmp_path) == []
+    assert not orphan.exists()
+
+
+def test_sweep_orphaned_sessions_leaves_a_still_locked_tombstoned_dir_alone_and_never_adopts_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The file is still locked (rmtree fails again) -- the dir must be left
+    tombstoned for the next startup, never indexed/adopted despite still
+    containing recording data.
+    """
+    from app.sessions_store import sweep_orphaned_sessions, TOMBSTONE_FILENAME
+
+    orphan = tmp_path / ORPHAN_ID
+    orphan.mkdir()
+    (orphan / "final.webm").write_bytes(b"video bytes")
+    (orphan / TOMBSTONE_FILENAME).touch()
+
+    monkeypatch.setattr("app.sessions_store.shutil.rmtree", lambda *a, **k: None)
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [], "deleted": []}
+    assert load_sessions(tmp_path) == []  # never resurrected into the index
+    assert orphan.exists()
+    assert (orphan / TOMBSTONE_FILENAME).exists()  # still tombstoned for next time
+
+
+def _set_mtime_seconds_ago(path: Path, seconds_ago: float) -> None:
+    import time
+
+    target = time.time() - seconds_ago
+    os.utime(path, (target, target))
+
+
+def test_sweep_stale_staging_dirs_removes_old_dirs_but_not_recent_ones(tmp_path: Path):
+    """Regression test for G6.1: a hard kill mid-upload abandons
+    process-staging-* dirs (up to ~2GB each) in the storage dir; the
+    session-sweep's hex-only regex skips them and nothing else cleaned them
+    up before this fix.
+    """
+    from app.sessions_store import sweep_stale_staging_dirs, STAGING_DIR_PREFIX
+
+    stale = tmp_path / f"{STAGING_DIR_PREFIX}abc123"
+    stale.mkdir()
+    (stale / "screen.webm").write_bytes(b"partial upload")
+    _set_mtime_seconds_ago(stale, 7200)  # 2 hours old
+
+    fresh = tmp_path / f"{STAGING_DIR_PREFIX}def456"
+    fresh.mkdir()
+    _set_mtime_seconds_ago(fresh, 5)  # an upload that's currently mid-flight
+
+    removed = sweep_stale_staging_dirs(tmp_path, max_age_seconds=3600)
+
+    assert removed == [stale.name]
+    assert not stale.exists()
+    assert fresh.exists()  # must not touch an in-progress upload
+
+
+def test_sweep_stale_staging_dirs_ignores_non_staging_directories(tmp_path: Path):
+    from app.sessions_store import sweep_stale_staging_dirs
+
+    unrelated = tmp_path / "not-a-staging-dir"
+    unrelated.mkdir()
+    _set_mtime_seconds_ago(unrelated, 7200)
+
+    removed = sweep_stale_staging_dirs(tmp_path, max_age_seconds=3600)
+
+    assert removed == []
+    assert unrelated.exists()
+
+
+def test_sweep_stale_staging_dirs_missing_store_dir_returns_empty_list(tmp_path: Path):
+    from app.sessions_store import sweep_stale_staging_dirs
+
+    assert sweep_stale_staging_dirs(tmp_path / "does-not-exist") == []
+
+
+def test_sweep_orphaned_sessions_skips_entirely_when_index_exists_but_is_corrupt(tmp_path: Path):
+    """Regression test for G6.2: load_sessions() folds a corrupt index into
+    a plain [], which used to make sweep_orphaned_sessions think every real
+    session dir was unindexed and adopt all of them as "recovered" --
+    losing their real titles/notes and resurrecting trashed sessions as
+    active. A corrupt index must make the sweep skip entirely instead.
+    """
+    from app.sessions_store import sweep_orphaned_sessions
+
+    (tmp_path / "sessions_index.json").write_text("not json", encoding="utf-8")
+
+    real_session = tmp_path / ORPHAN_ID
+    real_session.mkdir()
+    (real_session / "final.webm").write_bytes(b"video bytes")
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [], "deleted": []}
+    assert real_session.exists()  # untouched, not adopted, not deleted
+
+
+def test_sweep_orphaned_sessions_preserves_the_corrupt_index_aside_even_when_skipping(tmp_path: Path):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    (tmp_path / "sessions_index.json").write_text("not json", encoding="utf-8")
+
+    sweep_orphaned_sessions(tmp_path)
+
+    preserved = list(tmp_path.glob("sessions_index.corrupt-*.json"))
+    assert len(preserved) == 1
+
+
+def test_sweep_orphaned_sessions_runs_normally_when_index_is_missing_entirely(tmp_path: Path):
+    """A missing index (fresh install, nothing to protect) is not corrupt --
+    the sweep must still adopt orphans normally in that case.
+    """
+    from app.sessions_store import sweep_orphaned_sessions
+
+    orphan = tmp_path / ORPHAN_ID
+    orphan.mkdir()
+    (orphan / "final.webm").write_bytes(b"video bytes")
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [ORPHAN_ID], "deleted": []}
+
+
+def test_sweep_orphaned_sessions_rewrites_the_tombstone_when_a_partial_rmtree_strips_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression test: shutil.rmtree(ignore_errors=True) doesn't guarantee
+    any particular removal order. A partial pass on a tombstoned dir can
+    strip the .deleted marker itself before reaching the still-locked file
+    -- leaving the dir existing with NO tombstone. Without rewriting it,
+    the NEXT boot's sweep would adopt the dir back as "recovered",
+    resurrecting a permanently deleted recording two boots later. This is
+    distinct from the earlier all-or-nothing rmtree mock (which never
+    exercised a partial removal), so it's the case that actually slipped
+    through the first pass at this fix.
+    """
+    from app.sessions_store import sweep_orphaned_sessions, TOMBSTONE_FILENAME
+
+    orphan = tmp_path / ORPHAN_ID
+    orphan.mkdir()
+    (orphan / "final.webm").write_bytes(b"video bytes")  # simulates the still-locked file
+    (orphan / TOMBSTONE_FILENAME).touch()
+
+    def partial_rmtree(path, ignore_errors=False):
+        # Removes everything EXCEPT the "locked" file -- including the
+        # tombstone marker, same as a real partial pass could.
+        p = Path(path)
+        for child in list(p.iterdir()):
+            if child.name == "final.webm":
+                continue
+            child.unlink()
+
+    monkeypatch.setattr("app.sessions_store.shutil.rmtree", partial_rmtree)
+
+    # Boot 1: the retry strips the tombstone marker but the locked file
+    # survives -- the fix must rewrite the marker before returning.
+    result1 = sweep_orphaned_sessions(tmp_path)
+    assert result1 == {"adopted": [], "deleted": []}
+    assert orphan.exists()
+    assert (orphan / TOMBSTONE_FILENAME).exists()
+    assert load_sessions(tmp_path) == []
+
+    # Boot 2: without the fix, the tombstone would already be gone here and
+    # the still-present recording data would get adopted.
+    result2 = sweep_orphaned_sessions(tmp_path)
+    assert result2 == {"adopted": [], "deleted": []}
+    assert orphan.exists()
+    assert (orphan / TOMBSTONE_FILENAME).exists()
+    assert load_sessions(tmp_path) == []

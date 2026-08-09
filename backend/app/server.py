@@ -16,6 +16,7 @@ import asyncio
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 import os
 import uvicorn
@@ -32,7 +33,9 @@ from .sessions_store import (
     remove_session_permanently,
     purge_expired_trash,
     sweep_orphaned_sessions,
+    sweep_stale_staging_dirs,
     compute_storage_usage,
+    STAGING_DIR_PREFIX,
 )
 from .settings_store import (
     SAVE_LOCK,
@@ -187,13 +190,54 @@ _app_data_dir_env = os.getenv("APP_DATA_DIR")
 ROOT = Path(_app_data_dir_env) if _app_data_dir_env else Path(__file__).resolve().parent
 SETTINGS_PATH = ROOT / "settings.json"
 
+# export_session_zip below builds its temp zip in the OS temp dir with this
+# prefix, distinguishing it from anything else that might live there so
+# _sweep_stale_export_zips can safely target only this app's own leaked
+# files.
+EXPORT_TEMP_PREFIX = "meeting-export-"
+
+
+def _sweep_stale_export_zips(max_age_seconds: int = 3600) -> None:
+    """Best-effort: removes export zips leaked by a previous run.
+
+    export_session_zip's temp file is meant to be cleaned up either by its
+    own except handler (if building the zip throws) or by the response's
+    BackgroundTask (on a normal completed download) -- but a hard kill
+    mid-build, or a client disconnecting mid-download (some Starlette
+    versions skip the BackgroundTask for that), can leak it in the OS temp
+    dir forever. Age-gated so a download actually in progress right now is
+    never touched, and scoped to EXPORT_TEMP_PREFIX so this never touches
+    anything else in that shared directory.
+    """
+    tmp_dir = Path(tempfile.gettempdir())
+    cutoff = time.time() - max_age_seconds
+    for entry in tmp_dir.glob(f"{EXPORT_TEMP_PREFIX}*.zip"):
+        try:
+            if entry.stat().st_mtime > cutoff:
+                continue
+            entry.unlink()
+        except OSError:
+            continue
+
+
 _settings = load_settings(SETTINGS_PATH, ROOT / "uploads")
 STORE = Path(_settings["storage_dir"])
 STORE.mkdir(parents=True, exist_ok=True)
 purge_expired_trash(STORE)
 sweep_orphaned_sessions(STORE)
+# Independent of the sessions index entirely -- runs regardless of whether
+# the sweep above skipped due to a corrupt index.
+sweep_stale_staging_dirs(STORE)
+_sweep_stale_export_zips()
 WHISPER_MODEL = _settings["whisper_model"]
 OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
+
+# Set for the duration of move_storage_dir inside patch_settings below.
+# POST /process checks this and rejects with 503 rather than writing a
+# fresh upload into a storage dir that's mid-move (jobs.is_busy() only
+# blocks moves while a job already exists -- it says nothing about a
+# request that arrives before one does).
+move_in_progress = False
 
 def log(msg: str) -> None:
     print(f"[server] {msg}", flush=True)
@@ -432,7 +476,7 @@ def get_settings():
 
 @app.patch("/settings")
 def patch_settings(body: SettingsUpdate):
-    global STORE, WHISPER_MODEL, OLLAMA_CHAT_MODEL
+    global STORE, WHISPER_MODEL, OLLAMA_CHAT_MODEL, move_in_progress
 
     if body.whisper_model is not None and body.whisper_model not in WHISPER_MODEL_VALUES:
         raise HTTPException(400, f"Invalid whisper_model: {body.whisper_model!r}")
@@ -469,10 +513,19 @@ def patch_settings(body: SettingsUpdate):
             # re-created index in the old location after the move.
             if jobs.is_busy():
                 raise HTTPException(409, "Wait for processing to finish before moving the storage folder")
+            # jobs.is_busy() only blocks moves while a job is queued/running --
+            # it says nothing about a fresh POST /process arriving DURING the
+            # move itself (no job exists yet at that point). move_in_progress
+            # closes that TOCTOU: /process below rejects with 503 while set,
+            # instead of writing uploads into the old dir mid-move (a partial
+            # move, or a session indexed with paths that no longer exist).
+            move_in_progress = True
             try:
                 move_storage_dir(STORE, new_dir)
             except StorageMoveError as e:
                 raise HTTPException(400, str(e))
+            finally:
+                move_in_progress = False
             updates["storage_dir"] = str(new_dir)
 
         settings = save_settings(SETTINGS_PATH, updates, ROOT / "uploads")
@@ -763,6 +816,14 @@ def process(
     duration of an upload. FastAPI runs plain-def endpoints in its
     threadpool automatically, which fixes that without any other change.
     """
+    # Checked before touching STORE at all: a move in progress means STORE
+    # is about to (or has just started to) point somewhere new while files
+    # are still being relocated -- writing an upload into the old dir right
+    # now risks a partial move or a session indexed with paths that no
+    # longer exist once the move finishes.
+    if move_in_progress:
+        raise HTTPException(503, "Storage folder is being moved -- try again in a moment")
+
     # Bind STORE (and WHISPER_MODEL below) to locals once, at the top, so
     # this request sees one consistent snapshot of settings -- a PATCH
     # /settings changing storage_dir mid-request shouldn't split where the
@@ -776,7 +837,7 @@ def process(
     # so a rejected upload (missing/invalid video) never leaves a
     # mkdir'd-but-otherwise-empty session folder behind (brief 08). The temp
     # dir is removed on the way out either way, success or rejection.
-    with tempfile.TemporaryDirectory(prefix="process-staging-", dir=store) as staging:
+    with tempfile.TemporaryDirectory(prefix=STAGING_DIR_PREFIX, dir=store) as staging:
         staged_screen = save_upload(Path(staging), screen, "screen.webm")
         if not staged_screen:
             raise HTTPException(400, "valid screen video is required")
@@ -891,8 +952,13 @@ def export_session_zip(session_id: str):
     # copying it again via getvalue()) just to hand it to Response() peaked
     # at ~2x archive size for no reason. FileResponse below streams it back
     # off disk in constant memory, and the BackgroundTask cleans up the temp
-    # file once the response has actually been sent.
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    # file once the response has actually been sent -- except is a fallback
+    # for a failure BUILDING the zip (BackgroundTask never gets attached in
+    # that case, since the response is never returned) and
+    # _sweep_stale_export_zips is a backstop for the remaining leak class: a
+    # hard kill mid-build, or a client disconnecting mid-download (some
+    # Starlette versions skip the BackgroundTask for that).
+    tmp = tempfile.NamedTemporaryFile(delete=False, prefix=EXPORT_TEMP_PREFIX, suffix=".zip")
     tmp_path = tmp.name
     try:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -913,6 +979,13 @@ def export_session_zip(session_id: str):
             if frames_dir.is_dir():
                 for frame in sorted(frames_dir.glob("*.png")):
                     zf.write(frame, arcname=f"frames/{frame.name}")
+    except Exception:
+        tmp.close()
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     finally:
         tmp.close()
 

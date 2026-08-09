@@ -18,6 +18,7 @@ const DEFAULT_STATUS: RailStatus = {
     level: Array(DOCKED_METER_SAMPLES).fill(0),
     recordError: null,
     isProcessing: false,
+    hasPendingUpload: false,
 };
 
 // A jitter guard against a plain click being misread as a drag — below

@@ -73,7 +73,7 @@ it("sends toggleRecord when the record button is clicked", () => {
 it("reflects a pushed recording status", () => {
   const { emitStatus } = stubWindowControls();
   render(<DockedRail />);
-  emitStatus({ status: "recording", elapsedLabel: "00:12", level: [0.2, 0.5], recordError: null, isProcessing: false });
+  emitStatus({ status: "recording", elapsedLabel: "00:12", level: [0.2, 0.5], recordError: null, isProcessing: false, hasPendingUpload: false });
   expect(screen.getByLabelText("Stop recording")).toBeInTheDocument();
   expect(screen.getByText("00:12")).toBeInTheDocument();
 });
@@ -81,11 +81,11 @@ it("reflects a pushed recording status", () => {
 it("sends pause while recording and resume while paused", () => {
   const { sendRailCommand, emitStatus } = stubWindowControls();
   render(<DockedRail />);
-  emitStatus({ status: "recording", elapsedLabel: "00:05", level: [], recordError: null, isProcessing: false });
+  emitStatus({ status: "recording", elapsedLabel: "00:05", level: [], recordError: null, isProcessing: false, hasPendingUpload: false });
   fireEvent.click(screen.getByLabelText("Pause recording"));
   expect(sendRailCommand).toHaveBeenCalledWith("pause");
 
-  emitStatus({ status: "paused", elapsedLabel: "00:05", level: [], recordError: null, isProcessing: false });
+  emitStatus({ status: "paused", elapsedLabel: "00:05", level: [], recordError: null, isProcessing: false, hasPendingUpload: false });
   fireEvent.click(screen.getByLabelText("Resume recording"));
   expect(sendRailCommand).toHaveBeenCalledWith("resume");
 });
@@ -93,7 +93,7 @@ it("sends pause while recording and resume while paused", () => {
 it("shows the error dot with the message as a tooltip", () => {
   const { emitStatus } = stubWindowControls();
   render(<DockedRail />);
-  emitStatus({ status: "idle", elapsedLabel: "00:00", level: [], recordError: "mic unavailable", isProcessing: false });
+  emitStatus({ status: "idle", elapsedLabel: "00:00", level: [], recordError: "mic unavailable", isProcessing: false, hasPendingUpload: false });
   const dot = screen.getByTitle("mic unavailable");
   expect(dot.className).toContain("bg-red-500");
 });
@@ -101,7 +101,7 @@ it("shows the error dot with the message as a tooltip", () => {
 it("disables the record button while the just-stopped recording is uploading, mirroring RailApp's own button", () => {
   const { emitStatus } = stubWindowControls();
   render(<DockedRail />);
-  emitStatus({ status: "idle", elapsedLabel: "00:00", level: [], recordError: null, isProcessing: true });
+  emitStatus({ status: "idle", elapsedLabel: "00:00", level: [], recordError: null, isProcessing: true, hasPendingUpload: false });
   expect(screen.getByLabelText("Start recording")).toBeDisabled();
 });
 

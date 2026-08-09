@@ -119,6 +119,15 @@ contextBridge.exposeInMainWorld("backendAPI", {
     return () => ipcRenderer.removeListener('backend:status', listener);
   },
 
+  getStatus: async () => {
+    try {
+      return await ipcRenderer.invoke('backend:getStatus');
+    } catch (e) {
+      console.warn("[preload] backend getStatus failed:", e);
+      return null;
+    }
+  },
+
   restart: async () => {
     try {
       await ipcRenderer.invoke('backend:restart');

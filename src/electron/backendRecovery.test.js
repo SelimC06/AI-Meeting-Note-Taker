@@ -110,6 +110,66 @@ test('attemptRecovery restarts successfully on a later attempt', async () => {
     }
 });
 
+test('attemptRecovery invokes onStatus with the same payloads sent to the window (G2 fix)', async () => {
+    // main.js relies on onStatus to keep its lastBackendStatus cache
+    // authoritative -- and to stop the health watchdog once a cycle lands
+    // on "failed" -- so this side-channel must fire for every state the
+    // window itself receives, not a subset.
+    const port = await findFreePort();
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-recovery-test-'));
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-recovery-marker-'));
+    const marker = path.join(markerDir, 'ready');
+    const win = makeFakeWindow();
+    const onStatusCalls = [];
+    try {
+        const recoveryPromise = attemptRecovery({
+            pythonExe: process.execPath,
+            args: ['-e', HEALTH_SERVER_SCRIPT],
+            cwd: process.cwd(),
+            env: { ...process.env, SDD_MARKER: marker, SDD_PORT: String(port) },
+            backendUrl: `http://127.0.0.1:${port}`,
+            mainWindow: win,
+            logDir,
+            crashInfo: { exitCode: 1, signal: null },
+            delays: [0, 100, 100],
+            onStatus: (payload) => onStatusCalls.push(payload),
+        });
+        setTimeout(() => fs.writeFileSync(marker, ''), 30);
+        await recoveryPromise;
+
+        assert.deepEqual(onStatusCalls, win.sent.map((s) => s.payload));
+    } finally {
+        stopBackend();
+        fs.rmSync(logDir, { recursive: true, force: true });
+        fs.rmSync(markerDir, { recursive: true, force: true });
+    }
+});
+
+test('attemptRecovery calls onStatus with "failed" when every attempt is exhausted', async () => {
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-recovery-test-'));
+    const win = makeFakeWindow();
+    const onStatusCalls = [];
+    try {
+        await attemptRecovery({
+            pythonExe: process.execPath,
+            args: ['-e', 'process.exit(1)'],
+            cwd: process.cwd(),
+            env: process.env,
+            backendUrl: 'http://127.0.0.1:1',
+            mainWindow: win,
+            logDir,
+            crashInfo: { exitCode: 1, signal: null },
+            delays: [0, 10, 10],
+            onStatus: (payload) => onStatusCalls.push(payload),
+        });
+
+        assert.equal(onStatusCalls[onStatusCalls.length - 1].state, 'failed');
+    } finally {
+        stopBackend();
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});
+
 test('attemptRecovery reports failed after exhausting all attempts', async () => {
     const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-recovery-test-'));
     const win = makeFakeWindow();

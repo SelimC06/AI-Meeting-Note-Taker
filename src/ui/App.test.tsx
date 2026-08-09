@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import App from "./App";
 import {
   getSessions,
@@ -51,6 +51,7 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 function stubRailWindowControls() {
@@ -83,6 +84,50 @@ function stubRailWindowControls() {
     emitFloating: (floating: boolean) => act(() => floatingCallback?.(floating)),
   };
 }
+
+it("does not flash 'failed to load' or the Ollama setup overlay during a normal cold start (G9)", async () => {
+  // Regression test: during a normal launch the backend hasn't reported
+  // healthy yet when the sidebar's/Chat's first getSessions() fetch and
+  // useOllamaReadiness's first check would otherwise fire -- both used to
+  // misread that as a real failure (a stale sidebar error, and a
+  // connection-refused getOllamaModels() response misread as "Ollama isn't
+  // installed"). Neither should ever be visible; once the backend reports
+  // healthy, everything loads normally.
+  vi.mocked(getSessions).mockRejectedValueOnce(new TypeError("Failed to fetch"));
+  vi.mocked(getSessions).mockResolvedValue([sessionA]);
+
+  // useBackendHealth fires its first health fetch immediately at mount (not
+  // gated behind the poll interval) -- holding this open lets the test
+  // observe the "backend not known healthy yet" window precisely, without
+  // needing fake timers (which don't play well with testing-library's
+  // findBy*/waitFor polling).
+  let resolveFirstHealth!: (v: { ok: boolean; backend: boolean; ollama: boolean }) => void;
+  const firstHealthPromise = new Promise<{ ok: boolean; backend: boolean; ollama: boolean }>((resolve) => {
+    resolveFirstHealth = resolve;
+  });
+  vi.mocked(getHealthStatus).mockReturnValueOnce(firstHealthPromise);
+  vi.mocked(getHealthStatus).mockResolvedValue({ ok: true, backend: true, ollama: true });
+
+  render(<App />);
+
+  await waitFor(() => expect(getSessions).toHaveBeenCalled());
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(screen.queryByText(/failed to load/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/setup required/i)).not.toBeInTheDocument();
+  expect(getOllamaModels).not.toHaveBeenCalled();
+
+  // The backend reports healthy.
+  await act(async () => {
+    resolveFirstHealth({ ok: true, backend: true, ollama: true });
+    await Promise.resolve();
+  });
+
+  expect(await screen.findByText("Sprint Planning")).toBeInTheDocument();
+  expect(screen.queryByText(/failed to load/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/setup required/i)).not.toBeInTheDocument();
+});
 
 it("selecting a meeting in the sidebar shows it in the chat panel", async () => {
   render(<App />);

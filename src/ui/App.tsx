@@ -18,13 +18,14 @@ function App() {
   const [sidebarView, setSidebarView] = useState<"active" | "trash">("active");
   const { sessions, error: sessionsError, reload: reloadSessions } = useSessions(true, false);
   const health = useBackendHealth(true);
+  const backendUp = health?.backend ?? false;
   const wasBackendUpRef = useRef(false);
   useEffect(() => {
-    if (health?.backend && !wasBackendUpRef.current) {
+    if (backendUp && !wasBackendUpRef.current) {
       reloadSessions();
     }
-    wasBackendUpRef.current = health?.backend ?? false;
-  }, [health?.backend, reloadSessions]);
+    wasBackendUpRef.current = backendUp;
+  }, [backendUp, reloadSessions]);
 
   // Mirrors the same rail-status subscription DockedRail.tsx uses, so the
   // sidebar-collapse toggle can be gated below: the sidebar is the only
@@ -112,10 +113,16 @@ function App() {
                 reloadSessions={reloadSessions}
                 selectedId={selectedId}
                 onSelect={setSelectedId}
+                backendUp={backendUp}
               />
             </ErrorBoundary>
             <ErrorBoundary>
-              <Chat sessions={sessions} sessionsError={sessionsError} selectedId={selectedId} />
+              <Chat
+                sessions={sessions}
+                sessionsError={sessionsError}
+                selectedId={selectedId}
+                backendUp={backendUp}
+              />
             </ErrorBoundary>
             <button
               onClick={() => {
@@ -139,7 +146,7 @@ function App() {
             view={sidebarView}
             onViewChange={setSidebarView}
           />
-          <OllamaOnboardingGate active />
+          <OllamaOnboardingGate active={backendUp} />
 
           {settingsOpen && <SettingsModal active onClose={() => setSettingsOpen(false)} />}
         </main>

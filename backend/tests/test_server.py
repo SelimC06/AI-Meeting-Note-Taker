@@ -1,5 +1,6 @@
 import asyncio
 import io
+import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1274,8 +1275,14 @@ def test_process_jobs_run_serially_not_concurrently(client, monkeypatch):
         assert resp.status_code == 202
         job_ids.append(resp.json()["job_id"])
 
+    # Generous on purpose: this test measures concurrency, not speed, and
+    # under a fully parallel test-suite run (many other tests' threads/
+    # processes contending for CPU) the background worker thread processing
+    # these jobs has been observed needing close to the old 5s budget on
+    # its own -- flaking under load despite the serial pipeline itself only
+    # taking ~0.3s of deliberate sleep(0.1) time.
     for job_id in job_ids:
-        wait_for_job(client, job_id, timeout=5.0)
+        wait_for_job(client, job_id, timeout=15.0)
 
     assert max_concurrent["value"] == 1
 
@@ -1345,6 +1352,46 @@ def test_patch_settings_moves_storage_dir(client: TestClient, tmp_path):
     sessions = client.get("/sessions").json()
     assert len(sessions) == 1
     assert sessions[0]["id"] == "abc123"
+
+
+def test_process_rejects_with_503_while_a_storage_move_is_in_progress(
+    client: TestClient, tmp_path, monkeypatch
+):
+    """Regression test for G6.3 (storage-move TOCTOU): jobs.is_busy() only
+    blocks a move while a job already exists -- it says nothing about a
+    fresh POST /process arriving DURING the move itself, before any job has
+    been created. Without move_in_progress, that request would write into
+    the storage dir mid-move (a partial move, or a session indexed with
+    paths that no longer exist once the move finishes).
+    """
+    import app.server as server_module
+
+    new_dir = tmp_path.parent / f"{tmp_path.name}-new-storage"
+    captured = {}
+
+    def fake_move_storage_dir(old_dir, new_dir_arg):
+        assert server_module.move_in_progress is True
+        # A /process request arriving mid-move, from the exact same server
+        # process -- proves the flag is actually checked and enforced.
+        resp = client.post("/process")
+        captured["status"] = resp.status_code
+        new_dir_arg.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(server_module, "move_storage_dir", fake_move_storage_dir)
+
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+
+    assert resp.status_code == 200
+    assert captured["status"] == 503
+    assert server_module.move_in_progress is False  # cleared once the move finishes
+
+
+def test_process_succeeds_once_a_storage_move_has_finished(client: TestClient):
+    import app.server as server_module
+
+    assert server_module.move_in_progress is False
+    resp = client.post("/process")  # no screen upload -> 400, not 503
+    assert resp.status_code == 400
 
 
 def test_patch_settings_rejects_storage_move_while_a_job_is_busy(client: TestClient, tmp_path):
@@ -1944,6 +1991,100 @@ def test_export_zip_streams_a_large_file_from_disk_without_buffering_it_whole(cl
     # BackgroundTask after the response was sent, not left behind.
     assert len(tmp_paths_used) == 1
     assert not Path(tmp_paths_used[0]).exists()
+
+
+def test_export_zip_cleans_up_temp_file_when_build_fails(client: TestClient, monkeypatch):
+    """Regression test for G6.4: the temp zip used to only get cleaned up
+    by the BackgroundTask attached to a successfully-returned response --
+    a failure while BUILDING the zip left it behind in the OS temp dir
+    forever, since the response (and its BackgroundTask) never gets
+    returned in that case.
+    """
+    from app.sessions_store import append_session
+
+    session_dir = server_module.STORE / "abc"
+    session_dir.mkdir()
+    (session_dir / "final.webm").write_bytes(b"fake video bytes")
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "My Meeting", "notes": "notes",
+        "video_path": str(session_dir / "final.webm"), "trashed_at": None,
+    })
+
+    tmp_paths_used = []
+    real_named_temp_file = tempfile.NamedTemporaryFile
+
+    def spying_named_temp_file(*args, **kwargs):
+        f = real_named_temp_file(*args, **kwargs)
+        tmp_paths_used.append(f.name)
+        return f
+
+    monkeypatch.setattr("app.server.tempfile.NamedTemporaryFile", spying_named_temp_file)
+    monkeypatch.setattr(
+        "app.server.zipfile.ZipFile",
+        mock.Mock(side_effect=RuntimeError("simulated failure building the zip")),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        client.get("/sessions/abc/export/zip")
+
+    assert len(tmp_paths_used) == 1
+    assert not Path(tmp_paths_used[0]).exists()
+
+
+def test_export_zip_uses_the_distinguishing_temp_prefix(client: TestClient):
+    """_sweep_stale_export_zips only ever targets files with this prefix --
+    if export_session_zip stopped using it, that sweep would silently stop
+    covering real leaks.
+    """
+    from app.sessions_store import append_session
+
+    session_dir = server_module.STORE / "abc"
+    session_dir.mkdir()
+    (session_dir / "final.webm").write_bytes(b"fake video bytes")
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "My Meeting", "notes": "notes",
+        "video_path": str(session_dir / "final.webm"), "trashed_at": None,
+    })
+
+    tmp_paths_used = []
+    real_named_temp_file = tempfile.NamedTemporaryFile
+
+    def spying_named_temp_file(*args, **kwargs):
+        f = real_named_temp_file(*args, **kwargs)
+        tmp_paths_used.append(f.name)
+        return f
+
+    with mock.patch("app.server.tempfile.NamedTemporaryFile", side_effect=spying_named_temp_file):
+        resp = client.get("/sessions/abc/export/zip")
+
+    assert resp.status_code == 200
+    assert len(tmp_paths_used) == 1
+    assert Path(tmp_paths_used[0]).name.startswith(server_module.EXPORT_TEMP_PREFIX)
+
+
+def test_sweep_stale_export_zips_removes_old_but_not_recent_files(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.server.tempfile.gettempdir", lambda: str(tmp_path))
+
+    old_time = time.time() - 7200
+
+    stale = tmp_path / f"{server_module.EXPORT_TEMP_PREFIX}abc123.zip"
+    stale.write_bytes(b"leaked zip")
+    os.utime(stale, (old_time, old_time))
+
+    fresh = tmp_path / f"{server_module.EXPORT_TEMP_PREFIX}def456.zip"
+    fresh.write_bytes(b"download in progress")
+
+    unrelated = tmp_path / "some-other-apps-file.zip"
+    unrelated.write_bytes(b"not ours")
+    os.utime(unrelated, (old_time, old_time))
+
+    server_module._sweep_stale_export_zips(max_age_seconds=3600)
+
+    assert not stale.exists()
+    assert fresh.exists()  # not old enough -- could still be downloading
+    assert unrelated.exists()  # never touch files outside our own prefix
 
 
 def test_export_zip_404_for_unknown_id(client: TestClient):

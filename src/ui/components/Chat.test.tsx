@@ -129,3 +129,15 @@ it("shows a distinct error message when sessions fail to load", () => {
   render(<Chat sessions={null} sessionsError="Failed to fetch" selectedId={null} />);
   expect(screen.getByText(/couldn't load meetings: Failed to fetch/i)).toBeInTheDocument();
 });
+
+it("shows a neutral loading state instead of the sessions error while the backend isn't up yet (G9)", () => {
+  // Regression test: same G9 cold-start misread as Sidebar's identical fix
+  // -- a connection-refused error from before the backend reports healthy
+  // must not be shown as a real load failure.
+  render(
+    <Chat sessions={null} sessionsError="Failed to fetch" selectedId={null} backendUp={false} />
+  );
+
+  expect(screen.queryByText(/couldn't load meetings/i)).not.toBeInTheDocument();
+  expect(screen.getByText(/loading/i)).toBeInTheDocument();
+});

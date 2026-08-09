@@ -24,6 +24,14 @@ interface Props {
   reloadSessions: () => void;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
+  // False only during the brief window before the backend lifecycle first
+  // reports healthy (cold start, or a restart in progress) -- useSessions'
+  // very first fetch lands as connection-refused in that window, and
+  // without this the sidebar showed "failed to load" instead of a neutral
+  // loading state on every single launch (G9). Defaults true so callers
+  // that don't care about the distinction (most tests) keep the original
+  // always-show-errors behavior.
+  backendUp?: boolean;
 }
 
 // Distinguishes "the fetch itself never landed" (offline/backend down --
@@ -49,6 +57,7 @@ const Sidebar: React.FC<Props> = ({
   reloadSessions,
   selectedId,
   onSelect,
+  backendUp = true,
 }) => {
   const [query, setQuery] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -105,7 +114,12 @@ const Sidebar: React.FC<Props> = ({
   }, [view]);
 
   const list = view === "trash" ? trashList.sessions : sessions;
-  const listError = view === "trash" ? trashList.error : sessionsError;
+  // Suppressed while the backend isn't known healthy yet -- an error from
+  // that window is almost certainly just "not up yet", and the existing
+  // reload-on-health-flip effect in App.tsx already recovers it once the
+  // backend comes up. Falls through to the "loading" branch below instead
+  // (list is still null at that point too).
+  const listError = backendUp ? (view === "trash" ? trashList.error : sessionsError) : null;
   const filtered =
     list?.filter((s) => s.title.toLowerCase().includes(query.trim().toLowerCase())) ?? null;
 

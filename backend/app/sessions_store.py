@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List
@@ -42,6 +43,27 @@ def _preserve_corrupt_index(path: Path) -> None:
         shutil.copy2(path, dest)
     except OSError as e:
         print(f"[sessions_store] failed to preserve corrupt index {path}: {e}", flush=True)
+
+
+def _index_exists_but_is_corrupt(store_dir: Path) -> bool:
+    """True if sessions_index.json exists but can't be read back as a JSON
+    list. Deliberately independent of load_sessions (which folds this same
+    condition into a plain [] -- indistinguishable from "no sessions yet")
+    so sweep_orphaned_sessions can tell "genuinely nothing indexed" apart
+    from "can't trust the index right now" (see there for why that
+    distinction matters). Preserves the corrupt file aside itself (same as
+    load_sessions) so this doesn't depend on some other caller's
+    load_sessions() call having already done so first.
+    """
+    path = _index_path(store_dir)
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        _preserve_corrupt_index(path)
+        return True
+    return not isinstance(data, list)
 
 
 def load_sessions(store_dir: Path) -> List[dict]:
@@ -112,6 +134,30 @@ def update_session_fields(store_dir: Path, session_id: str, **fields) -> bool:
         return True
 
 
+# Marker file left inside a session directory that rmtree couldn't fully
+# remove (a locked file -- AV scanner, media player, search indexer, an
+# in-flight export -- on Windows makes rmtree(ignore_errors=True) fail
+# silently, leaving the dir behind). Without this, the next startup's
+# sweep_orphaned_sessions would see an unindexed session-shaped directory
+# and adopt it right back into the index as a "Recovered" session --
+# resurrecting a recording the user explicitly, permanently deleted.
+TOMBSTONE_FILENAME = ".deleted"
+
+
+def _write_tombstone(session_dir: Path) -> None:
+    """Best-effort: mark session_dir as permanently deleted so a failed
+    rmtree never gets mistaken for a fresh, adoptable orphan.
+    """
+    try:
+        (session_dir / TOMBSTONE_FILENAME).touch(exist_ok=True)
+    except OSError as e:
+        print(f"[sessions_store] failed to write tombstone in {session_dir}: {e}", flush=True)
+
+
+def _is_tombstoned(session_dir: Path) -> bool:
+    return (session_dir / TOMBSTONE_FILENAME).exists()
+
+
 def remove_session_permanently(store_dir: Path, session_id: str) -> bool:
     """Remove a session's index record and delete its folder from disk.
 
@@ -130,6 +176,11 @@ def remove_session_permanently(store_dir: Path, session_id: str) -> bool:
     session_dir = store_dir / session_id
     if session_dir.exists():
         shutil.rmtree(session_dir, ignore_errors=True)
+        if session_dir.exists():
+            # rmtree silently failed to fully remove it -- tombstone it so
+            # sweep_orphaned_sessions retries the removal on next startup
+            # instead of adopting it back as a visible session.
+            _write_tombstone(session_dir)
     return True
 
 
@@ -275,14 +326,28 @@ def sweep_orphaned_sessions(store_dir: Path) -> dict:
     export, or delete them like any other session -- their audio may still
     be valuable even though processing never finished. Directories with
     nothing recognizable in them (empty, or leftover junk) are deleted
-    outright.
+    outright. A TOMBSTONED directory (see TOMBSTONE_FILENAME) is never
+    adopted regardless of what it still contains -- it was already
+    permanently deleted by the user; rmtree just couldn't finish the job
+    last time (a locked file), so this only retries the removal.
 
     Returns {"adopted": [...ids], "deleted": [...ids]}. Best-effort per
     directory: a failure processing one orphan doesn't abort the rest of
     the sweep.
+
+    If the index file EXISTS but fails to parse, this skips entirely
+    (returns the empty result) instead of running -- load_sessions() folds
+    a corrupt index into a plain [], which would otherwise make every real
+    session dir look unindexed and get adopted as "recovered", losing their
+    real titles/notes and resurrecting trashed sessions as active. The
+    corrupt file is already preserved aside (see
+    _index_exists_but_is_corrupt / load_sessions); this just leaves the
+    session directories untouched until it's resolved.
     """
     result: dict = {"adopted": [], "deleted": []}
     if not store_dir.exists():
+        return result
+    if _index_exists_but_is_corrupt(store_dir):
         return result
 
     indexed_ids = {r.get("id") for r in load_sessions(store_dir)}
@@ -293,6 +358,21 @@ def sweep_orphaned_sessions(store_dir: Path) -> dict:
         if not _SESSION_DIR_ID_RE.match(entry.name):
             continue
         try:
+            if _is_tombstoned(entry):
+                shutil.rmtree(entry, ignore_errors=True)
+                if entry.exists():
+                    # Still locked. shutil.rmtree(ignore_errors=True) walks
+                    # in filesystem enumeration order, not a guaranteed one --
+                    # a partial pass can remove the tombstone marker itself
+                    # before reaching the still-locked file. Without
+                    # rewriting it here, the dir would be left existing with
+                    # NO tombstone, and the next boot's sweep would adopt it
+                    # back as "recovered" -- a permanently deleted recording
+                    # resurrecting two boots later.
+                    _write_tombstone(entry)
+                else:
+                    result["deleted"].append(entry.name)
+                continue
             if _has_recording_data(entry):
                 record = _adopt_orphan_session(store_dir, entry)
                 result["adopted"].append(record["id"])
@@ -303,3 +383,44 @@ def sweep_orphaned_sessions(store_dir: Path) -> dict:
             continue
 
     return result
+
+
+# server.py's POST /process stages the screen upload here (via
+# tempfile.TemporaryDirectory(prefix=STAGING_DIR_PREFIX, dir=store)) before
+# validating it, so a rejected/invalid upload never leaves a permanent
+# session dir behind (brief 08). TemporaryDirectory normally auto-cleans on
+# exit, but a hard kill (crash, taskkill, power loss) mid-upload skips that
+# cleanup entirely -- and these don't match the 32-hex-char session-dir
+# shape sweep_orphaned_sessions' regex requires, so nothing else ever
+# cleans them up. Left alone they leak forever, up to the ~2GB upload cap
+# each.
+STAGING_DIR_PREFIX = "process-staging-"
+
+
+def sweep_stale_staging_dirs(store_dir: Path, max_age_seconds: int = 3600) -> List[str]:
+    """Removes process-staging-* scratch dirs older than max_age_seconds.
+    Meant to run once at backend startup, alongside sweep_orphaned_sessions.
+
+    Age-gated (not "every staging dir found") so an upload that's currently
+    mid-flight -- its staging dir was just created -- is never touched.
+    Independent of the sessions index entirely, so it runs regardless of
+    whether that index is corrupt (see sweep_orphaned_sessions).
+
+    Returns the names of directories actually removed.
+    """
+    removed: List[str] = []
+    if not store_dir.exists():
+        return removed
+    cutoff = time.time() - max_age_seconds
+    for entry in sorted(store_dir.glob(f"{STAGING_DIR_PREFIX}*")):
+        if not entry.is_dir():
+            continue
+        try:
+            if entry.stat().st_mtime > cutoff:
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            if not entry.exists():
+                removed.append(entry.name)
+        except OSError:
+            continue
+    return removed
