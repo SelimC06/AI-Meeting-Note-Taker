@@ -38,8 +38,15 @@ def _read_json_dict(path: Path) -> Dict[str, Any] | None:
 
 
 def _write_json_dict(path: Path, data: Dict[str, Any]) -> None:
+    # fsync before the rename so the write is actually on disk (not just in
+    # the OS write cache) before it's swapped into place -- without it, a
+    # power loss between write and replace could leave an empty/truncated
+    # settings.json behind.
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(data, ensure_ascii=False, indent=2))
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp_path, path)
 
 

@@ -116,6 +116,25 @@ def test_save_no_leftover_tmp_file(tmp_path):
     assert settings_path.exists()
 
 
+def test_save_fsyncs_before_replace(tmp_path, monkeypatch):
+    import os
+
+    settings_path = tmp_path / "settings.json"
+    storage = tmp_path / "uploads"
+    load_or_init(settings_path, storage)  # seed the file so save() below writes exactly once
+
+    calls = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(
+        "app.settings_store.os.fsync",
+        lambda fd: (calls.append(fd), real_fsync(fd))[1],
+    )
+
+    save(settings_path, {"whisper_model": "base.en"}, storage)
+
+    assert len(calls) == 1
+
+
 def test_move_storage_dir_relocates_contents(tmp_path):
     old_dir = tmp_path / "old"
     new_dir = tmp_path / "new"

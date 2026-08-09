@@ -30,6 +30,20 @@ def _index_path(store_dir: Path) -> Path:
     return store_dir / SESSIONS_INDEX_FILENAME
 
 
+def _preserve_corrupt_index(path: Path) -> None:
+    """Best-effort: copy an unparseable index aside before it's overwritten
+    or ignored, so a corrupted file (e.g. truncated by a power loss during
+    the old fsync-less write) doesn't silently erase the user's meeting
+    history without leaving a trace to recover from.
+    """
+    try:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dest = path.with_name(f"{path.stem}.corrupt-{timestamp}{path.suffix}")
+        shutil.copy2(path, dest)
+    except OSError as e:
+        print(f"[sessions_store] failed to preserve corrupt index {path}: {e}", flush=True)
+
+
 def load_sessions(store_dir: Path) -> List[dict]:
     """Read the sessions index. Missing or corrupt file -> empty list."""
     path = _index_path(store_dir)
@@ -38,6 +52,7 @@ def load_sessions(store_dir: Path) -> List[dict]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError):
+        _preserve_corrupt_index(path)
         return []
     if not isinstance(data, list):
         return []
@@ -47,15 +62,18 @@ def load_sessions(store_dir: Path) -> List[dict]:
 def _write_sessions_atomic(store_dir: Path, sessions: List[dict]) -> None:
     """Atomically write the full sessions list to the index file.
 
-    Writes to a temp file in the same directory then swaps it into place
-    with os.replace(), so a crash mid-write leaves the previous (intact)
-    index untouched. Callers must hold _APPEND_LOCK.
+    Writes to a temp file in the same directory, fsyncs it so the data is
+    actually on disk (not just in the OS write cache) before the rename, then
+    swaps it into place with os.replace(). Without the fsync, a power loss
+    between write and replace could leave an empty/truncated index behind.
+    Callers must hold _APPEND_LOCK.
     """
     final_path = _index_path(store_dir)
     tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
-    tmp_path.write_text(
-        json.dumps(sessions, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(sessions, ensure_ascii=False, indent=2))
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp_path, final_path)
 
 

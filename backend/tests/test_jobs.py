@@ -109,6 +109,31 @@ def test_prune_never_drops_active_jobs():
     assert jobs.get_job(active_id) is not None
 
 
+def test_is_busy_false_with_no_jobs():
+    assert jobs.is_busy() is False
+
+
+def test_is_busy_true_for_queued_job():
+    jobs.create_job(session_id="abc", inputs={})
+    assert jobs.is_busy() is True
+
+
+def test_is_busy_true_for_running_job():
+    job_id = jobs.create_job(session_id="abc", inputs={})
+    jobs.update_job(job_id, status="running")
+    assert jobs.is_busy() is True
+
+
+def test_is_busy_false_once_all_jobs_are_terminal():
+    job_id = jobs.create_job(session_id="abc", inputs={})
+    jobs.update_job(job_id, status="done")
+    assert jobs.is_busy() is False
+
+    job_id2 = jobs.create_job(session_id="def", inputs={})
+    jobs.update_job(job_id2, status="failed")
+    assert jobs.is_busy() is False
+
+
 def test_start_worker_processes_enqueued_job():
     processed = []
     jobs.start_worker(lambda job_id: processed.append(job_id))

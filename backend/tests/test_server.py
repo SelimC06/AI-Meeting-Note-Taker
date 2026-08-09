@@ -1,3 +1,4 @@
+import asyncio
 import io
 import tempfile
 from datetime import datetime, timezone
@@ -20,7 +21,10 @@ def client(tmp_path, monkeypatch):
     # Redirect settings.json to a temp file so tests don't pollute/read the
     # real backend/app/settings.json in this checkout.
     monkeypatch.setattr(server_module, "SETTINGS_PATH", tmp_path / "settings.json")
-    return TestClient(app)
+    # base_url must be an allowed TrustedHostMiddleware host -- the default
+    # "http://testserver" would otherwise get rejected with 400 before
+    # reaching any route, since only localhost/127.0.0.1 are allowed.
+    return TestClient(app, base_url="http://127.0.0.1")
 
 
 import time
@@ -66,6 +70,79 @@ def test_main_binds_to_localhost_only(monkeypatch):
 
     assert captured["app"] is server_module.app
     assert captured["kwargs"]["host"] == "127.0.0.1"
+
+
+def test_run_decodes_subprocess_output_as_utf8(monkeypatch):
+    """Regression test for brief 10: text=True alone decodes with the ANSI
+    locale codepage on Windows, which raises UnicodeDecodeError on ffmpeg's
+    UTF-8 output (e.g. a non-ASCII storage path) and 500s every upload.
+    """
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        return mock.Mock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(server_module.subprocess, "run", fake_run)
+    server_module.run(["ffmpeg", "-version"])
+
+    assert captured["kwargs"]["encoding"] == "utf-8"
+    assert captured["kwargs"]["errors"] == "replace"
+    assert captured["kwargs"]["text"] is True
+
+
+def test_trusted_host_middleware_rejects_dns_rebinding_host_header(client: TestClient):
+    """A malicious page resolving attacker.com to 127.0.0.1 makes the
+    browser send a request with Host: attacker.com -- CORS never applies to
+    this (the browser treats it as same-origin), so TrustedHostMiddleware's
+    Host-header check is the only thing that can still block it.
+    """
+    resp = client.get("/health", headers={"Host": "evil.com"})
+    assert resp.status_code == 400
+
+
+def test_trusted_host_middleware_allows_localhost_and_127_0_0_1(client: TestClient):
+    for host in ("localhost", "127.0.0.1", "localhost:5173", "127.0.0.1:8000"):
+        resp = client.get("/health", headers={"Host": host})
+        assert resp.status_code == 200, f"Host: {host} was unexpectedly rejected"
+
+
+def test_lifespan_starts_and_cleanly_cancels_the_daily_purge_task():
+    """The daily-purge background task must not prevent clean startup/
+    shutdown, and must not leak as a still-running task after shutdown.
+    """
+    with TestClient(app, base_url="http://127.0.0.1") as c:
+        resp = c.get("/health")
+        assert resp.status_code == 200
+
+
+def test_daily_trash_purge_loop_calls_purge_expired_trash_off_the_event_loop(monkeypatch):
+    """Regression test for brief 10: purge_expired_trash used to run once at
+    import only, so a long-running app never purged trash again. The loop
+    must sleep, then call purge_expired_trash (via to_thread, since it does
+    blocking file I/O) against the CURRENT global STORE.
+    """
+    slept_for = []
+
+    async def fake_sleep(seconds):
+        slept_for.append(seconds)
+        if len(slept_for) > 1:
+            raise asyncio.CancelledError()
+
+    purge_calls = []
+    monkeypatch.setattr(server_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        server_module, "purge_expired_trash", lambda store: purge_calls.append(store)
+    )
+
+    async def run_until_cancelled():
+        with pytest.raises(asyncio.CancelledError):
+            await server_module._daily_trash_purge_loop()
+
+    asyncio.run(run_until_cancelled())
+
+    assert slept_for[0] == server_module._DAILY_PURGE_INTERVAL_SECONDS
+    assert purge_calls == [server_module.STORE]
 
 
 def test_google_auth_routes_removed(client: TestClient):
@@ -1268,6 +1345,43 @@ def test_patch_settings_moves_storage_dir(client: TestClient, tmp_path):
     sessions = client.get("/sessions").json()
     assert len(sessions) == 1
     assert sessions[0]["id"] == "abc123"
+
+
+def test_patch_settings_rejects_storage_move_while_a_job_is_busy(client: TestClient, tmp_path):
+    """Regression test for brief 10: moving the storage dir mid-job can
+    PermissionError on Windows (open file handles) or split the session
+    index across old/new dirs. jobs.is_busy() must lock this out with 409
+    instead of letting move_storage_dir race the worker.
+    """
+    import app.server as server_module
+    from app import jobs
+
+    job_id = jobs.create_job(session_id="busy-job", inputs={})
+    try:
+        new_dir = tmp_path.parent / f"{tmp_path.name}-new-storage"
+        original_store = server_module.STORE
+
+        resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+
+        assert resp.status_code == 409
+        assert server_module.STORE == original_store
+        assert not new_dir.exists()
+    finally:
+        jobs.update_job(job_id, status="done")
+
+
+def test_patch_settings_allows_storage_move_once_jobs_are_terminal(client: TestClient, tmp_path):
+    import app.server as server_module
+    from app import jobs
+
+    job_id = jobs.create_job(session_id="finished-job", inputs={})
+    jobs.update_job(job_id, status="done")
+
+    new_dir = tmp_path.parent / f"{tmp_path.name}-new-storage-2"
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+
+    assert resp.status_code == 200
+    assert server_module.STORE == new_dir
 
 
 def test_get_settings_reads_live_globals_not_disk_after_settings_file_deleted(client: TestClient):

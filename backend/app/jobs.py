@@ -72,6 +72,18 @@ def get_job_inputs(job_id: str) -> Optional[dict]:
         return dict(inputs) if inputs is not None else None
 
 
+def is_busy() -> bool:
+    """True while any job is queued or running.
+
+    Used to lock out storage-dir moves: moving mid-job can PermissionError
+    on Windows (open file handles) or split the session index across the
+    old and new dirs if the worker appends to a re-created index in the
+    old location after the move.
+    """
+    with _JOBS_LOCK:
+        return any(job["status"] in ("queued", "running") for job in _JOBS.values())
+
+
 def list_jobs() -> list[dict]:
     with _JOBS_LOCK:
         jobs_copy = [dict(j) for j in _JOBS.values()]

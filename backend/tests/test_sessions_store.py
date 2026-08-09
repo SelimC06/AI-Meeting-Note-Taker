@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -63,6 +64,56 @@ def test_load_sessions_tolerates_corrupt_file(tmp_path: Path):
 def test_load_sessions_tolerates_non_utf8_file(tmp_path: Path):
     (tmp_path / "sessions_index.json").write_bytes(b"\xff\xfe\x00\x01garbage")
     assert load_sessions(tmp_path) == []
+
+
+def test_load_sessions_preserves_corrupt_file_aside_instead_of_discarding_it(tmp_path: Path):
+    """Regression test for brief 10: an unparseable index used to be
+    silently treated as an empty history with no trace of the original
+    bytes -- it must now be copied aside first so the data isn't lost.
+    """
+    (tmp_path / "sessions_index.json").write_text("not json at all", encoding="utf-8")
+
+    assert load_sessions(tmp_path) == []
+
+    preserved = list(tmp_path.glob("sessions_index.corrupt-*.json"))
+    assert len(preserved) == 1
+    assert preserved[0].read_text(encoding="utf-8") == "not json at all"
+    # The original path is untouched -- still there, still corrupt, so a
+    # repeated read keeps behaving the same way rather than raising later.
+    assert (tmp_path / "sessions_index.json").exists()
+
+
+def test_load_sessions_corrupt_preservation_failure_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / "sessions_index.json").write_text("not json", encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("app.sessions_store.shutil.copy2", boom)
+
+    # Preserving the corrupt file aside is best-effort; a failure there must
+    # not prevent load_sessions from returning its normal empty-list result.
+    assert load_sessions(tmp_path) == []
+
+
+def test_append_session_fsyncs_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    calls = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(
+        "app.sessions_store.os.fsync",
+        lambda fd: (calls.append(fd), real_fsync(fd))[1],
+    )
+
+    append_session(tmp_path, {
+        "id": "aaa", "created_at": "2026-08-01T10:00:00+00:00",
+        "title": "T", "notes": "", "video_path": "", "trashed_at": None,
+    })
+
+    assert len(calls) == 1
 
 
 def test_append_session_no_leftover_tmp_file(tmp_path: Path):

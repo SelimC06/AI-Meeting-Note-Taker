@@ -4,12 +4,15 @@ from fastapi.responses import StreamingResponse, Response, FileResponse
 from starlette.background import BackgroundTask
 from .audit import AuditMiddleware
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import Scope, Receive, Send
 from starlette.responses import PlainTextResponse
 from pathlib import Path
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, timezone
+from contextlib import asynccontextmanager
+import asyncio
 import shutil
 import subprocess
 import tempfile
@@ -62,7 +65,36 @@ except Exception:
     OLLAMA_BASE = "http://localhost:11434"
     ollama_health_client = None
 
-app = FastAPI()
+_DAILY_PURGE_INTERVAL_SECONDS = 24 * 3600
+
+
+async def _daily_trash_purge_loop() -> None:
+    """Runs for the app's lifetime, purging expired trash once a day.
+
+    purge_expired_trash also runs once synchronously at import time
+    (below) -- that alone never re-fires on a machine that keeps the app
+    running for weeks, silently breaking the "permanently deleted after
+    30 days" promise. STORE is read fresh each iteration (module global,
+    not captured), so it always targets wherever storage currently lives.
+    """
+    while True:
+        await asyncio.sleep(_DAILY_PURGE_INTERVAL_SECONDS)
+        try:
+            await asyncio.to_thread(purge_expired_trash, STORE)
+        except Exception as e:
+            log(f"daily trash purge failed: {e}")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    task = asyncio.create_task(_daily_trash_purge_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(lifespan=_lifespan)
 
 
 class ChatMessage(BaseModel):
@@ -132,6 +164,15 @@ class MaxUploadSizeMiddleware:
         await self.app(scope, limited_receive, send)
 
 
+# Outermost middleware (added first): CORS with an explicit origin list is
+# a browser-enforced check only -- it does nothing against DNS rebinding
+# (attacker.com resolving to 127.0.0.1), where the browser treats the
+# request as same-origin and never applies CORS at all. TrustedHostMiddleware
+# checks the Host header itself, which rebinding can't spoof. Starlette
+# strips the port before comparing, so "localhost"/"127.0.0.1" alone cover
+# every port -- a literal "host:*" pattern would fail its own wildcard
+# validation (wildcards are only allowed as a leading "*.").
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
 app.add_middleware(MaxUploadSizeMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -159,7 +200,16 @@ def log(msg: str) -> None:
 
 
 def run(cmd: List[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # encoding="utf-8" (not the default text=True, which decodes with the
+    # ANSI locale codepage on Windows): ffmpeg/ffprobe emit UTF-8, including
+    # file paths, so a storage folder with non-ASCII characters (e.g. under
+    # a Turkish locale) raised UnicodeDecodeError here and 500'd every
+    # upload. errors="replace" so a still-unexpected byte degrades a log
+    # line instead of crashing the request.
+    return subprocess.run(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
+    )
 
 
 def run_ffmpeg(args: List[str]) -> None:
@@ -413,6 +463,12 @@ def patch_settings(body: SettingsUpdate):
 
         if body.storage_dir is not None:
             new_dir = Path(body.storage_dir)
+            # Reject rather than race the job worker: a mid-job move can
+            # PermissionError on Windows (open file handles) or split the
+            # session index across old/new dirs if the worker appends to a
+            # re-created index in the old location after the move.
+            if jobs.is_busy():
+                raise HTTPException(409, "Wait for processing to finish before moving the storage folder")
             try:
                 move_storage_dir(STORE, new_dir)
             except StorageMoveError as e:
@@ -498,11 +554,16 @@ def chat(session_id: str, body: ChatRequest):
 
     return StreamingResponse(token_stream(), media_type="text/plain")
 
-def _record_failed_session(store: Path, session: Path, error: str) -> None:
+def _record_failed_session(session: Path, error: str) -> None:
     """Best-effort: append a status:"failed" session record so a failed
     job's already-saved recording data (screen/system/mic webm, whatever got
     this far) stays visible and deletable in the UI instead of leaking as an
     invisible, un-indexed orphan directory forever (brief 08).
+
+    Indexes into the CURRENT global STORE (re-read here, not passed in from
+    the job's enqueue-time snapshot) so a storage-dir move that lands between
+    jobs can't split the index -- jobs.is_busy() blocks moves for the
+    duration of this job's own run, but not the moment before it starts.
     """
     try:
         created_at = datetime.now(timezone.utc).isoformat()
@@ -516,7 +577,7 @@ def _record_failed_session(store: Path, session: Path, error: str) -> None:
             "status": "failed",
             "error": error,
         }
-        append_session(store, record)
+        append_session(STORE, record)
     except Exception as append_err:
         log(f"failed to record failed session {session.name}: {append_err}")
 
@@ -528,6 +589,12 @@ def _run_process_job(job_id: str) -> None:
         return
 
     job = jobs.get_job(job_id)
+    # store here is the enqueue-time snapshot of where files were physically
+    # written -- correct for building paths to those already-saved files.
+    # Indexing (append_session/_record_failed_session below) re-reads the
+    # current global STORE instead, so it always targets wherever the index
+    # currently lives even if a move landed in the gap before this job
+    # started (jobs.is_busy() only blocks moves for this job's own duration).
     store = Path(inputs["store"])
     session = store / job["session_id"]
     screen_webm = Path(inputs["screen_webm"])
@@ -551,7 +618,7 @@ def _run_process_job(job_id: str) -> None:
                 "Couldn't combine your audio and video — the recording file may be "
                 "corrupted. Try recording again."
             )
-            _record_failed_session(store, session, error)
+            _record_failed_session(session, error)
             jobs.update_job(job_id, status="failed", error=error)
             return
 
@@ -651,7 +718,7 @@ def _run_process_job(job_id: str) -> None:
             "trashed_at": None,
             "status": "done",
         }
-        append_session(store, record)
+        append_session(STORE, record)
 
         jobs.update_job(job_id, status="done", notes=notes, video_path=str(final_path))
     except Exception as e:
@@ -665,7 +732,7 @@ def _run_process_job(job_id: str) -> None:
         # undeletable via DELETE /sessions/{id}.
         log(f"job {job_id} failed unexpectedly: {e}")
         error = f"Something went wrong while processing this recording: {e}"
-        _record_failed_session(store, session, error)
+        _record_failed_session(session, error)
         jobs.update_job(job_id, status="failed", error=error)
 
 
