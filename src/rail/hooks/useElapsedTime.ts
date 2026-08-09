@@ -7,13 +7,13 @@ function format(ms: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-export function useElapsedTime(status: "idle" | "recording" | "paused"): string {
+export function useElapsedTime(status: "idle" | "starting" | "recording" | "paused"): string {
   const [elapsedMs, setElapsedMs] = useState(0);
   const accumulatedRef = useRef(0);
   const resumedAtRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (status === "idle") {
+    if (status === "idle" || status === "starting") {
       accumulatedRef.current = 0;
       resumedAtRef.current = null;
       setElapsedMs(0);

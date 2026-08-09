@@ -21,7 +21,7 @@ declare global {
     | { state: "ready"; version: string }
     | { state: "error"; message: string };
 
-  type RailPlaybackStatus = "idle" | "recording" | "paused";
+  type RailPlaybackStatus = "idle" | "starting" | "recording" | "paused";
 
   type RailStatus = {
     status: RailPlaybackStatus;

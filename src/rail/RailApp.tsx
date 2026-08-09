@@ -53,6 +53,7 @@ export default function RailApp() {
 
     const isRecording = status === "recording";
     const isPaused = status === "paused";
+    const isStarting = status === "starting";
     const displayError = useMemo<ClassifiedError | null>(
         () => recordError ?? (processError ? { kind: "generic", message: processError } : null),
         [recordError, processError]
@@ -81,8 +82,15 @@ export default function RailApp() {
             if (status === "idle") {
                 setProcessError(null);
                 await record();
-        } else if (status === "recording" || status === "paused") {
+        } else if (status === "recording" || status === "paused" || status === "starting") {
                 const blobs = await stop();
+
+            // status === "starting" (or a recording that produced no
+            // segments) resolves stop() to an empty Combined -- nothing to
+            // upload, so skip the POST instead of sending an empty FormData.
+            if (!blobs.screen && !blobs.systemAudio && !blobs.micAudio) {
+                return;
+            }
 
             const formData = new FormData();
             if (blobs.screen) {
@@ -194,7 +202,7 @@ export default function RailApp() {
                 }
             >
                 <div className="[-webkit-app-region:no-drag]">
-                    <Record onClick={handleRecordClick} isRecording={isRecording} disabled={isProcessing}/>
+                    <Record onClick={handleRecordClick} isRecording={isRecording} isStarting={isStarting} disabled={isProcessing || isStarting}/>
                 </div>
 
                 <span

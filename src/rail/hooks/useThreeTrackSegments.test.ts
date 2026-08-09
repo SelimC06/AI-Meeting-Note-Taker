@@ -156,6 +156,53 @@ it("stop() calls stopAll and resets status to idle even if a recorder's stop() r
   expect(result.current.status).toBe("idle");
 });
 
+it("aborts a record() that's still resolving getSeparateCapture() if stop() lands first, without starting any recorder", async () => {
+  let resolveCapture!: (streams: {
+    screen: MediaStream;
+    stopAll: () => void;
+  }) => void;
+  const capturePromise = new Promise((resolve) => {
+    resolveCapture = resolve;
+  });
+  vi.mocked(getSeparateCapture).mockReturnValueOnce(capturePromise as ReturnType<typeof getSeparateCapture>);
+
+  const stopAll = vi.fn();
+  const acquiredScreen = new MediaStream();
+
+  const { result } = renderHook(() => useThreeTrackSegments());
+
+  // Click record: status flips to "starting" while getSeparateCapture()
+  // is still in flight.
+  let recordPromise!: Promise<void>;
+  act(() => {
+    recordPromise = result.current.record();
+  });
+  expect(result.current.status).toBe("starting");
+
+  // Click stop before the capture resolves -- this is the race: recRef
+  // is still null at this point, so stop() has nothing to clean up
+  // directly and must instead flag the abort for record() to finish.
+  let stopPromise!: ReturnType<typeof result.current.stop>;
+  act(() => {
+    stopPromise = result.current.stop();
+  });
+  await act(async () => {
+    await stopPromise;
+  });
+  expect(result.current.status).toBe("starting");
+  expect(stopAll).not.toHaveBeenCalled();
+
+  // Now let getSeparateCapture() resolve.
+  await act(async () => {
+    resolveCapture({ screen: acquiredScreen, stopAll });
+    await recordPromise;
+  });
+
+  expect(stopAll).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(getVideoRecorder)).not.toHaveBeenCalled();
+  expect(result.current.status).toBe("idle");
+});
+
 it("record() releases already-acquired streams if recorder setup fails afterward", async () => {
   const stopAll = vi.fn();
   vi.mocked(getSeparateCapture).mockResolvedValueOnce({

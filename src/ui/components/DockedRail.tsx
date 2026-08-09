@@ -126,6 +126,7 @@ export default function DockedRail() {
     const { status, elapsedLabel, level, recordError, isProcessing } = railStatus;
     const isRecording = status === "recording";
     const isPaused = status === "paused";
+    const isStarting = status === "starting";
 
     const sendCommand = (action: RailCommandAction) => {
         window.windowControls?.sendRailCommand?.(action);
@@ -240,7 +241,7 @@ export default function DockedRail() {
                     </div>
                 </div>
 
-                <Record onClick={() => sendCommand("toggleRecord")} isRecording={isRecording} disabled={isProcessing} />
+                <Record onClick={() => sendCommand("toggleRecord")} isRecording={isRecording} isStarting={isStarting} disabled={isProcessing || isStarting} />
 
                 <span
                     aria-label="Elapsed recording time"

@@ -39,9 +39,16 @@ function classifyRecordError(err: unknown): ClassifiedError {
 export function useThreeTrackSegments() {
   const micOnDataRef = useRef<((b: Blob) => void) | null>(null);
 
-  const [status, setStatus] = useState<"idle" | "recording" | "paused">("idle");
+  const [status, setStatus] = useState<"idle" | "starting" | "recording" | "paused">("idle");
   const [error, setError] = useState<ClassifiedError | null>(null);
   const [micStream, setMicStream] = useState<MediaStream | null>(null);
+
+  // Set by stop() when it's called while record() is still awaiting
+  // getSeparateCapture() (status === "starting", recRef/streamsRef not
+  // populated yet). record()'s continuation checks this once the capture
+  // resolves so it can release the just-acquired streams instead of
+  // starting an orphaned recording no button can reach.
+  const abortRequestedRef = useRef(false);
 
 
   const streamsRef = useRef<CaptureStreams | null>(null);
@@ -61,11 +68,24 @@ export function useThreeTrackSegments() {
   const record = async () => {
     if (status !== "idle") return;
     setError(null);
-    setStatus("recording");
+    abortRequestedRef.current = false;
+    setStatus("starting");
 
     try {
       // Get streams (Electron: screen+system+mic; Browser: screen+mic, no system)
       const streams = await getSeparateCapture();
+
+      if (abortRequestedRef.current) {
+        // A stop() arrived while we were still awaiting capture -- release
+        // the streams we just acquired and bail out before starting any
+        // recorders, so the OS capture indicator turns back off and no
+        // orphaned recording is left running.
+        abortRequestedRef.current = false;
+        streams.stopAll?.();
+        setStatus("idle");
+        return;
+      }
+
       streamsRef.current = streams;
       setMicStream(streams.mic ?? null);
 
@@ -88,6 +108,7 @@ export function useThreeTrackSegments() {
       screenRec?.start();
       systemRec?.start();
       micRec?.start();
+      setStatus("recording");
     } catch (e) {
       console.error("record() failed", e);
       // getSeparateCapture() may have already succeeded (streamsRef.current
@@ -95,6 +116,7 @@ export function useThreeTrackSegments() {
       // threw. Release those already-granted streams so the OS capture
       // indicator doesn't stay lit and a retry doesn't stack a second set
       // of live streams on top.
+      abortRequestedRef.current = false;
       streamsRef.current?.stopAll?.();
       streamsRef.current = null;
       recRef.current = null;
@@ -125,6 +147,14 @@ export function useThreeTrackSegments() {
   // ----- STOP -----
   const stop = async (): Promise<Combined> => {
     if (status === "idle") return {};
+
+    if (status === "starting") {
+      // getSeparateCapture() is still in flight -- recRef/streamsRef aren't
+      // populated yet, so there's nothing to stop here. Flag the abort for
+      // record()'s continuation to pick up once capture resolves.
+      abortRequestedRef.current = true;
+      return {};
+    }
 
     const s = recRef.current;
     const segs = segsRef.current;

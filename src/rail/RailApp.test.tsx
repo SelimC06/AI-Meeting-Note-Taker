@@ -178,6 +178,37 @@ it("shows a persistent tooltip when stop() itself rejects, instead of silently r
   expect(dot.className).not.toContain("bg-dim");
 });
 
+it("does not POST when stop() resolves with no captured segments (e.g. aborted while starting)", async () => {
+  const stop = vi.fn().mockResolvedValue({});
+  mockHook({ status: "recording", stop, error: null });
+
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { container } = render(<RailApp />);
+  const recordButton = container.querySelectorAll("button")[0];
+  fireEvent.click(recordButton);
+
+  await waitFor(() => {
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it("routes a click while status is 'starting' to stop() and disables the record button", () => {
+  const record = vi.fn().mockResolvedValue(undefined);
+  const stop = vi.fn().mockResolvedValue({});
+  mockHook({ status: "starting", record, stop, error: null });
+
+  const { container } = render(<RailApp />);
+  const recordButton = container.querySelectorAll("button")[0];
+  expect(recordButton).toBeDisabled();
+
+  fireEvent.click(recordButton);
+  expect(record).not.toHaveBeenCalled();
+  expect(stop).not.toHaveBeenCalled();
+});
+
 it("renders an ErrorToast with the display error and hides only the toast (not the red dot) on dismiss", async () => {
   const clearError = vi.fn();
   mockHook({ error: { kind: "permission-denied", message: "Screen or microphone access denied — check your OS privacy settings." }, clearError });

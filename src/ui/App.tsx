@@ -54,7 +54,8 @@ function App() {
     };
   }, []);
 
-  const railNeedsSidebar = (railStatus === "recording" || railStatus === "paused") && !isRailFloating;
+  const railNeedsSidebar =
+    (railStatus === "starting" || railStatus === "recording" || railStatus === "paused") && !isRailFloating;
 
   // If a recording starts right as the sidebar is collapsed, force it back
   // open rather than leaving the controls stranded.
