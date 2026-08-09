@@ -179,6 +179,20 @@ def test_chat_client_read_timeout_is_configurable_via_env(monkeypatch):
         importlib.reload(chat_module)
 
 
+def test_chat_client_falls_back_to_default_timeout_on_non_numeric_env(monkeypatch):
+    """Regression test: OLLAMA_TIMEOUT_SECONDS='garbage' used to crash the
+    whole backend at import time (float('garbage') raises uncaught) instead
+    of just falling back to the default.
+    """
+    monkeypatch.setenv("OLLAMA_TIMEOUT_SECONDS", "not-a-number")
+    try:
+        reloaded = importlib.reload(chat_module)
+        assert reloaded._client._client.timeout.read == 300.0
+    finally:
+        monkeypatch.delenv("OLLAMA_TIMEOUT_SECONDS", raising=False)
+        importlib.reload(chat_module)
+
+
 def test_assert_ollama_up_raises_when_health_client_times_out(monkeypatch):
     def raise_timeout():
         raise httpx.ReadTimeout("timed out")

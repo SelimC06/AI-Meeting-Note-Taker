@@ -154,6 +154,20 @@ def test_generation_client_read_timeout_is_configurable_via_env(monkeypatch):
         importlib.reload(llava_module)
 
 
+def test_generation_client_falls_back_to_default_timeout_on_non_numeric_env(monkeypatch):
+    """Regression test: OLLAMA_TIMEOUT_SECONDS='garbage' used to crash the
+    whole backend at import time (float('garbage') raises uncaught) instead
+    of just falling back to the default.
+    """
+    monkeypatch.setenv("OLLAMA_TIMEOUT_SECONDS", "not-a-number")
+    try:
+        reloaded = importlib.reload(llava_module)
+        assert reloaded._client._client.timeout.read == 300.0
+    finally:
+        monkeypatch.delenv("OLLAMA_TIMEOUT_SECONDS", raising=False)
+        importlib.reload(llava_module)
+
+
 def test_complete_propagates_read_timeout_from_generation_call(tmp_path, monkeypatch):
     """A wedged Ollama must surface as a prompt httpx.ReadTimeout from the
     generation call (rather than hanging indefinitely) so the caller

@@ -386,6 +386,10 @@ def test_process_reuses_existing_transcript_when_summarization_fails(client, mon
     job = wait_for_job(client, job_id)
     assert job["status"] == "done"
     assert "hello from existing transcript" in job["notes"]
+    # Without this, transcript-only notes are indistinguishable from a real
+    # AI summary that happened to just be the transcript -- the user has no
+    # way to tell the model never actually ran.
+    assert "AI summarization failed" in job["notes"]
 
 
 def test_process_survives_ollama_read_timeout_during_summarization(client, monkeypatch, tmp_path):
@@ -433,6 +437,10 @@ def test_process_survives_ollama_read_timeout_during_summarization(client, monke
     job = wait_for_job(client, job_id)
     assert job["status"] == "done"
     assert "hello from a transcript recorded before ollama wedged" in job["notes"]
+    # A timeout must say so explicitly (not just the generic failure wording)
+    # so the user understands why they're looking at a raw transcript instead
+    # of an actual summary.
+    assert "AI summarization timed out" in job["notes"]
 
     # The session itself must also be recorded, not just the in-memory job --
     # a timeout must not silently lose the recording.
@@ -1283,19 +1291,11 @@ def test_patch_settings_holds_save_lock_during_storage_move(client, tmp_path, mo
 
 
 def test_ollama_models_returns_installed_models(client: TestClient, monkeypatch):
-    import app.server as server_module
-
-    class FakeOllamaClient:
-        def __init__(self, host):
-            self.host = host
-
-        def list(self):
-            return {"models": [{"model": "llama3.1:8b"}, {"model": "llava:7b-v1.5-q4_K_M"}]}
-
-    class FakeOllamaModule:
-        Client = FakeOllamaClient
-
-    monkeypatch.setitem(__import__("sys").modules, "ollama", FakeOllamaModule())
+    monkeypatch.setattr(
+        server_module.ollama_health_client,
+        "list",
+        lambda: {"models": [{"model": "llama3.1:8b"}, {"model": "llava:7b-v1.5-q4_K_M"}]},
+    )
 
     resp = client.get("/ollama/models")
     assert resp.status_code == 200
@@ -1305,17 +1305,10 @@ def test_ollama_models_returns_installed_models(client: TestClient, monkeypatch)
 
 
 def test_ollama_models_reports_unreachable(client: TestClient, monkeypatch):
-    class FailingOllamaClient:
-        def __init__(self, host):
-            pass
+    def raise_connection_error():
+        raise ConnectionError("connection refused")
 
-        def list(self):
-            raise ConnectionError("connection refused")
-
-    class FailingOllamaModule:
-        Client = FailingOllamaClient
-
-    monkeypatch.setitem(__import__("sys").modules, "ollama", FailingOllamaModule())
+    monkeypatch.setattr(server_module.ollama_health_client, "list", raise_connection_error)
 
     resp = client.get("/ollama/models")
     assert resp.status_code == 200
@@ -1323,6 +1316,33 @@ def test_ollama_models_reports_unreachable(client: TestClient, monkeypatch):
     assert body["ok"] is False
     assert body["models"] == []
     assert "connection refused" in body["error"]
+
+
+def test_ollama_models_uses_the_shared_timeout_protected_health_client():
+    """Regression test: /ollama/models used to build a brand-new
+    ollama.Client(host=...) per request with no timeout at all, so a wedged
+    Ollama could hang this endpoint (and slowly drain the threadpool) exactly
+    like the /health and chat bugs this whole timeout effort fixed. It must
+    reuse chat.py's health client (which has a short, fixed timeout) instead
+    of constructing its own.
+    """
+    import app.chat as chat_module
+
+    assert server_module.ollama_health_client is chat_module._health_client
+
+
+def test_ollama_models_reports_read_timeout_without_hanging(client: TestClient, monkeypatch):
+    def raise_timeout():
+        raise httpx.ReadTimeout("timed out waiting for Ollama")
+
+    monkeypatch.setattr(server_module.ollama_health_client, "list", raise_timeout)
+
+    resp = client.get("/ollama/models")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["models"] == []
+    assert "timed out" in body["error"]
 
 
 def test_process_uses_configured_whisper_model_via_transcribe_helper(client, monkeypatch):

@@ -19,6 +19,8 @@ import uvicorn
 import re
 import zipfile
 
+import httpx
+
 from .sessions_store import (
     extract_title,
     load_sessions,
@@ -52,11 +54,12 @@ except Exception:
     llava_complete = None
 
 try:
-    from .chat import assert_ollama_up, stream_chat_reply, OLLAMA_BASE
+    from .chat import assert_ollama_up, stream_chat_reply, OLLAMA_BASE, _health_client as ollama_health_client
 except Exception:
     assert_ollama_up = None
     stream_chat_reply = None
     OLLAMA_BASE = "http://localhost:11434"
+    ollama_health_client = None
 
 app = FastAPI()
 
@@ -449,10 +452,14 @@ def _extract_ollama_model_names(list_response) -> List[str]:
 
 @app.get("/ollama/models")
 def ollama_models():
+    # Reuses chat.py's timeout-protected health client instead of building a
+    # fresh ollama.Client(...) per request -- that used to default to
+    # timeout=None, so a wedged Ollama could hang this request (and every
+    # thread handling one) forever, same as the /health and chat bugs.
+    if ollama_health_client is None:
+        return {"ok": False, "models": [], "error": "Ollama client unavailable on this server"}
     try:
-        import ollama as ollama_pkg
-        client = ollama_pkg.Client(host=OLLAMA_BASE)
-        resp = client.list()
+        resp = ollama_health_client.list()
         return {"ok": True, "models": _extract_ollama_model_names(resp), "error": None}
     except Exception as e:
         return {"ok": False, "models": [], "error": str(e)}
@@ -569,9 +576,23 @@ def _run_process_job(job_id: str) -> None:
             log(f"summarization failed, falling back to raw transcript: {e}")
             try:
                 transcript = Path(txt_path).read_text(encoding="utf-8")
+                # Without this, a timed-out (or otherwise failed) summary
+                # silently looks identical to a real AI summary that just
+                # happens to be the raw transcript -- the user has no way to
+                # tell the model never actually ran.
+                if isinstance(e, httpx.TimeoutException):
+                    explanation = (
+                        "_AI summarization timed out (the local model didn't "
+                        "respond in time) -- showing the raw transcript instead._\n\n"
+                    )
+                else:
+                    explanation = (
+                        "_AI summarization failed -- showing the raw transcript instead._\n\n"
+                    )
                 notes = (
                     "# Title: Zoom Meeting\n\n"
-                    "# Transcript (auto)\n"
+                    + explanation
+                    + "# Transcript (auto)\n"
                     + (transcript[:12000] or "(empty)")
                 )
             except Exception as read_err:

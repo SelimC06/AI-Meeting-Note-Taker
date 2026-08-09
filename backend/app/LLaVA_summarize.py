@@ -14,7 +14,16 @@ DEFAULT_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:7b-v1.5-q4_K_M")
 # checks get a short, fixed timeout; the generation call gets a generous,
 # configurable one (local vision models can take minutes to produce a first
 # token after a cold load).
-OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
+_DEFAULT_OLLAMA_TIMEOUT_SECONDS = 300.0
+try:
+    OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", _DEFAULT_OLLAMA_TIMEOUT_SECONDS))
+except ValueError:
+    print(
+        f"[LLaVA_summarize] ignoring non-numeric OLLAMA_TIMEOUT_SECONDS={os.environ['OLLAMA_TIMEOUT_SECONDS']!r}, "
+        f"using default {_DEFAULT_OLLAMA_TIMEOUT_SECONDS}s",
+        flush=True,
+    )
+    OLLAMA_TIMEOUT_SECONDS = _DEFAULT_OLLAMA_TIMEOUT_SECONDS
 _HEALTH_TIMEOUT = httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0)
 _GENERATION_TIMEOUT = httpx.Timeout(connect=5.0, read=OLLAMA_TIMEOUT_SECONDS, write=30.0, pool=30.0)
 
