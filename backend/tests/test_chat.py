@@ -1,3 +1,8 @@
+import importlib
+
+import httpx
+import pytest
+
 import app.chat as chat_module
 
 
@@ -121,7 +126,7 @@ def test_strip_title_preamble_no_op_on_plain_text():
 
 def test_assert_ollama_up_calls_client_list(monkeypatch):
     calls = []
-    monkeypatch.setattr(chat_module._client, "list", lambda: calls.append(True))
+    monkeypatch.setattr(chat_module._health_client, "list", lambda: calls.append(True))
     chat_module.assert_ollama_up()
     assert calls == [True]
 
@@ -146,3 +151,38 @@ def test_default_model_falls_back_to_gemma_when_env_unset(monkeypatch):
         assert reloaded.DEFAULT_MODEL == "gemma3:4b"
     finally:
         importlib.reload(chat_module)
+
+
+def test_health_client_uses_a_short_fixed_timeout_distinct_from_chat_client():
+    """A wedged Ollama must not be able to block /health forever -- the health
+    client gets its own short, fixed timeout, separate from the chat client's
+    generous one, so a slow-but-alive generation elsewhere never affects it.
+    """
+    health_timeout = chat_module._health_client._client.timeout
+    assert health_timeout.connect == 5.0
+    assert health_timeout.read == 5.0
+    assert chat_module._client._client.timeout is not health_timeout
+
+
+def test_chat_client_read_timeout_defaults_to_300_seconds():
+    assert chat_module._client._client.timeout.read == 300.0
+    assert chat_module._client._client.timeout.connect == 5.0
+
+
+def test_chat_client_read_timeout_is_configurable_via_env(monkeypatch):
+    monkeypatch.setenv("OLLAMA_TIMEOUT_SECONDS", "45")
+    reloaded = importlib.reload(chat_module)
+    try:
+        assert reloaded._client._client.timeout.read == 45.0
+    finally:
+        monkeypatch.delenv("OLLAMA_TIMEOUT_SECONDS", raising=False)
+        importlib.reload(chat_module)
+
+
+def test_assert_ollama_up_raises_when_health_client_times_out(monkeypatch):
+    def raise_timeout():
+        raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(chat_module._health_client, "list", raise_timeout)
+    with pytest.raises(httpx.ReadTimeout):
+        chat_module.assert_ollama_up()

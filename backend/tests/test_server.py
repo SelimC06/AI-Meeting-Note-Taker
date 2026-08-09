@@ -2,6 +2,7 @@ import io
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -320,6 +321,58 @@ def test_process_reuses_existing_transcript_when_summarization_fails(client, mon
     job = wait_for_job(client, job_id)
     assert job["status"] == "done"
     assert "hello from existing transcript" in job["notes"]
+
+
+def test_process_survives_ollama_read_timeout_during_summarization(client, monkeypatch, tmp_path):
+    """Regression test for brief 05: a wedged Ollama used to hang the
+    summarize step forever (no client timeout), stalling the serial job
+    worker and every recording queued behind it. With a timeout in place,
+    llava_complete raises httpx.ReadTimeout instead -- the job must still
+    finish (falling back to the raw transcript) rather than the session
+    being lost or the worker getting stuck.
+    """
+    import sys
+    import types
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    transcript_path = tmp_path / "transcript_.txt"
+    transcript_path.write_text("hello from a transcript recorded before ollama wedged", encoding="utf-8")
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        return str(transcript_path), []
+
+    def timing_out_llava_complete(**kwargs):
+        raise httpx.ReadTimeout("timed out waiting for Ollama")
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", timing_out_llava_complete)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+
+    job = wait_for_job(client, job_id)
+    assert job["status"] == "done"
+    assert "hello from a transcript recorded before ollama wedged" in job["notes"]
+
+    # The session itself must also be recorded, not just the in-memory job --
+    # a timeout must not silently lose the recording.
+    sessions = client.get("/sessions").json()
+    assert any("hello from a transcript recorded before ollama wedged" in s["notes"] for s in sessions)
 
 
 def test_process_survives_stop_recording_and_transcribe_failure(client, monkeypatch, capsys):
@@ -746,6 +799,28 @@ def test_healthz_alias_matches_health(client: TestClient):
     assert body["ok"] is True
     assert body["backend"] is True
     assert isinstance(body["ollama"], bool)
+
+
+def test_health_reports_ollama_down_on_read_timeout_instead_of_hanging(client, monkeypatch):
+    """Regression test for a wedged Ollama (model-load hang, OOM): with no
+    client timeout, assert_ollama_up() used to block the calling thread
+    forever, and since /health is polled repeatedly, that eventually
+    exhausts the whole threadpool. With a timeout in place it raises
+    httpx.ReadTimeout instead -- /health must turn that into ollama: False,
+    not let it propagate as a 500 or hang the request.
+    """
+
+    def raise_timeout():
+        raise httpx.ReadTimeout("timed out waiting for Ollama")
+
+    monkeypatch.setattr(server_module, "assert_ollama_up", raise_timeout)
+
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["backend"] is True
+    assert body["ollama"] is False
 
 
 def test_process_dedupes_frame_indices_for_small_frame_count(client, monkeypatch):

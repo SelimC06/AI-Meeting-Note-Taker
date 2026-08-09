@@ -1,3 +1,6 @@
+import importlib
+
+import httpx
 import pytest
 from PIL import Image
 
@@ -5,7 +8,7 @@ import app.LLaVA_summarize as llava_module
 
 
 def test_complete_returns_markdown_and_writes_out_path(tmp_path, monkeypatch):
-    monkeypatch.setattr(llava_module._client, "list", lambda: {"models": []})
+    monkeypatch.setattr(llava_module._health_client, "list", lambda: {"models": []})
 
     captured = {}
 
@@ -38,7 +41,7 @@ def test_complete_propagates_error_when_ollama_unreachable(tmp_path, monkeypatch
     def fake_list():
         raise ConnectionError("connection refused")
 
-    monkeypatch.setattr(llava_module._client, "list", fake_list)
+    monkeypatch.setattr(llava_module._health_client, "list", fake_list)
 
     transcript_path = tmp_path / "transcript.txt"
     transcript_path.write_text("hello", encoding="utf-8")
@@ -55,7 +58,7 @@ def test_complete_max_chars_does_not_currently_truncate_transcript(tmp_path, mon
     complete() is later changed to actually truncate, update this test to
     assert the truncation instead of the absence of it.
     """
-    monkeypatch.setattr(llava_module._client, "list", lambda: {"models": []})
+    monkeypatch.setattr(llava_module._health_client, "list", lambda: {"models": []})
 
     captured = {}
 
@@ -76,7 +79,7 @@ def test_complete_max_chars_does_not_currently_truncate_transcript(tmp_path, mon
 
 
 def test_complete_skips_unreadable_frame_and_keeps_valid_ones(tmp_path, monkeypatch):
-    monkeypatch.setattr(llava_module._client, "list", lambda: {"models": []})
+    monkeypatch.setattr(llava_module._health_client, "list", lambda: {"models": []})
 
     captured = {}
 
@@ -104,7 +107,7 @@ def test_complete_skips_unreadable_frame_and_keeps_valid_ones(tmp_path, monkeypa
 
 
 def test_complete_caps_images_at_max_images(tmp_path, monkeypatch):
-    monkeypatch.setattr(llava_module._client, "list", lambda: {"models": []})
+    monkeypatch.setattr(llava_module._health_client, "list", lambda: {"models": []})
 
     captured = {}
 
@@ -127,3 +130,44 @@ def test_complete_caps_images_at_max_images(tmp_path, monkeypatch):
 
     sent_images = captured["messages"][1].get("images", [])
     assert len(sent_images) == 2
+
+
+def test_health_client_uses_a_short_fixed_timeout_distinct_from_generation_client():
+    health_timeout = llava_module._health_client._client.timeout
+    assert health_timeout.connect == 5.0
+    assert health_timeout.read == 5.0
+    assert llava_module._client._client.timeout is not health_timeout
+
+
+def test_generation_client_read_timeout_defaults_to_300_seconds():
+    assert llava_module._client._client.timeout.read == 300.0
+    assert llava_module._client._client.timeout.connect == 5.0
+
+
+def test_generation_client_read_timeout_is_configurable_via_env(monkeypatch):
+    monkeypatch.setenv("OLLAMA_TIMEOUT_SECONDS", "45")
+    reloaded = importlib.reload(llava_module)
+    try:
+        assert reloaded._client._client.timeout.read == 45.0
+    finally:
+        monkeypatch.delenv("OLLAMA_TIMEOUT_SECONDS", raising=False)
+        importlib.reload(llava_module)
+
+
+def test_complete_propagates_read_timeout_from_generation_call(tmp_path, monkeypatch):
+    """A wedged Ollama must surface as a prompt httpx.ReadTimeout from the
+    generation call (rather than hanging indefinitely) so the caller
+    (server.py's job worker) can fall back to the raw transcript.
+    """
+    monkeypatch.setattr(llava_module._health_client, "list", lambda: {"models": []})
+
+    def timing_out_chat(model, messages, options, stream):
+        raise httpx.ReadTimeout("timed out waiting for Ollama")
+
+    monkeypatch.setattr(llava_module._client, "chat", timing_out_chat)
+
+    transcript_path = tmp_path / "transcript.txt"
+    transcript_path.write_text("hello", encoding="utf-8")
+
+    with pytest.raises(httpx.ReadTimeout):
+        llava_module.complete(raw_txt_path=str(transcript_path), frame_paths=[])

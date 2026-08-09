@@ -1,4 +1,5 @@
 from pathlib import Path
+import httpx
 import ollama
 import base64, io, os
 from PIL import Image
@@ -7,11 +8,24 @@ from typing import List
 OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://localhost:11434"
 DEFAULT_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:7b-v1.5-q4_K_M")
 
-_client = ollama.Client(host=OLLAMA_BASE)
+# ollama.Client defaults to timeout=None, which disables httpx's timeout
+# entirely -- a wedged Ollama then blocks the job worker's summarize step
+# forever, permanently stalling every recording queued behind it. Health
+# checks get a short, fixed timeout; the generation call gets a generous,
+# configurable one (local vision models can take minutes to produce a first
+# token after a cold load).
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
+_HEALTH_TIMEOUT = httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0)
+_GENERATION_TIMEOUT = httpx.Timeout(connect=5.0, read=OLLAMA_TIMEOUT_SECONDS, write=30.0, pool=30.0)
+
+_client = ollama.Client(host=OLLAMA_BASE, timeout=_GENERATION_TIMEOUT)
+# Separate instance from _client so the health check's short timeout can never
+# be affected by (or fight with) whatever timeout the generation call needs.
+_health_client = ollama.Client(host=OLLAMA_BASE, timeout=_HEALTH_TIMEOUT)
 
 def _assert_ollama_up():
     # Quick connectivity check; will raise if server isn’t up
-    _client.list()
+    _health_client.list()
 
 def _img_to_b64_resized(path: str, max_px: int = 640, jpeg_quality: int = 70) -> str:
     with Image.open(path) as im:

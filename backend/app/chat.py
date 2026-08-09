@@ -3,12 +3,28 @@ import os
 import re
 from typing import Iterator, List, Dict
 
+import httpx
 import ollama
 
 OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://localhost:11434"
 DEFAULT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "gemma3:4b")
 
-_client = ollama.Client(host=OLLAMA_BASE)
+# ollama.Client defaults to timeout=None, which disables httpx's timeout
+# entirely -- a wedged Ollama (model-load hang, OOM) then blocks whichever
+# thread called it forever. Health checks get a short, fixed timeout since
+# they're polled frequently (including by /health) and must fail fast rather
+# than exhausting the threadpool. Chat gets a generous, configurable one:
+# local models can legitimately take minutes to produce a first token after a
+# cold load, and streamed chunks each get their own read-timeout window, so a
+# slow-but-alive generation survives while a genuine stall is still caught.
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
+_HEALTH_TIMEOUT = httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0)
+_CHAT_TIMEOUT = httpx.Timeout(connect=5.0, read=OLLAMA_TIMEOUT_SECONDS, write=30.0, pool=30.0)
+
+_client = ollama.Client(host=OLLAMA_BASE, timeout=_CHAT_TIMEOUT)
+# Separate instance from _client so the health check's short timeout can never
+# be affected by (or fight with) whatever timeout a concurrent chat call needs.
+_health_client = ollama.Client(host=OLLAMA_BASE, timeout=_HEALTH_TIMEOUT)
 
 # How many characters (or until the first blank line, whichever comes first)
 # to buffer before deciding whether the response opens with a title-style
@@ -29,7 +45,7 @@ _TITLE_PREAMBLE_RE = re.compile(
 
 def assert_ollama_up() -> None:
     """Quick connectivity check; raises if the local Ollama server isn't up."""
-    _client.list()
+    _health_client.list()
 
 
 def _strip_heading(notes: str) -> str:
