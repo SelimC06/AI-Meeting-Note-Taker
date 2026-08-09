@@ -1,5 +1,6 @@
+import type { ComponentProps } from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import StatusLine from "./StatusLine";
 import { checkHealth, getSettings, type Settings } from "../api";
 
@@ -12,6 +13,18 @@ const settings: Settings = {
   whisper_model_choices: [],
 };
 
+function renderStatusLine(overrides: Partial<ComponentProps<typeof StatusLine>> = {}) {
+  return render(
+    <StatusLine
+      active={false}
+      showViewToggle={true}
+      view="active"
+      onViewChange={vi.fn()}
+      {...overrides}
+    />
+  );
+}
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -21,7 +34,7 @@ afterEach(() => {
 it("shows placeholders before any poll resolves", () => {
   vi.mocked(checkHealth).mockReturnValue(new Promise(() => {}));
   vi.mocked(getSettings).mockReturnValue(new Promise(() => {}));
-  render(<StatusLine active={false} />);
+  renderStatusLine();
   expect(screen.getByText(/checking/i)).toBeInTheDocument();
   expect(screen.getByText((content, element) => content.includes("cpu") && element?.textContent?.includes("--"))).toBeInTheDocument();
   expect(screen.getByText((content, element) => content.includes("mem") && element?.textContent?.includes("--"))).toBeInTheDocument();
@@ -39,19 +52,56 @@ it("shows backend running, cpu/mem, and model names once polled", async () => {
     }),
   });
 
-  render(<StatusLine active={true} />);
+  renderStatusLine({ active: true });
 
-  expect(await screen.findByText(/online/i)).toBeInTheDocument();
+  expect(await screen.findByText(/running/i)).toBeInTheDocument();
   expect(await screen.findByText((content, element) => content.includes("cpu") && element?.textContent?.includes("12%"))).toBeInTheDocument();
   expect(await screen.findByText((content, element) => content.includes("mem") && element?.textContent?.includes("48%"))).toBeInTheDocument();
   expect(await screen.findByText(/base\.en \/ llama3/)).toBeInTheDocument();
 });
 
-it("shows offline when checkHealth resolves false", async () => {
+it("shows stopped when checkHealth resolves false", async () => {
   vi.mocked(checkHealth).mockResolvedValue(false);
   vi.mocked(getSettings).mockResolvedValue(settings);
 
-  render(<StatusLine active={true} />);
+  renderStatusLine({ active: true });
 
-  expect(await screen.findByText(/offline/i)).toBeInTheDocument();
+  expect(await screen.findByText(/stopped/i)).toBeInTheDocument();
+});
+
+it("shows active/trash buttons and a divider when showViewToggle is true", () => {
+  vi.mocked(checkHealth).mockResolvedValue(true);
+  vi.mocked(getSettings).mockResolvedValue(settings);
+  renderStatusLine({ showViewToggle: true });
+
+  expect(screen.getByText("[active]")).toBeInTheDocument();
+  expect(screen.getByText("[trash]")).toBeInTheDocument();
+});
+
+it("hides the active/trash buttons when showViewToggle is false", () => {
+  vi.mocked(checkHealth).mockResolvedValue(true);
+  vi.mocked(getSettings).mockResolvedValue(settings);
+  renderStatusLine({ showViewToggle: false });
+
+  expect(screen.queryByText("[active]")).not.toBeInTheDocument();
+  expect(screen.queryByText("[trash]")).not.toBeInTheDocument();
+});
+
+it("highlights the currently selected view", () => {
+  vi.mocked(checkHealth).mockResolvedValue(true);
+  vi.mocked(getSettings).mockResolvedValue(settings);
+  renderStatusLine({ view: "trash" });
+
+  expect(screen.getByText("[trash]").className).toContain("bg-signal");
+  expect(screen.getByText("[active]").className).not.toContain("bg-signal");
+});
+
+it("calls onViewChange when a button is clicked", () => {
+  vi.mocked(checkHealth).mockResolvedValue(true);
+  vi.mocked(getSettings).mockResolvedValue(settings);
+  const onViewChange = vi.fn();
+  renderStatusLine({ onViewChange });
+
+  fireEvent.click(screen.getByText("[trash]"));
+  expect(onViewChange).toHaveBeenCalledWith("trash");
 });

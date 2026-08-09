@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-const HISTORY_LENGTH = 20;
+export const HISTORY_LENGTH = 20;
 const SAMPLE_INTERVAL_MS = 60;
 
 function silentHistory(): number[] {

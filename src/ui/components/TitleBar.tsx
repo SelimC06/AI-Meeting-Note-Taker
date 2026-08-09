@@ -1,5 +1,3 @@
-import { useState, useEffect } from "react";
-
 interface Props {
   onOpenSettings: () => void;
 }
@@ -14,8 +12,6 @@ export default function TitleBar({ onOpenSettings }: Props) {
       </div>
 
       <div className="flex items-center gap-1 pr-1 [-webkit-app-region:no-drag]">
-        <PillButton />
-
         <ToolButton label="Settings" onClick={onOpenSettings}>
           <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none">
             <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2" />
@@ -76,76 +72,6 @@ function ToolButton({
       }
     >
       {children}
-    </button>
-  );
-}
-
-function PillButton() {
-  const [on, setOn] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const init = async () => {
-      try {
-        const v = await window.windowControls?.getRailState?.();
-        if (!cancelled && typeof v === "boolean") {
-          setOn(v);
-        }
-      } catch (e) {
-        console.warn("[PillButton] getRailState (init) failed:", e);
-      }
-    };
-
-    init();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const handleClick = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const toggled = await window.windowControls?.toggleRail?.();
-
-      if (typeof toggled === "boolean") {
-        setOn(toggled);
-      } else {
-        const v = await window.windowControls?.getRailState?.();
-        if (typeof v === "boolean") {
-          setOn(v);
-        } else {
-          // Neither toggleRail() nor getRailState() returned a real
-          // answer (e.g. the preload bridge isn't ready yet, or we're
-          // running outside Electron). Leave the displayed state
-          // unchanged instead of optimistically flipping it -- nothing
-          // has actually toggled, so flipping here would show a state
-          // that doesn't match reality.
-          console.warn("[PillButton] toggleRail/getRailState unavailable; leaving state unchanged");
-        }
-      }
-    } catch (e) {
-      console.error("[PillButton] toggle/getRailState failed:", e);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <button
-      onClick={handleClick}
-      disabled={busy}
-      className={
-        "inline-flex items-center justify-center h-5 w-16 rounded-sm text-xs font-semibold " +
-        "focus:outline-none focus-visible:ring-2 focus-visible:ring-signal [-webkit-app-region:no-drag] " +
-        (on
-          ? "bg-signal text-void"
-          : "border border-line text-dim hover:text-phosphor")
-      }
-    >
-      {on ? "Stop" : "Start"}
     </button>
   );
 }

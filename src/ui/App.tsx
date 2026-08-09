@@ -15,6 +15,7 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarView, setSidebarView] = useState<"active" | "trash">("active");
   const { sessions, error: sessionsError, reload: reloadSessions } = useSessions(true, false);
   const health = useBackendHealth(true);
   const wasBackendUpRef = useRef(false);
@@ -25,15 +26,72 @@ function App() {
     wasBackendUpRef.current = health?.backend ?? false;
   }, [health?.backend, reloadSessions]);
 
+  // Mirrors the same rail-status subscription DockedRail.tsx uses, so the
+  // sidebar-collapse toggle can be gated below: the sidebar is the only
+  // place the docked rail's recording controls live, so collapsing it while
+  // recording is active would strand the user with no way to stop/pause.
+  const [railStatus, setRailStatus] = useState<RailPlaybackStatus>("idle");
+  useEffect(() => {
+    const unsubscribe = window.windowControls?.onRailStatus?.((s) => setRailStatus(s.status));
+    return unsubscribe;
+  }, []);
+
+  // Also mirrors DockedRail.tsx's floating subscription: once the rail is
+  // floating, the docked slot shows only a "[reattach rail]" button — full
+  // record/pause controls live in the floating window instead — so
+  // collapsing the sidebar can no longer strand anything, regardless of
+  // recording status.
+  const [isRailFloating, setIsRailFloating] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    window.windowControls?.getRailFloating?.()?.then((floating) => {
+      if (!cancelled) setIsRailFloating(!!floating);
+    });
+    const unsubscribe = window.windowControls?.onRailFloating?.((floating) => setIsRailFloating(floating));
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, []);
+
+  const railNeedsSidebar = (railStatus === "recording" || railStatus === "paused") && !isRailFloating;
+
+  // If a recording starts right as the sidebar is collapsed, force it back
+  // open rather than leaving the controls stranded.
+  useEffect(() => {
+    if (railNeedsSidebar) setSidebarCollapsed(false);
+  }, [railNeedsSidebar]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
         e.preventDefault();
+        if (railNeedsSidebar) return;
         setSidebarCollapsed((c) => !c);
       }
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [railNeedsSidebar]);
+
+  // On launch, main.js calls mainWindow.focus() once the window is ready to
+  // show (see 'ready-to-show' in main.js) — well after this component has
+  // already mounted. That's a real OS-level window-focus event, and since
+  // nothing has been clicked/tabbed to yet, Chromium's :focus-visible
+  // heuristic defaults to "visible" on whatever the first focusable element
+  // in the page happens to be (the title bar's Settings button), showing a
+  // focus ring nobody asked for. Blurring it on that first window-focus
+  // event clears the unwanted ring without touching focus-visible for any
+  // later, genuinely keyboard-driven focus (e.g. Alt-tabbing back into the
+  // app mid-session shouldn't strip focus from whatever the user was doing).
+  useEffect(() => {
+    const clearAutoFocusOnce = () => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== document.body) active.blur();
+      window.removeEventListener("focus", clearAutoFocusOnce);
+    };
+    window.addEventListener("focus", clearAutoFocusOnce);
+    return () => window.removeEventListener("focus", clearAutoFocusOnce);
   }, []);
 
   return (
@@ -46,7 +104,7 @@ function App() {
           <div className="flex-1 min-h-0 flex flex-row relative">
             <ErrorBoundary>
               <Sidebar
-                active
+                view={sidebarView}
                 collapsed={sidebarCollapsed}
                 sessions={sessions}
                 sessionsError={sessionsError}
@@ -59,7 +117,10 @@ function App() {
               <Chat sessions={sessions} sessionsError={sessionsError} selectedId={selectedId} />
             </ErrorBoundary>
             <button
-              onClick={() => setSidebarCollapsed((c) => !c)}
+              onClick={() => {
+                if (railNeedsSidebar) return;
+                setSidebarCollapsed((c) => !c);
+              }}
               aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
               title={`${sidebarCollapsed ? "Expand" : "Collapse"} sidebar (Ctrl+B)`}
               className={
@@ -71,7 +132,12 @@ function App() {
             </button>
           </div>
 
-          <StatusLine active />
+          <StatusLine
+            active
+            showViewToggle={!sidebarCollapsed}
+            view={sidebarView}
+            onViewChange={setSidebarView}
+          />
           <OllamaOnboardingGate active />
 
           {settingsOpen && <SettingsModal active onClose={() => setSettingsOpen(false)} />}

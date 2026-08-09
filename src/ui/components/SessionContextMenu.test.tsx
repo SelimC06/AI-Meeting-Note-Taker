@@ -50,7 +50,39 @@ it("active view: shows notes/export/rename/trash and calls callbacks", () => {
   expect(screen.queryByText("[restore]")).not.toBeInTheDocument();
 });
 
-it("trash view: delete forever requires confirmation before calling onDeleteForever", () => {
+it("trash view: shows restore, and delete forever requires confirmation before calling onDeleteForever", () => {
+  const onRestore = vi.fn();
+  const onDeleteForever = vi.fn();
+  render(
+    <SessionContextMenu
+      session={trashedSession}
+      view="trash"
+      x={10}
+      y={10}
+      onClose={() => {}}
+      onOpenNotes={() => {}}
+      onRename={() => {}}
+      onTrash={() => {}}
+      onRestore={onRestore}
+      onDeleteForever={onDeleteForever}
+    />
+  );
+
+  expect(screen.queryByText("[rename]")).not.toBeInTheDocument();
+  expect(screen.queryByText("[trash]")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByText("[restore]"));
+  expect(onRestore).toHaveBeenCalledWith(trashedSession);
+
+  fireEvent.click(screen.getByText("[delete forever]"));
+  expect(onDeleteForever).not.toHaveBeenCalled();
+  expect(screen.getByText("delete forever?")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByText("[confirm]"));
+  expect(onDeleteForever).toHaveBeenCalledWith(trashedSession);
+});
+
+it("trash view: delete-forever confirmation can be cancelled", () => {
   const onDeleteForever = vi.fn();
   render(
     <SessionContextMenu
@@ -67,13 +99,11 @@ it("trash view: delete forever requires confirmation before calling onDeleteFore
     />
   );
 
-  expect(screen.queryByText("[rename]")).not.toBeInTheDocument();
   fireEvent.click(screen.getByText("[delete forever]"));
-  expect(onDeleteForever).not.toHaveBeenCalled();
-  expect(screen.getByText("delete forever?")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("[cancel]"));
 
-  fireEvent.click(screen.getByText("[confirm]"));
-  expect(onDeleteForever).toHaveBeenCalledWith(trashedSession);
+  expect(onDeleteForever).not.toHaveBeenCalled();
+  expect(screen.getByText("[delete forever]")).toBeInTheDocument();
 });
 
 it("closes on outside click and on Escape", () => {

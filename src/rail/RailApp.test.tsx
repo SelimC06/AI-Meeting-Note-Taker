@@ -410,3 +410,86 @@ it("shows a count in the dot's tooltip when more than one job is processing", ()
 
   expect(dot).toHaveAttribute("title", "2 recordings processing");
 });
+
+it("pushes its recording status to windowControls whenever status/elapsed/level/error change", () => {
+  const pushRailStatus = vi.fn();
+  vi.stubGlobal("windowControls", { pushRailStatus, onRailCommand: vi.fn(() => () => {}) });
+  mockHook({ status: "recording" });
+
+  render(<RailApp />);
+
+  expect(pushRailStatus).toHaveBeenCalledWith(
+    expect.objectContaining({ status: "recording", recordError: null, isProcessing: false })
+  );
+});
+
+it("calls the record handler when a toggleRecord command arrives from the dashboard", () => {
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  vi.stubGlobal("windowControls", { pushRailStatus: vi.fn(), onRailCommand });
+  const record = vi.fn().mockResolvedValue(undefined);
+  mockHook({ status: "idle", record });
+
+  render(<RailApp />);
+  commandCallback?.("toggleRecord");
+
+  expect(record).toHaveBeenCalledTimes(1);
+});
+
+it("calls pause when a pause command arrives while recording", () => {
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  vi.stubGlobal("windowControls", { pushRailStatus: vi.fn(), onRailCommand });
+  const pause = vi.fn().mockResolvedValue(undefined);
+  mockHook({ status: "recording", pause });
+
+  render(<RailApp />);
+  commandCallback?.("pause");
+
+  expect(pause).toHaveBeenCalledTimes(1);
+});
+
+it("marks the whole pill as an OS-level drag handle, so the floating window can be repositioned or dragged back to the dock from almost anywhere on it", () => {
+  mockHook();
+  const { getByLabelText } = render(<RailApp />);
+  expect(getByLabelText("Elapsed recording time").parentElement?.className).toContain("[-webkit-app-region:drag]");
+});
+
+it("excludes the Record and Pause/Resume buttons from the drag region, so clicking them doesn't get intercepted as a window drag", () => {
+  mockHook();
+  const { getByLabelText } = render(<RailApp />);
+  expect(getByLabelText("Start recording").parentElement?.className).toContain("[-webkit-app-region:no-drag]");
+  expect(getByLabelText("Pause recording").parentElement?.className).toContain("[-webkit-app-region:no-drag]");
+});
+
+it("plays the pop-in animation class by default, switches to pop-out on a pop-out signal, and replays pop-in on the next reset", () => {
+  let popCallback: ((payload: { popped: boolean }) => void) | undefined;
+  const onRailPopState = vi.fn((cb: (payload: { popped: boolean }) => void) => {
+    popCallback = cb;
+    return () => {};
+  });
+  vi.stubGlobal("windowControls", { pushRailStatus: vi.fn(), onRailCommand: vi.fn(() => () => {}), onRailPopState });
+  mockHook({ status: "idle" });
+
+  const { getByRole } = render(<RailApp />);
+  // Re-queried after each signal rather than holding one reference: a
+  // "popped: false" reset remounts the pill (see floatGeneration in
+  // RailApp.tsx) so its CSS entrance animation replays, which means the
+  // DOM node itself changes identity on that transition.
+  expect(getByRole("timer").parentElement?.className).toContain("rail-pop-in");
+  expect(getByRole("timer").parentElement?.className).not.toContain("rail-pop-out");
+
+  act(() => popCallback?.({ popped: true }));
+  expect(getByRole("timer").parentElement?.className).toContain("rail-pop-out");
+  expect(getByRole("timer").parentElement?.className).not.toContain("rail-pop-in");
+
+  act(() => popCallback?.({ popped: false }));
+  expect(getByRole("timer").parentElement?.className).toContain("rail-pop-in");
+  expect(getByRole("timer").parentElement?.className).not.toContain("rail-pop-out");
+});

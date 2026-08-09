@@ -6,6 +6,8 @@ import Sidebar from "./Sidebar";
 import {
   getSessions,
   trashSession,
+  restoreSession,
+  deleteSessionForever,
   renameSession,
   listJobs,
   getJobStatus,
@@ -13,6 +15,9 @@ import {
 } from "../api";
 
 vi.mock("../api");
+vi.mock("./DockedRail", () => ({
+  default: () => <div data-testid="docked-rail" />,
+}));
 
 beforeEach(() => {
   vi.mocked(listJobs).mockResolvedValue([]);
@@ -30,7 +35,7 @@ const sessionB: Session = { ...sessionA, id: "b2", title: "Retro" };
 
 function renderSidebar(overrides: Partial<ComponentProps<typeof Sidebar>> = {}) {
   const props: ComponentProps<typeof Sidebar> = {
-    active: true,
+    view: "active",
     collapsed: false,
     sessions: [sessionA, sessionB],
     sessionsError: null,
@@ -47,6 +52,11 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   vi.useRealTimers();
+});
+
+it("renders the docked rail", () => {
+  renderSidebar();
+  expect(screen.getByTestId("docked-rail")).toBeInTheDocument();
 });
 
 it("lists sessions and calls onSelect when a row is clicked", () => {
@@ -73,11 +83,7 @@ it("right-click opens the context menu; trash calls trashSession and reloadSessi
   const props = renderSidebar();
 
   fireEvent.contextMenu(screen.getByText("Sprint Planning"));
-  // The sidebar's own [active]/[trash] view-toggle button also renders the
-  // literal text "[trash]", so once the context menu is open there are two
-  // matches. Document order places the toggle before the context menu, so
-  // the second match is the menu's action button.
-  fireEvent.click(screen.getAllByText("[trash]")[1]);
+  fireEvent.click(screen.getByText("[trash]"));
 
   await waitFor(() => expect(trashSession).toHaveBeenCalledWith("a1"));
   expect(props.reloadSessions).toHaveBeenCalled();
@@ -102,20 +108,6 @@ it("renders with zero width when collapsed", () => {
   const { container } = renderSidebar({ collapsed: true });
   const outer = container.firstElementChild;
   expect(outer?.className).toContain("w-0");
-});
-
-it("switching to the trash view fetches trashed sessions separately", async () => {
-  vi.mocked(getSessions).mockResolvedValue([
-    sessionA,
-    { ...sessionB, trashed_at: "2026-08-02T00:00:00Z" },
-  ]);
-  renderSidebar();
-
-  fireEvent.click(screen.getByText("[trash]"));
-
-  expect(await screen.findByText("Retro")).toBeInTheDocument();
-  expect(screen.queryByText("Sprint Planning")).not.toBeInTheDocument();
-  expect(getSessions).toHaveBeenCalledWith(true);
 });
 
 it("shows a processing row for an active job and reloads sessions once it finishes", async () => {
@@ -158,16 +150,57 @@ it("shows a processing row for an active job and reloads sessions once it finish
   expect(screen.queryByText(/processing/)).not.toBeInTheDocument();
 });
 
+it("fetches trashed sessions separately when view is trash", async () => {
+  vi.mocked(getSessions).mockResolvedValue([
+    sessionA,
+    { ...sessionB, trashed_at: "2026-08-02T00:00:00Z" },
+  ]);
+  renderSidebar({ view: "trash" });
+
+  expect(await screen.findByText("Retro")).toBeInTheDocument();
+  expect(screen.queryByText("Sprint Planning")).not.toBeInTheDocument();
+  expect(getSessions).toHaveBeenCalledWith(true);
+});
+
 it("trash-view rows are not clickable and carry no onSelect affordance", async () => {
   vi.mocked(getSessions).mockResolvedValue([
     { ...sessionA, trashed_at: "2026-08-02T00:00:00Z" },
   ]);
-  const props = renderSidebar();
+  const props = renderSidebar({ view: "trash" });
 
-  fireEvent.click(screen.getByText("[trash]"));
   const row = await screen.findByText("Sprint Planning");
-
   expect(row.closest("button")).toBeNull();
   fireEvent.click(row);
   expect(props.onSelect).not.toHaveBeenCalled();
+});
+
+it("right-click in trash view offers restore, which calls restoreSession and reloads both lists", async () => {
+  vi.mocked(getSessions).mockResolvedValue([
+    { ...sessionA, trashed_at: "2026-08-02T00:00:00Z" },
+  ]);
+  vi.mocked(restoreSession).mockResolvedValue({ ...sessionA, trashed_at: null });
+  const props = renderSidebar({ view: "trash" });
+
+  const row = await screen.findByText("Sprint Planning");
+  fireEvent.contextMenu(row);
+  fireEvent.click(screen.getByText("[restore]"));
+
+  await waitFor(() => expect(restoreSession).toHaveBeenCalledWith("a1"));
+  expect(props.reloadSessions).toHaveBeenCalled();
+});
+
+it("right-click in trash view offers delete forever, which requires confirmation", async () => {
+  vi.mocked(getSessions).mockResolvedValue([
+    { ...sessionA, trashed_at: "2026-08-02T00:00:00Z" },
+  ]);
+  vi.mocked(deleteSessionForever).mockResolvedValue(undefined);
+  renderSidebar({ view: "trash" });
+
+  const row = await screen.findByText("Sprint Planning");
+  fireEvent.contextMenu(row);
+  fireEvent.click(screen.getByText("[delete forever]"));
+  expect(deleteSessionForever).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByText("[confirm]"));
+  await waitFor(() => expect(deleteSessionForever).toHaveBeenCalledWith("a1"));
 });

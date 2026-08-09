@@ -7,6 +7,7 @@ import ErrorToast from "./components/ErrorToast";
 import { useThreeTrackSegments, type ClassifiedError } from './hooks/useThreeTrackSegments';
 import { useElapsedTime } from './hooks/useElapsedTime';
 import { useMicLevel } from './hooks/useMicLevel';
+import { useAnimationReplayKey } from './hooks/useAnimationReplayKey';
 import { startProcessing } from "../ui/api";
 import { useProcessingJobs } from "../ui/hooks/useProcessingJobs";
 
@@ -136,10 +137,65 @@ export default function RailApp() {
         setToastDismissed(true);
     }, []);
 
+    useEffect(() => {
+        window.windowControls?.pushRailStatus?.({
+            status,
+            elapsedLabel: elapsed,
+            level: levels,
+            recordError: displayError?.message ?? null,
+            isProcessing,
+        });
+    }, [status, elapsed, levels, displayError, isProcessing]);
+
+    const commandHandlersRef = useRef({ handleRecordClick, handlePauseClick, handlePlayClick });
+    commandHandlersRef.current = { handleRecordClick, handlePauseClick, handlePlayClick };
+
+    useEffect(() => {
+        const unsubscribe = window.windowControls?.onRailCommand?.((action) => {
+            if (action === "toggleRecord") commandHandlersRef.current.handleRecordClick();
+            else if (action === "pause") commandHandlersRef.current.handlePauseClick();
+            else if (action === "resume") commandHandlersRef.current.handlePlayClick();
+        });
+        return unsubscribe;
+    }, []);
+
+    // "Popped" plays the .rail-pop-out CSS animation (src/theme.css) — how
+    // the floating rail signals it's about to be hidden, whether that's a
+    // click-to-reattach or a drag released near the dock slot (main.js's
+    // popRailBackToDock drives both the same way) — driven by main.js via
+    // 'rail:popState' so the visible animation and the actual
+    // hide/floatingChanged timing stay in sync. The renderer isn't reloaded
+    // between hide/show, so this must also be reset explicitly
+    // (popped: false) the next time the rail floats again (see main.js's
+    // rail:beginFloatDrag), or it would silently stay faded out.
+    //
+    // That same "popped: false" reset doubles as the entrance cue: bumping
+    // floatGeneration remounts the pill's DOM node, so .rail-pop-in replays
+    // fresh every time a drag detaches the rail, instead of it just
+    // snapping into view at full opacity.
+    const [popped, setPopped] = useState(false);
+    const [floatGeneration, bumpFloatGeneration] = useAnimationReplayKey();
+    useEffect(() => {
+        const unsubscribe = window.windowControls?.onRailPopState?.((payload) => {
+            const nextPopped = !!payload?.popped;
+            setPopped(nextPopped);
+            if (!nextPopped) bumpFloatGeneration();
+        });
+        return unsubscribe;
+    }, [bumpFloatGeneration]);
+
     return (
         <div className="flex h-full w-full flex-col items-center gap-2">
-            <div className="flex h-10 w-full flex-none items-center gap-3 rounded-full border border-signal/40 bg-void px-3 select-none">
-                <Record onClick={handleRecordClick} isRecording={isRecording} disabled={isProcessing}/>
+            <div
+                key={floatGeneration}
+                className={
+                    "flex h-10 w-full flex-none items-center gap-3 rounded-full border border-signal/40 bg-void px-3 select-none [-webkit-app-region:drag] " +
+                    (popped ? "rail-pop-out" : "rail-pop-in")
+                }
+            >
+                <div className="[-webkit-app-region:no-drag]">
+                    <Record onClick={handleRecordClick} isRecording={isRecording} disabled={isProcessing}/>
+                </div>
 
                 <span
                     aria-label="Elapsed recording time"
@@ -151,11 +207,13 @@ export default function RailApp() {
 
                 <div className="h-4 w-px flex-none bg-line" />
 
-                <PauseResume
-                    status={isPaused ? "paused" : "recording"}
-                    onClick={isPaused ? handlePlayClick : handlePauseClick}
-                    disabled={!isRecording && !isPaused}
-                />
+                <div className="[-webkit-app-region:no-drag]">
+                    <PauseResume
+                        status={isPaused ? "paused" : "recording"}
+                        onClick={isPaused ? handlePlayClick : handlePauseClick}
+                        disabled={!isRecording && !isPaused}
+                    />
+                </div>
 
                 <span
                     title={isProcessing ? "Uploading recording…" : displayError?.message ?? jobStatusTitle}

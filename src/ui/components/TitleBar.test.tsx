@@ -7,35 +7,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("does not flip the pill's displayed state when neither toggleRail nor getRailState returns a boolean", async () => {
-  vi.stubGlobal("windowControls", {
-    minimize: vi.fn(),
-    close: vi.fn(),
-    getVersion: vi.fn().mockResolvedValue("1.0.0"),
-    // Neither bridge method resolves to a boolean -- simulates the
-    // preload bridge not being ready yet.
-    toggleRail: vi.fn().mockResolvedValue(undefined),
-    getRailState: vi.fn().mockResolvedValue(undefined),
-  });
-
-  render(<TitleBar onOpenSettings={() => {}} />);
-
-  const pill = await screen.findByRole("button", { name: "Start" });
-  fireEvent.click(pill);
-
-  // handleClick resolves asynchronously; wait a tick for it to finish.
-  await new Promise((r) => setTimeout(r, 0));
-
-  expect(screen.getByRole("button", { name: "Start" })).toBeInTheDocument();
-});
-
 it("calls onOpenSettings when the gear icon is clicked", () => {
   vi.stubGlobal("windowControls", {
     minimize: vi.fn(),
     close: vi.fn(),
     getVersion: vi.fn().mockResolvedValue("1.0.0"),
-    toggleRail: vi.fn(),
-    getRailState: vi.fn().mockResolvedValue(false),
   });
   const onOpenSettings = vi.fn();
   render(<TitleBar onOpenSettings={onOpenSettings} />);

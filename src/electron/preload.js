@@ -3,9 +3,39 @@ const { contextBridge, ipcRenderer} = require('electron');
 contextBridge.exposeInMainWorld('windowControls', {
   minimize: () => ipcRenderer.invoke('win:minimize'),
   close: () => ipcRenderer.invoke('app:quit'),
-  toggleRail: () => ipcRenderer.invoke('rail:toggle'),
 
-  getRailState: () => ipcRenderer.invoke('rail:getState'),
+  sendRailCommand: (action) => ipcRenderer.invoke('rail:command', action),
+  onRailCommand: (callback) => {
+    const listener = (_event, action) => callback(action);
+    ipcRenderer.on('rail:command', listener);
+    return () => ipcRenderer.removeListener('rail:command', listener);
+  },
+
+  pushRailStatus: (status) => ipcRenderer.invoke('rail:pushStatus', status),
+  onRailStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('rail:status', listener);
+    return () => ipcRenderer.removeListener('rail:status', listener);
+  },
+
+  beginRailFloatDrag: (slotRect) => ipcRenderer.invoke('rail:beginFloatDrag', slotRect),
+  railFloatDragMove: () => ipcRenderer.send('rail:dragMove'),
+  endRailFloatDrag: () => ipcRenderer.invoke('rail:endFloatDrag'),
+  updateDockSlotRect: (slotRect) => ipcRenderer.send('rail:updateDockSlotRect', slotRect),
+  getRailFloating: () => ipcRenderer.invoke('rail:getFloating'),
+  onRailFloating: (callback) => {
+    const listener = (_event, floating) => callback(floating);
+    ipcRenderer.on('rail:floatingChanged', listener);
+    return () => ipcRenderer.removeListener('rail:floatingChanged', listener);
+  },
+
+  reattachRail: () => ipcRenderer.invoke('rail:reattach'),
+  onRailPopState: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('rail:popState', listener);
+    return () => ipcRenderer.removeListener('rail:popState', listener);
+  },
+
   getVersion: async () => {
     try {
       return await ipcRenderer.invoke('app:getVersion');

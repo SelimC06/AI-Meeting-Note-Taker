@@ -11,12 +11,13 @@ import { useSessions } from "../hooks/useSessions";
 import { useProcessingJobs } from "../hooks/useProcessingJobs";
 import SessionContextMenu from "./SessionContextMenu";
 import NotesModal from "./NotesModal";
+import DockedRail from "./DockedRail";
 import { formatRelativeTime } from "../utils/formatRelativeTime";
 
 type View = "active" | "trash";
 
 interface Props {
-  active: boolean;
+  view: View;
   collapsed: boolean;
   sessions: Session[] | null;
   sessionsError: string | null;
@@ -26,7 +27,7 @@ interface Props {
 }
 
 const Sidebar: React.FC<Props> = ({
-  active,
+  view,
   collapsed,
   sessions,
   sessionsError,
@@ -34,7 +35,6 @@ const Sidebar: React.FC<Props> = ({
   selectedId,
   onSelect,
 }) => {
-  const [view, setView] = useState<View>("active");
   const [query, setQuery] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -43,7 +43,7 @@ const Sidebar: React.FC<Props> = ({
   const [notesSession, setNotesSession] = useState<Session | null>(null);
   const undoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const trashList = useSessions(active && view === "trash", true);
+  const trashList = useSessions(view === "trash", true);
 
   const { jobs } = useProcessingJobs();
   const activeJobs = jobs.filter((j) => j.status === "queued" || j.status === "running");
@@ -64,13 +64,10 @@ const Sidebar: React.FC<Props> = ({
     };
   }, []);
 
-  const list = view === "trash" ? trashList.sessions : sessions;
-  const listError = view === "trash" ? trashList.error : sessionsError;
-  const filtered =
-    list?.filter((s) => s.title.toLowerCase().includes(query.trim().toLowerCase())) ?? null;
-
-  const switchView = (next: View) => {
-    setView(next);
+  // Clears any per-view UI state left over from the other view (an open
+  // context menu, a pending undo toast, an in-progress rename) whenever the
+  // status line's active/trash buttons switch which list is shown.
+  useEffect(() => {
     setQuery("");
     setContextMenu(null);
     setUndoToast(null);
@@ -78,7 +75,12 @@ const Sidebar: React.FC<Props> = ({
       clearTimeout(undoTimeoutRef.current);
       undoTimeoutRef.current = null;
     }
-  };
+  }, [view]);
+
+  const list = view === "trash" ? trashList.sessions : sessions;
+  const listError = view === "trash" ? trashList.error : sessionsError;
+  const filtered =
+    list?.filter((s) => s.title.toLowerCase().includes(query.trim().toLowerCase())) ?? null;
 
   const handleTrash = async (s: Session) => {
     setContextMenu(null);
@@ -160,132 +162,112 @@ const Sidebar: React.FC<Props> = ({
         }
       >
         <div className="w-56 h-full flex flex-col border-r border-line bg-panel text-phosphor [-webkit-app-region:no-drag]">
-      <div className="p-2 flex flex-col gap-2 border-b border-line">
-        <div className="flex gap-1">
-          <button
-            onClick={() => switchView("active")}
-            className={
-              "flex-1 px-1.5 py-1 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
-              (view === "active" ? "bg-signal text-void" : "text-dim hover:text-phosphor border border-line")
-            }
-          >
-            [active]
-          </button>
-          <button
-            onClick={() => switchView("trash")}
-            className={
-              "flex-1 px-1.5 py-1 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
-              (view === "trash" ? "bg-signal text-void" : "text-dim hover:text-phosphor border border-line")
-            }
-          >
-            [trash]
-          </button>
-        </div>
-        <input
-          type="text"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="search meetings..."
-          aria-label="Search meetings"
-          className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor placeholder:text-dim focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-        />
-      </div>
-
-      {undoToast && (
-        <div className="flex items-center justify-between px-2 py-1.5 text-xs bg-void border-b border-signal">
-          <span className="truncate">trashed "{undoToast.title}"</span>
-          <button
-            onClick={() => handleUndo(undoToast.id)}
-            className="text-signal hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-signal shrink-0 ml-1"
-          >
-            [undo]
-          </button>
-        </div>
-      )}
-
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        {view === "active" && query.trim() === "" && activeJobs.length > 0 && (
-          <ul className="divide-y divide-line border-b border-line">
-            {activeJobs.map((j) => (
-              <li key={`job-${j.id}`} className="px-2 py-2 text-xs text-dim flex items-center gap-1.5">
-                <span className="h-1.5 w-1.5 rounded-full bg-signal cursor-blink shrink-0" aria-hidden="true" />
-                <span className="truncate">processing{j.stage ? ` — ${j.stage}` : "…"}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-
-        {listError && <div className="p-3 text-xs text-red-400">failed to load: {listError}</div>}
-
-        {!listError && list === null && (
-          <div className="p-3 text-xs text-dim">
-            loading<span className="cursor-blink">▌</span>
+          <div className="p-2 border-b border-line flex flex-col gap-2">
+            <DockedRail />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="search meetings..."
+              aria-label="Search meetings"
+              className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor placeholder:text-dim focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+            />
           </div>
-        )}
 
-        {!listError && list !== null && list.length === 0 && (
-          <div className="p-3 text-xs text-dim">
-            {view === "trash" ? "trash is empty" : "no meetings recorded yet"}
+          {undoToast && (
+            <div className="flex items-center justify-between px-2 py-1.5 text-xs bg-void border-b border-signal">
+              <span className="truncate">trashed "{undoToast.title}"</span>
+              <button
+                onClick={() => handleUndo(undoToast.id)}
+                className="text-signal hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-signal shrink-0 ml-1"
+              >
+                [undo]
+              </button>
+            </div>
+          )}
+
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {view === "active" && query.trim() === "" && activeJobs.length > 0 && (
+              <ul className="divide-y divide-line border-b border-line">
+                {activeJobs.map((j) => (
+                  <li key={`job-${j.id}`} className="px-2 py-2 text-xs text-dim flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-signal cursor-blink shrink-0" aria-hidden="true" />
+                    <span className="truncate">processing{j.stage ? ` — ${j.stage}` : "…"}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {listError && <div className="p-3 text-xs text-red-400">failed to load: {listError}</div>}
+
+            {!listError && list === null && (
+              <div className="p-3 text-xs text-dim">
+                loading<span className="cursor-blink">▌</span>
+              </div>
+            )}
+
+            {!listError && list !== null && list.length === 0 && (
+              <div className="p-3 text-xs text-dim">
+                {view === "trash" ? "trash is empty" : "no meetings recorded yet"}
+              </div>
+            )}
+
+            {!listError && hasList && filtered !== null && filtered.length === 0 && (
+              <div className="p-3 text-xs text-dim">{`no matches for "${query}"`}</div>
+            )}
+
+            {!listError && filtered !== null && filtered.length > 0 && (
+              <ul className="divide-y divide-line">
+                {filtered.map((s) => (
+                  <li key={s.id}>
+                    {renamingId === s.id ? (
+                      <input
+                        autoFocus
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onBlur={() => commitRename(s.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") commitRename(s.id);
+                          if (e.key === "Escape") setRenamingId(null);
+                        }}
+                        className="w-full bg-void border border-signal rounded-sm px-2 py-2 text-xs text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                      />
+                    ) : view === "active" ? (
+                      <button
+                        onClick={() => onSelect(s.id)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setContextMenu({ session: s, x: e.clientX, y: e.clientY });
+                        }}
+                        title={s.title}
+                        className={
+                          "w-full text-left text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
+                          (selectedId === s.id
+                            ? "bg-line border-l-2 border-signal pl-[6px] pr-2 py-2"
+                            : "px-2 py-2 hover:bg-line")
+                        }
+                      >
+                        <div className="truncate">{s.title}</div>
+                        <div className="text-dim">{formatRelativeTime(s.created_at)}</div>
+                      </button>
+                    ) : (
+                      <div
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setContextMenu({ session: s, x: e.clientX, y: e.clientY });
+                        }}
+                        title={s.title}
+                        className="w-full text-left px-2 py-2 text-xs"
+                      >
+                        <div className="truncate">{s.title}</div>
+                        <div className="text-dim">{formatRelativeTime(s.trashed_at ?? s.created_at)}</div>
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
-        )}
-
-        {!listError && hasList && filtered !== null && filtered.length === 0 && (
-          <div className="p-3 text-xs text-dim">{`no matches for "${query}"`}</div>
-        )}
-
-        {!listError && filtered !== null && filtered.length > 0 && (
-          <ul className="divide-y divide-line">
-            {filtered.map((s) => (
-              <li key={s.id}>
-                {renamingId === s.id ? (
-                  <input
-                    autoFocus
-                    value={renameValue}
-                    onChange={(e) => setRenameValue(e.target.value)}
-                    onBlur={() => commitRename(s.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") commitRename(s.id);
-                      if (e.key === "Escape") setRenamingId(null);
-                    }}
-                    className="w-full bg-void border border-signal rounded-sm px-2 py-2 text-xs text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-                  />
-                ) : view === "active" ? (
-                  <button
-                    onClick={() => onSelect(s.id)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setContextMenu({ session: s, x: e.clientX, y: e.clientY });
-                    }}
-                    title={s.title}
-                    className={
-                      "w-full text-left text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
-                      (selectedId === s.id
-                        ? "bg-line border-l-2 border-signal pl-[6px] pr-2 py-2"
-                        : "px-2 py-2 hover:bg-line")
-                    }
-                  >
-                    <div className="truncate">{s.title}</div>
-                    <div className="text-dim">{formatRelativeTime(s.created_at)}</div>
-                  </button>
-                ) : (
-                  <div
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setContextMenu({ session: s, x: e.clientX, y: e.clientY });
-                    }}
-                    title={s.title}
-                    className="w-full text-left px-2 py-2 text-xs"
-                  >
-                    <div className="truncate">{s.title}</div>
-                    <div className="text-dim">{formatRelativeTime(s.trashed_at ?? s.created_at)}</div>
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
         </div>
       </div>
 
