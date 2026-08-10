@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -60,6 +61,17 @@ def load_or_init(path: Path, default_storage_dir: Path) -> Dict[str, Any]:
     defaults = default_settings(default_storage_dir)
     existing = _read_json_dict(path)
     if existing is None:
+        if path.exists():
+            # Unparseable, not missing: the old file may hold the user's
+            # real storage_dir -- move it aside (same pattern as
+            # sessions_store._preserve_corrupt_index) instead of destroying
+            # the only clue to where their recordings actually live.
+            try:
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                preserved = path.with_name(f"{path.stem}.corrupt-{timestamp}{path.suffix}")
+                path.replace(preserved)
+            except OSError:
+                pass
         _write_json_dict(path, defaults)
         return defaults
     return {**defaults, **existing}

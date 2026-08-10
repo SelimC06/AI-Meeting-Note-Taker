@@ -33,6 +33,7 @@ from .sessions_store import (
     update_session_fields,
     remove_session_permanently,
     purge_expired_trash,
+    rewrite_index_paths,
     sweep_orphaned_sessions,
     sweep_stale_staging_dirs,
     compute_storage_usage,
@@ -233,7 +234,10 @@ def _sweep_stale_export_zips(max_age_seconds: int = 3600) -> None:
 _settings = load_settings(SETTINGS_PATH, ROOT / "uploads")
 STORE = Path(_settings["storage_dir"])
 STORE.mkdir(parents=True, exist_ok=True)
-purge_expired_trash(STORE)
+try:
+    purge_expired_trash(STORE)
+except Exception as e:
+    print(f"[server] startup trash purge failed (continuing): {e}", flush=True)
 sweep_orphaned_sessions(STORE)
 # Independent of the sessions index entirely -- runs regardless of whether
 # the sweep above skipped due to a corrupt index.
@@ -248,6 +252,14 @@ OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
 # blocks moves while a job already exists -- it says nothing about a
 # request that arrives before one does).
 move_in_progress = False
+
+# Guards move_in_progress AND _active_uploads together: /process's
+# "no move running -> count me as an active upload" and patch_settings'
+# "no active uploads -> start the move" must each be atomic, or an upload
+# and a move can slip past each other's checks (the old single top-of-
+# request bool check left the entire minutes-long upload window open).
+_store_state_lock = threading.Lock()
+_active_uploads = 0
 
 def log(msg: str) -> None:
     print(f"[server] {msg}", flush=True)
@@ -560,20 +572,40 @@ def patch_settings(body: SettingsUpdate):
                 raise HTTPException(409, "Wait for processing to finish before moving the storage folder")
             # jobs.is_busy() only blocks moves while a job is queued/running --
             # it says nothing about a fresh POST /process arriving DURING the
-            # move itself (no job exists yet at that point). move_in_progress
-            # closes that TOCTOU: /process below rejects with 503 while set,
-            # instead of writing uploads into the old dir mid-move (a partial
-            # move, or a session indexed with paths that no longer exist).
-            move_in_progress = True
+            # move itself (no job exists yet at that point), nor about an
+            # upload already streaming in when the move starts. Both are
+            # closed by _store_state_lock / _active_uploads below and
+            # move_in_progress, which /process checks before registering
+            # itself as an active upload.
+            with _store_state_lock:
+                if _active_uploads > 0:
+                    raise HTTPException(409, "Wait for the current upload to finish before moving the storage folder")
+                move_in_progress = True
+            old_store_dir = STORE
             try:
                 move_storage_dir(STORE, new_dir)
             except StorageMoveError as e:
                 raise HTTPException(400, str(e))
             finally:
                 move_in_progress = False
+            # The files live in new_dir from this point no matter what happens
+            # below -- flip the live global FIRST so a failed settings.json
+            # write can't leave the server reading the old, emptied directory.
+            STORE = Path(new_dir)
+            STORE.mkdir(parents=True, exist_ok=True)
+            rewrite_index_paths(STORE, old_store_dir, STORE)
             updates["storage_dir"] = str(new_dir)
 
-        settings = save_settings(SETTINGS_PATH, updates, ROOT / "uploads")
+        try:
+            settings = save_settings(SETTINGS_PATH, updates, ROOT / "uploads")
+        except OSError as e:
+            raise HTTPException(
+                500,
+                f"Recordings were moved to {updates['storage_dir']}, but saving "
+                f"settings.json failed: {e}. The app is using the new folder for now; "
+                "fix the settings file (or free disk space) and save settings again -- "
+                "otherwise the app will look in the old folder after a restart.",
+            )
 
         STORE = Path(settings["storage_dir"])
         STORE.mkdir(parents=True, exist_ok=True)
@@ -867,75 +899,85 @@ def process(
     duration of an upload. FastAPI runs plain-def endpoints in its
     threadpool automatically, which fixes that without any other change.
     """
-    # Checked before touching STORE at all: a move in progress means STORE
-    # is about to (or has just started to) point somewhere new while files
-    # are still being relocated -- writing an upload into the old dir right
-    # now risks a partial move or a session indexed with paths that no
-    # longer exist once the move finishes.
-    if move_in_progress:
-        raise HTTPException(503, "Storage folder is being moved -- try again in a moment")
+    # Checked-and-registered atomically under _store_state_lock: a move in
+    # progress means STORE is about to (or has just started to) point
+    # somewhere new while files are still being relocated -- writing an
+    # upload into the old dir right now risks a partial move or a session
+    # indexed with paths that no longer exist once the move finishes.
+    # Registering as an active upload here (not just checking the flag) is
+    # what closes the TOCTOU against patch_settings: a move can no longer
+    # start once this request holds _active_uploads > 0, even though the
+    # upload itself takes minutes and this check is instantaneous.
+    global _active_uploads
+    with _store_state_lock:
+        if move_in_progress:
+            raise HTTPException(503, "Storage folder is being moved -- try again in a moment")
+        _active_uploads += 1
+    try:
+        # Bind STORE (and WHISPER_MODEL below) to locals once, at the top, so
+        # this request sees one consistent snapshot of settings -- a PATCH
+        # /settings changing storage_dir mid-request shouldn't split where the
+        # video files land from where the session index entry gets appended.
+        store = STORE
+        whisper_model = WHISPER_MODEL
 
-    # Bind STORE (and WHISPER_MODEL below) to locals once, at the top, so
-    # this request sees one consistent snapshot of settings -- a PATCH
-    # /settings changing storage_dir mid-request shouldn't split where the
-    # video files land from where the session index entry gets appended.
-    store = STORE
-    whisper_model = WHISPER_MODEL
+        # Validate the screen upload fully before creating the permanent session
+        # directory: staged in a scratch temp dir first (on the same filesystem
+        # as `store`, so the move below is a cheap rename, not a multi-GB copy)
+        # so a rejected upload (missing/invalid video) never leaves a
+        # mkdir'd-but-otherwise-empty session folder behind (brief 08). The temp
+        # dir is removed on the way out either way, success or rejection.
+        with tempfile.TemporaryDirectory(prefix=STAGING_DIR_PREFIX, dir=store) as staging:
+            staged_screen = save_upload(Path(staging), screen, "screen.webm")
+            if not staged_screen:
+                raise HTTPException(400, "valid screen video is required")
 
-    # Validate the screen upload fully before creating the permanent session
-    # directory: staged in a scratch temp dir first (on the same filesystem
-    # as `store`, so the move below is a cheap rename, not a multi-GB copy)
-    # so a rejected upload (missing/invalid video) never leaves a
-    # mkdir'd-but-otherwise-empty session folder behind (brief 08). The temp
-    # dir is removed on the way out either way, success or rejection.
-    with tempfile.TemporaryDirectory(prefix=STAGING_DIR_PREFIX, dir=store) as staging:
-        staged_screen = save_upload(Path(staging), screen, "screen.webm")
-        if not staged_screen:
-            raise HTTPException(400, "valid screen video is required")
+            session = store / uuid.uuid4().hex
+            session.mkdir(parents=True, exist_ok=True)
+            log(f"session: {session}")
 
-        session = store / uuid.uuid4().hex
-        session.mkdir(parents=True, exist_ok=True)
-        log(f"session: {session}")
+            screen_webm = session / "screen.webm"
+            shutil.move(str(staged_screen), str(screen_webm))
 
-        screen_webm = session / "screen.webm"
-        shutil.move(str(staged_screen), str(screen_webm))
+        system_webm = save_upload(session, system, "system.webm") if system else None
+        mic_webm    = save_upload(session, mic,    "mic.webm")    if mic    else None
 
-    system_webm = save_upload(session, system, "system.webm") if system else None
-    mic_webm    = save_upload(session, mic,    "mic.webm")    if mic    else None
+        selected_paths: list[str] = []
+        if frames:
+            n = len(frames)
+            # k = min(2, ...) contradicted this comment (only 2 spread points,
+            # not 3) and with exactly 3 uploaded frames both indices rounded to
+            # the same middle one, leaving just ONE frame after dedup. Compute
+            # directly from the 20/50/80% fractions the comment describes,
+            # clamped into the available range.
+            idxs = sorted({min(n - 1, max(0, round(f * (n - 1)))) for f in (0.2, 0.5, 0.8)})  # ~20%,50%,80%, deduped
 
-    selected_paths: list[str] = []
-    if frames:
-        n = len(frames)
-        # k = min(2, ...) contradicted this comment (only 2 spread points,
-        # not 3) and with exactly 3 uploaded frames both indices rounded to
-        # the same middle one, leaving just ONE frame after dedup. Compute
-        # directly from the 20/50/80% fractions the comment describes,
-        # clamped into the available range.
-        idxs = sorted({min(n - 1, max(0, round(f * (n - 1)))) for f in (0.2, 0.5, 0.8)})  # ~20%,50%,80%, deduped
+            frames_dir = session / "frames"
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            for j, idx in enumerate(idxs, start=1):
+                uf = frames[idx]
+                out = frames_dir / f"frame_{j:03d}.png"
+                with out.open("wb") as f:
+                    shutil.copyfileobj(uf.file, f)
+                selected_paths.append(str(out))
 
-        frames_dir = session / "frames"
-        frames_dir.mkdir(parents=True, exist_ok=True)
-        for j, idx in enumerate(idxs, start=1):
-            uf = frames[idx]
-            out = frames_dir / f"frame_{j:03d}.png"
-            with out.open("wb") as f:
-                shutil.copyfileobj(uf.file, f)
-            selected_paths.append(str(out))
+        job_id = jobs.create_job(
+            session_id=session.name,
+            inputs={
+                "store": str(store),
+                "screen_webm": str(screen_webm),
+                "system_webm": str(system_webm) if system_webm else None,
+                "mic_webm": str(mic_webm) if mic_webm else None,
+                "frame_paths": selected_paths,
+                "whisper_model": whisper_model,
+            },
+        )
+        jobs.enqueue(job_id)
 
-    job_id = jobs.create_job(
-        session_id=session.name,
-        inputs={
-            "store": str(store),
-            "screen_webm": str(screen_webm),
-            "system_webm": str(system_webm) if system_webm else None,
-            "mic_webm": str(mic_webm) if mic_webm else None,
-            "frame_paths": selected_paths,
-            "whisper_model": whisper_model,
-        },
-    )
-    jobs.enqueue(job_id)
-
-    return {"job_id": job_id, "session_id": session.name}
+        return {"job_id": job_id, "session_id": session.name}
+    finally:
+        with _store_state_lock:
+            _active_uploads -= 1
 
 
 @app.get("/jobs/{job_id}")

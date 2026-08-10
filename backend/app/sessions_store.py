@@ -210,12 +210,44 @@ def purge_expired_trash(store_dir: Path, max_age_days: int = 30) -> int:
             continue
         try:
             trashed_dt = datetime.fromisoformat(trashed_at)
+            if trashed_dt.tzinfo is None:
+                # Written by an older version (or hand-edited) without an
+                # offset -- all of our own writes are UTC, so interpret it
+                # that way rather than letting the aware-vs-naive comparison
+                # below raise.
+                trashed_dt = trashed_dt.replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
             continue
         if trashed_dt <= cutoff:
             if remove_session_permanently(store_dir, record["id"]):
                 purged += 1
     return purged
+
+
+def rewrite_index_paths(store_dir: Path, old_root: Path, new_root: Path) -> int:
+    """Rewrite absolute per-session paths after a storage move.
+
+    Records written before the move hold absolute video_path values under
+    old_root; the move relocated the files but not these strings. Returns
+    the number of records rewritten.
+    """
+    old_root = old_root.resolve()
+    with _APPEND_LOCK:
+        records = load_sessions(store_dir)
+        rewritten = 0
+        for record in records:
+            vp = record.get("video_path")
+            if not vp:
+                continue
+            try:
+                rel = Path(vp).resolve().relative_to(old_root)
+            except (ValueError, OSError):
+                continue
+            record["video_path"] = str(new_root / rel)
+            rewritten += 1
+        if rewritten:
+            _write_sessions_atomic(store_dir, records)
+        return rewritten
 
 
 def compute_storage_usage(store_dir: Path) -> dict:

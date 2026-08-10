@@ -102,6 +102,41 @@ def test_max_upload_mb_is_configurable_via_env(tmp_path, monkeypatch):
         importlib.reload(server_module)
 
 
+def test_health_survives_a_purge_expired_trash_failure_at_import_time(tmp_path, monkeypatch):
+    """Regression test for Fix 3D: purge_expired_trash(STORE) used to run
+    bare at module import -- one unexpected failure (e.g. a legacy naive
+    trashed_at slipping past the guard) crashed the whole backend on every
+    startup until the index was repaired by hand. It must be caught and
+    logged instead of preventing boot.
+    """
+    import importlib
+    import app.server as server_module
+    import app.sessions_store as sessions_store_module
+
+    custom_dir = tmp_path / "app-data"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("APP_DATA_DIR", str(custom_dir))
+
+    def failing_purge(*args, **kwargs):
+        raise TypeError("simulated naive/aware datetime comparison failure")
+
+    monkeypatch.setattr(sessions_store_module, "purge_expired_trash", failing_purge)
+
+    try:
+        reloaded = importlib.reload(server_module)
+        client = TestClient(reloaded.app, base_url="http://127.0.0.1")
+        resp = client.get("/health")
+        assert resp.status_code == 200
+    finally:
+        # Undo the env var AND the purge_expired_trash patch before
+        # reloading -- otherwise this reload's `from .sessions_store import
+        # purge_expired_trash` would re-bind server_module.purge_expired_trash
+        # to the still-active failing_purge closure, leaking the failure
+        # into every later test.
+        monkeypatch.undo()
+        importlib.reload(server_module)
+
+
 def test_main_binds_to_localhost_only(monkeypatch):
     captured = {}
 
@@ -1733,6 +1768,133 @@ def test_patch_settings_holds_save_lock_during_storage_move(client, tmp_path, mo
     t.join(timeout=2)
 
     assert lock_free is False
+
+
+def test_patch_settings_survives_a_failed_settings_save_after_a_real_move(
+    client: TestClient, tmp_path, monkeypatch
+):
+    """Regression test for Fix 3A: if save_settings() raises after a real
+    move_storage_dir has already relocated the files, the server must keep
+    reading the NEW directory (not split-brain back to the old, now-emptied
+    one) and report a loud 500 rather than silently losing track of the move.
+    """
+    import app.server as server_module
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc123",
+        "created_at": "2026-08-03T00:00:00+00:00",
+        "title": "Test Meeting",
+        "notes": "notes",
+        "video_path": "x",
+    })
+
+    new_dir = tmp_path.parent / f"{tmp_path.name}-new-storage"
+
+    def failing_save_settings(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(server_module, "save_settings", failing_save_settings)
+
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+
+    assert resp.status_code == 500
+    assert str(new_dir) in resp.json()["detail"]
+
+    # The live STORE must already point at new_dir -- the move itself
+    # succeeded, only the settings.json write failed.
+    assert server_module.STORE == new_dir
+
+    # GET /sessions must read the moved data, not report the old dir as
+    # empty.
+    sessions = client.get("/sessions").json()
+    assert len(sessions) == 1
+    assert sessions[0]["id"] == "abc123"
+
+
+def test_patch_settings_rewrites_video_path_after_a_storage_move(
+    client: TestClient, tmp_path
+):
+    """Regression test for Fix 3E: absolute video_path values recorded
+    before a storage move must be rewritten to point under the new root,
+    or job-detail/session lookups resolve to a file that no longer exists
+    there.
+    """
+    import app.server as server_module
+    from app.sessions_store import append_session
+
+    old_store = server_module.STORE
+    video_path = str(old_store / "abc123" / "final.webm")
+    append_session(old_store, {
+        "id": "abc123",
+        "created_at": "2026-08-03T00:00:00+00:00",
+        "title": "Test Meeting",
+        "notes": "notes",
+        "video_path": video_path,
+    })
+
+    new_dir = tmp_path.parent / f"{tmp_path.name}-new-storage"
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+    assert resp.status_code == 200
+
+    sessions = client.get("/sessions").json()
+    assert len(sessions) == 1
+    assert sessions[0]["video_path"] == str(new_dir / "abc123" / "final.webm")
+
+
+def test_process_upload_blocks_a_concurrent_storage_move_until_it_finishes(
+    client: TestClient, tmp_path, monkeypatch
+):
+    """Regression test for Fix 3C: jobs.is_busy() only blocks a move once a
+    job has been created, which happens only AFTER the (potentially
+    minutes-long) upload finishes writing. A PATCH /settings arriving while
+    an upload is still mid-write must be rejected with 409, and the
+    in-flight upload must complete into the ORIGINAL directory rather than
+    racing a move.
+    """
+    import threading
+    import app.server as server_module
+
+    upload_entered = threading.Event()
+    release_upload = threading.Event()
+    original_store = server_module.STORE
+
+    def blocking_save_upload(dst_dir, uf, name):
+        upload_entered.set()
+        assert release_upload.wait(timeout=10), "test stalled waiting to release the upload"
+        return None  # invalid screen upload -> /process eventually 400s
+
+    monkeypatch.setattr(server_module, "save_upload", blocking_save_upload)
+
+    results = {}
+
+    def do_upload():
+        results["response"] = client.post(
+            "/process",
+            files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+        )
+
+    upload_thread = threading.Thread(target=do_upload)
+    upload_thread.start()
+    try:
+        assert upload_entered.wait(timeout=5), "/process never reached save_upload"
+
+        new_dir = tmp_path.parent / f"{tmp_path.name}-new-storage"
+        move_resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+        assert move_resp.status_code == 409
+        assert server_module.STORE == original_store
+        assert not new_dir.exists()
+    finally:
+        release_upload.set()
+        upload_thread.join(timeout=10)
+
+    assert results["response"].status_code == 400
+
+    # Now that the upload has finished, the move must succeed.
+    new_dir2 = tmp_path.parent / f"{tmp_path.name}-new-storage-2"
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir2)})
+    assert resp.status_code == 200
+    assert server_module.STORE == new_dir2
 
 
 def test_ollama_models_returns_installed_models(client: TestClient, monkeypatch):

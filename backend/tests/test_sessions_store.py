@@ -413,6 +413,36 @@ def test_purge_expired_trash_respects_custom_max_age(tmp_path: Path):
     assert load_sessions(tmp_path) == []
 
 
+def test_purge_expired_trash_treats_naive_trashed_at_older_than_cutoff_as_utc_and_purges(tmp_path: Path):
+    from app.sessions_store import purge_expired_trash
+
+    naive_old_ts = (datetime.now(timezone.utc) - timedelta(days=31)).replace(tzinfo=None).isoformat()
+    append_session(tmp_path, {
+        "id": "naive-old", "created_at": "2026-01-01T00:00:00+00:00",
+        "title": "Naive old", "notes": "", "video_path": "", "trashed_at": naive_old_ts,
+    })
+
+    purged = purge_expired_trash(tmp_path)
+
+    assert purged == 1
+    assert load_sessions(tmp_path) == []
+
+
+def test_purge_expired_trash_keeps_naive_trashed_at_newer_than_cutoff(tmp_path: Path):
+    from app.sessions_store import purge_expired_trash
+
+    naive_recent_ts = (datetime.now(timezone.utc) - timedelta(days=1)).replace(tzinfo=None).isoformat()
+    append_session(tmp_path, {
+        "id": "naive-recent", "created_at": "2026-01-01T00:00:00+00:00",
+        "title": "Naive recent", "notes": "", "video_path": "", "trashed_at": naive_recent_ts,
+    })
+
+    purged = purge_expired_trash(tmp_path)
+
+    assert purged == 0
+    assert {r["id"] for r in load_sessions(tmp_path)} == {"naive-recent"}
+
+
 def test_compute_storage_usage_counts_active_and_trashed_sessions(tmp_path: Path):
     from app.sessions_store import compute_storage_usage
 
@@ -832,3 +862,53 @@ def test_sweep_orphaned_sessions_rewrites_the_tombstone_when_a_partial_rmtree_st
     assert orphan.exists()
     assert (orphan / TOMBSTONE_FILENAME).exists()
     assert load_sessions(tmp_path) == []
+
+
+def test_rewrite_index_paths_rewrites_video_path_under_new_root(tmp_path: Path):
+    from app.sessions_store import rewrite_index_paths
+
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    old_root.mkdir()
+    new_root.mkdir()
+
+    append_session(new_root, {
+        "id": "abc123", "created_at": "2026-01-01T00:00:00+00:00",
+        "title": "T", "notes": "",
+        "video_path": str(old_root / "abc123" / "final.webm"),
+        "trashed_at": None,
+    })
+
+    rewritten = rewrite_index_paths(new_root, old_root, new_root)
+
+    assert rewritten == 1
+    record = load_sessions(new_root)[0]
+    assert record["video_path"] == str(new_root / "abc123" / "final.webm")
+
+
+def test_rewrite_index_paths_leaves_none_and_foreign_paths_untouched(tmp_path: Path):
+    from app.sessions_store import rewrite_index_paths
+
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    other_root = tmp_path / "somewhere-else"
+    old_root.mkdir()
+    new_root.mkdir()
+
+    append_session(new_root, {
+        "id": "no-path", "created_at": "2026-01-01T00:00:00+00:00",
+        "title": "T", "notes": "", "video_path": None, "trashed_at": None,
+    })
+    append_session(new_root, {
+        "id": "foreign", "created_at": "2026-01-01T00:00:00+00:00",
+        "title": "T", "notes": "",
+        "video_path": str(other_root / "foreign" / "final.webm"),
+        "trashed_at": None,
+    })
+
+    rewritten = rewrite_index_paths(new_root, old_root, new_root)
+
+    assert rewritten == 0
+    records = {r["id"]: r for r in load_sessions(new_root)}
+    assert records["no-path"]["video_path"] is None
+    assert records["foreign"]["video_path"] == str(other_root / "foreign" / "final.webm")

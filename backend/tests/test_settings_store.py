@@ -83,6 +83,31 @@ def test_load_or_init_tolerates_corrupt_file(tmp_path):
     assert result["storage_dir"] == str(storage)
 
 
+def test_load_or_init_preserves_corrupt_file_aside(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("not json, and holds the user's real storage_dir clue", encoding="utf-8")
+    storage = tmp_path / "uploads"
+
+    load_or_init(settings_path, storage)
+
+    corrupt_siblings = list(tmp_path.glob("settings.corrupt-*.json"))
+    assert len(corrupt_siblings) == 1
+    assert corrupt_siblings[0].read_text(encoding="utf-8") == (
+        "not json, and holds the user's real storage_dir clue"
+    )
+    # The original path now holds the freshly-seeded defaults.
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["storage_dir"] == str(storage)
+
+
+def test_load_or_init_missing_file_creates_no_corrupt_sibling(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    storage = tmp_path / "uploads"
+
+    load_or_init(settings_path, storage)
+
+    assert list(tmp_path.glob("settings.corrupt-*.json")) == []
+
+
 def test_load_or_init_fills_missing_keys_from_defaults(tmp_path):
     settings_path = tmp_path / "settings.json"
     storage = tmp_path / "uploads"
