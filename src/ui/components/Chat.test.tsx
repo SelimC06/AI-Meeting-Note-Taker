@@ -93,8 +93,12 @@ it("auto-scrolls to the bottom as chunks stream in while already near the bottom
   const { container } = render(<Chat sessions={[sessionA]} sessionsError={null} selectedId="a1" />);
   const messagesContainer = container.querySelector(".overflow-y-auto");
   if (!messagesContainer) throw new Error("messages container not found");
-  // Already scrolled to (within a few px of) the bottom.
+  // Already scrolled to (within a few px of) the bottom. A real scroll
+  // event is what actually updates the "following" ref (H2) -- setting the
+  // metrics alone doesn't, since jsdom never fires 'scroll' just because a
+  // property was overridden.
   setScrollMetrics(messagesContainer, { scrollTop: 480, scrollHeight: 500, clientHeight: 20 });
+  fireEvent.scroll(messagesContainer);
   const scrollIntoView = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
   scrollIntoView.mockClear(); // discard the mount-time call (default 0/0/0 metrics also count as "near bottom")
 
@@ -114,6 +118,7 @@ it("does not fight manual scrollback while a reply streams in", async () => {
   if (!messagesContainer) throw new Error("messages container not found");
   // Scrolled well away from the bottom, reading earlier messages.
   setScrollMetrics(messagesContainer, { scrollTop: 0, scrollHeight: 500, clientHeight: 20 });
+  fireEvent.scroll(messagesContainer);
   const scrollIntoView = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
   scrollIntoView.mockClear();
 
@@ -123,6 +128,38 @@ it("does not fight manual scrollback while a reply streams in", async () => {
 
   await screen.findByText("Hello world");
   expect(scrollIntoView).not.toHaveBeenCalled();
+});
+
+it("keeps following when a single chunk grows scrollHeight past the threshold while pinned at bottom (H2)", async () => {
+  // Regression test: the old effect measured distanceFromBottom AFTER the
+  // triggering chunk was already in the DOM, so a chunk that alone grows
+  // scrollHeight by more than NEAR_BOTTOM_THRESHOLD_PX (any two-line chunk)
+  // would fail the "near bottom" check even for a user who was pinned at
+  // the bottom right before it arrived. The fix decides from the
+  // following-ref (last real scroll event) instead of re-measuring, so a
+  // content-only scrollHeight change -- which never fires 'scroll' on its
+  // own -- must not affect the decision.
+  vi.mocked(streamChatReply).mockImplementation(() => twoChunkStream());
+
+  const { container } = render(<Chat sessions={[sessionA]} sessionsError={null} selectedId="a1" />);
+  const messagesContainer = container.querySelector(".overflow-y-auto");
+  if (!messagesContainer) throw new Error("messages container not found");
+  setScrollMetrics(messagesContainer, { scrollTop: 480, scrollHeight: 500, clientHeight: 20 });
+  fireEvent.scroll(messagesContainer);
+  const scrollIntoView = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
+  scrollIntoView.mockClear();
+
+  // Simulate the incoming chunk growing scrollHeight well past the
+  // threshold, without any accompanying user scroll -- content growth alone
+  // never fires 'scroll' in a real browser either.
+  setScrollMetrics(messagesContainer, { scrollTop: 480, scrollHeight: 550, clientHeight: 20 });
+
+  const input = await screen.findByLabelText("Chat message");
+  fireEvent.change(input, { target: { value: "what happened?" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  await screen.findByText("Hello world");
+  expect(scrollIntoView).toHaveBeenCalledWith({ block: "end" });
 });
 
 it("aborts the stream when Stop is clicked and shows no error", async () => {
@@ -198,4 +235,23 @@ it("shows a neutral loading state instead of the sessions error while the backen
 
   expect(screen.queryByText(/couldn't load meetings/i)).not.toBeInTheDocument();
   expect(screen.getByText(/loading/i)).toBeInTheDocument();
+});
+
+it("shows the real error once the backend lifecycle has permanently failed, instead of loading forever (re-review-12-13 H1/L1)", () => {
+  // Regression test: backendUp (the 15s health poll) stays false forever
+  // once the backend lifecycle reaches 'failed', so gating solely on it
+  // left this stuck on "loading" forever with no way to ever see the
+  // error. backendFailed lifts the suppression once that's known.
+  render(
+    <Chat
+      sessions={null}
+      sessionsError="Failed to fetch"
+      selectedId={null}
+      backendUp={false}
+      backendFailed={true}
+    />
+  );
+
+  expect(screen.getByText(/couldn't load meetings: Failed to fetch/i)).toBeInTheDocument();
+  expect(screen.queryByText(/loading/i)).not.toBeInTheDocument();
 });

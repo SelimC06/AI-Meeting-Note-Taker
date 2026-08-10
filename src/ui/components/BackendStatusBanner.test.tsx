@@ -22,11 +22,10 @@ it("renders nothing when healthy", () => {
   expect(container.firstChild).toBeNull();
 });
 
-it("shows a loading message with no Retry button while starting", () => {
+it("renders nothing while starting -- Sidebar/Chat's loading states carry the message", () => {
   mockLifecycle({ phase: "starting" });
-  render(<BackendStatusBanner />);
-  expect(screen.getByText("Starting backend…")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  const { container } = render(<BackendStatusBanner />);
+  expect(container.firstChild).toBeNull();
 });
 
 it("shows restart progress while restarting, with no Retry button", () => {

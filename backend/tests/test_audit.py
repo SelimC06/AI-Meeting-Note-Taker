@@ -2,6 +2,7 @@ import json
 import threading
 import time
 
+import anyio
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -142,6 +143,53 @@ def test_audit_log_does_not_rotate_when_under_the_size_cap(tmp_path, monkeypatch
     lines = log_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     assert lines[0] == "old entry"
+
+
+def test_audit_log_entry_survives_a_cancelled_request(tmp_path, monkeypatch):
+    """Regression test for re-review-12-13 H4: a client disconnect mid-
+    request cancels the dispatch task while it's awaiting call_next, and
+    that cancellation reaches the finally block's run_sync await as a
+    CancelledError -- a BaseException `except Exception` doesn't catch --
+    which used to drop the audit entry silently for exactly the requests
+    an audit log exists to capture. Shielding the write must survive it.
+    """
+    log_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(audit, "LOG_PATH", log_path)
+
+    middleware = AuditMiddleware(app=None)
+
+    class FakeURL:
+        path = "/slow"
+
+    class FakeState:
+        pass
+
+    class FakeRequest:
+        headers = {}
+        method = "GET"
+        url = FakeURL()
+        query_params = {}
+        client = None
+        state = FakeState()
+
+    async def call_next(_request):
+        await anyio.sleep_forever()
+
+    async def run():
+        async with anyio.create_task_group() as tg:
+
+            async def task():
+                await middleware.dispatch(FakeRequest(), call_next)
+
+            tg.start_soon(task)
+            await anyio.sleep(0.05)
+            tg.cancel_scope.cancel()
+
+    anyio.run(run)
+
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    json.loads(lines[0])
 
 
 def test_audit_entry_actor_is_local(tmp_path, monkeypatch):

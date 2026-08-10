@@ -32,6 +32,12 @@ interface Props {
   // that don't care about the distinction (most tests) keep the original
   // always-show-errors behavior.
   backendUp?: boolean;
+  // True once the backend lifecycle has reported 'failed' -- see Chat's
+  // identically-named prop. Without this, a backend that never comes up
+  // keeps backendUp false forever and the sidebar shows "loading" forever
+  // instead of ever surfacing the real error (re-review-12-13 H1/L1).
+  // Defaults false.
+  backendFailed?: boolean;
 }
 
 // Distinguishes "the fetch itself never landed" (offline/backend down --
@@ -58,6 +64,7 @@ const Sidebar: React.FC<Props> = ({
   selectedId,
   onSelect,
   backendUp = true,
+  backendFailed = false,
 }) => {
   const [query, setQuery] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -118,8 +125,11 @@ const Sidebar: React.FC<Props> = ({
   // that window is almost certainly just "not up yet", and the existing
   // reload-on-health-flip effect in App.tsx already recovers it once the
   // backend comes up. Falls through to the "loading" branch below instead
-  // (list is still null at that point too).
-  const listError = backendUp ? (view === "trash" ? trashList.error : sessionsError) : null;
+  // (list is still null at that point too). Once the lifecycle has reported
+  // 'failed', though, backendUp will never become true on its own, so the
+  // suppression is lifted and the real error (if any) is shown instead of
+  // loading forever (re-review-12-13 H1/L1).
+  const listError = backendUp || backendFailed ? (view === "trash" ? trashList.error : sessionsError) : null;
   const filtered =
     list?.filter((s) => s.title.toLowerCase().includes(query.trim().toLowerCase())) ?? null;
 

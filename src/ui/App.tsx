@@ -10,6 +10,7 @@ import BackendStatusBanner from "./components/BackendStatusBanner";
 import OllamaOnboardingGate from "./components/OllamaOnboardingGate";
 import { useSessions } from "./hooks/useSessions";
 import { useBackendHealth } from "./hooks/useBackendHealth";
+import { useBackendLifecycle } from "./hooks/useBackendLifecycle";
 
 function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -19,6 +20,11 @@ function App() {
   const { sessions, error: sessionsError, reload: reloadSessions } = useSessions(true, false);
   const health = useBackendHealth(true);
   const backendUp = health?.backend ?? false;
+  // Sidebar/Chat use this to stop suppressing sessionsError once the backend
+  // is known to have permanently failed rather than showing "loading"
+  // forever -- backendUp (the 15s health poll) never becomes true again on
+  // its own once the lifecycle has reached this phase (re-review-12-13 H1/L1).
+  const backendFailed = useBackendLifecycle().phase === "failed";
   const wasBackendUpRef = useRef(false);
   useEffect(() => {
     if (backendUp && !wasBackendUpRef.current) {
@@ -114,6 +120,7 @@ function App() {
                 selectedId={selectedId}
                 onSelect={setSelectedId}
                 backendUp={backendUp}
+                backendFailed={backendFailed}
               />
             </ErrorBoundary>
             <ErrorBoundary>
@@ -122,6 +129,7 @@ function App() {
                 sessionsError={sessionsError}
                 selectedId={selectedId}
                 backendUp={backendUp}
+                backendFailed={backendFailed}
               />
             </ErrorBoundary>
             <button

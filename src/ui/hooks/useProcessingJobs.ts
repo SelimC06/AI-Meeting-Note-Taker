@@ -26,10 +26,9 @@ export function useProcessingJobs() {
   const jobsRef = useRef<ProcessingJob[]>(jobs);
   jobsRef.current = jobs;
   const failureCountsRef = useRef<Map<string, number>>(new Map());
-  // Only main.js's mainWindow ever receives backend:status pushes (see
-  // preload.js/main.js), so this is a no-op in the rail renderer -- fine,
-  // it just means the pause below never triggers there and every poll
-  // failure counts normally, same as before this hook cared about it.
+  // main.js broadcasts backend:status to both mainWindow and railWindow
+  // (see broadcastBackendStatus), so this pause applies in either renderer
+  // this hook runs in.
   const backendRestartingRef = useRef(false);
 
   useEffect(() => {

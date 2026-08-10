@@ -12,6 +12,12 @@ interface Props {
   // neutral loading state instead. Defaults true for callers/tests that
   // don't care about the distinction.
   backendUp?: boolean;
+  // True once the backend lifecycle (see useBackendLifecycle/App.tsx) has
+  // reported 'failed' -- unlike backendUp (the 15s health poll), this can
+  // only ever become true, so it's used to stop suppressing sessionsError
+  // once the backend is known to never be coming back on its own, instead
+  // of showing "loading" forever (re-review-12-13 H1/L1). Defaults false.
+  backendFailed?: boolean;
 }
 
 // How close to the bottom (in px) counts as "already there" for
@@ -19,7 +25,13 @@ interface Props {
 // positions, not a real "almost at the bottom" zone.
 const NEAR_BOTTOM_THRESHOLD_PX = 24;
 
-const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId, backendUp = true }) => {
+const Chat: React.FC<Props> = ({
+  sessions,
+  sessionsError,
+  selectedId,
+  backendUp = true,
+  backendFailed = false,
+}) => {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -27,6 +39,12 @@ const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId, backendUp 
   const abortRef = useRef<AbortController | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
+  // Whether the user is currently pinned to the bottom of the scroll
+  // container, updated only by real scroll events (see handleScroll below)
+  // rather than re-measured after every DOM update -- a streamed chunk
+  // growing scrollHeight never fires 'scroll' on its own, so this can't be
+  // thrown off by the very content whose arrival it's deciding on (H2).
+  const isFollowingRef = useRef(true);
 
   const selected = sessions?.find((s) => s.id === selectedId) ?? null;
 
@@ -34,6 +52,7 @@ const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId, backendUp 
     abortRef.current?.abort();
     setTurns([]);
     setError(null);
+    isFollowingRef.current = true;
   }, [selectedId]);
 
   useEffect(() => {
@@ -42,18 +61,22 @@ const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId, backendUp 
     };
   }, []);
 
-  // Auto-scrolls to the newest message/streamed chunk, but only when the
-  // user is already near the bottom -- otherwise a long streamed reply
-  // grows below the fold with no way to see it without manually scrolling
-  // down on every chunk. Checked against the container's scroll position
-  // BEFORE this update (i.e. where the user left it), not after, so
-  // scrolling back up to read earlier messages during a stream is never
-  // fought by the next chunk yanking the view back down.
-  useEffect(() => {
+  const handleScroll = () => {
     const container = messagesContainerRef.current;
     if (!container) return;
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    if (distanceFromBottom > NEAR_BOTTOM_THRESHOLD_PX) return;
+    isFollowingRef.current = distanceFromBottom <= NEAR_BOTTOM_THRESHOLD_PX;
+  };
+
+  // Auto-scrolls to the newest message/streamed chunk, but only when the
+  // user was already following the bottom -- otherwise a long streamed
+  // reply grows below the fold with no way to see it without manually
+  // scrolling down on every chunk. Follows isFollowingRef (last real scroll
+  // position, tracked by handleScroll) rather than re-measuring here, since
+  // by the time this effect runs the chunk that triggered it is already in
+  // the DOM and would otherwise count against itself.
+  useEffect(() => {
+    if (!isFollowingRef.current) return;
     bottomSentinelRef.current?.scrollIntoView({ block: "end" });
   }, [turns]);
 
@@ -111,13 +134,13 @@ const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId, backendUp 
 
   return (
     <div className="flex-1 min-w-0 h-full p-4 flex flex-col text-phosphor [-webkit-app-region:no-drag]">
-      {sessions === null && sessionsError != null && backendUp && (
+      {sessions === null && sessionsError != null && (backendUp || backendFailed) && (
         <div className="flex-1 flex items-center justify-center text-xs text-red-400 text-center px-4">
           couldn't load meetings: {sessionsError}
         </div>
       )}
 
-      {sessions === null && (sessionsError == null || !backendUp) && (
+      {sessions === null && (sessionsError == null || (!backendUp && !backendFailed)) && (
         <div className="flex-1 flex items-center justify-center text-xs text-dim">
           loading<span className="cursor-blink">▌</span>
         </div>
@@ -127,7 +150,11 @@ const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId, backendUp 
 
       {hasMeetings && selected && (
         <>
-          <div ref={messagesContainerRef} className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-2 text-xs">
+          <div
+            ref={messagesContainerRef}
+            onScroll={handleScroll}
+            className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-2 text-xs"
+          >
             {turns.length === 0 && (
               <div className="border border-line rounded-sm px-3 py-2 text-dim max-w-md">
                 <p className="text-signal">✦ {selected.title}</p>

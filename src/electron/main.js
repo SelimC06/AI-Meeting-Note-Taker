@@ -213,7 +213,16 @@ function currentDockSlotScreenRect() {
 // "release near the dock slot" behaves identically regardless of which
 // gesture produced it.
 function settleFloatingRailPosition() {
-    if (!railWindow || railWindow.isDestroyed() || !railWindow.isVisible()) return;
+    if (!railWindow || railWindow.isDestroyed() || !railWindow.isVisible()) {
+        // The rail is missing/destroyed/hidden right at the moment a drag
+        // released -- definitionally not floating. Without this push,
+        // DockedRail's isSettling(true) (set on drag-release) never clears,
+        // since it only clears on a 'rail:floatingChanged' push, leaving the
+        // docked pill permanently disabled until the user re-detaches it
+        // (re-review-12-13 H3).
+        mainWindow?.webContents.send('rail:floatingChanged', false);
+        return;
+    }
     const bounds = railWindow.getBounds();
     const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
     const dockSlotScreenRect = currentDockSlotScreenRect();

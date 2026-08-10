@@ -14,6 +14,11 @@ export function useSessions(active: boolean, includeTrashed: boolean) {
 
   const fetchAndSet = useCallback(() => {
     const requestId = ++requestIdRef.current;
+    // A new fetch invalidates any previously shown error: without this, the
+    // stale mount-time "failed to fetch" (from before the backend was up)
+    // stays visible for the whole duration of the reload-on-health fetch,
+    // flashing an error at the user right before the list appears.
+    setError(null);
     getSessions(includeTrashed)
       .then((data) => {
         if (requestId !== requestIdRef.current) return;

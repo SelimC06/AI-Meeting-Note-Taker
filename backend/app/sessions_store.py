@@ -175,11 +175,19 @@ def remove_session_permanently(store_dir: Path, session_id: str) -> bool:
 
     session_dir = store_dir / session_id
     if session_dir.exists():
+        # Written BEFORE rmtree, not just after a failure: a crash between
+        # the index write above and rmtree finishing would otherwise leave
+        # an unindexed, un-tombstoned directory that sweep_orphaned_sessions
+        # adopts back as a "Recovered" session on next boot -- resurrecting
+        # a recording the user already permanently deleted. A successful
+        # rmtree removes this marker right along with the rest of the dir.
+        _write_tombstone(session_dir)
         shutil.rmtree(session_dir, ignore_errors=True)
         if session_dir.exists():
-            # rmtree silently failed to fully remove it -- tombstone it so
-            # sweep_orphaned_sessions retries the removal on next startup
-            # instead of adopting it back as a visible session.
+            # rmtree silently failed to fully remove it -- rewrite the
+            # tombstone (belt-and-braces) in case the partial rmtree pass
+            # itself deleted it, so sweep_orphaned_sessions retries the
+            # removal on next startup instead of adopting it back.
             _write_tombstone(session_dir)
     return True
 

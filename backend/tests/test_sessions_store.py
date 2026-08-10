@@ -312,6 +312,39 @@ def test_remove_session_permanently_tombstones_a_dir_rmtree_could_not_fully_remo
     assert (session_dir / TOMBSTONE_FILENAME).exists()
 
 
+def test_remove_session_permanently_writes_the_tombstone_before_calling_rmtree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression test for re-review-12-13 H1/L2: the tombstone used to be
+    written only after a failed rmtree, so a crash between the index write
+    and rmtree finishing left an unindexed, un-tombstoned dir that the next
+    startup's sweep would adopt back as a "Recovered" session -- resurrecting
+    a recording the user already permanently deleted. Writing it first means
+    a successful rmtree just erases it along with the directory, and a crash
+    mid-rmtree still leaves the tombstone behind to prevent adoption.
+    """
+    from app.sessions_store import remove_session_permanently, TOMBSTONE_FILENAME
+
+    session_dir = tmp_path / "aaa"
+    session_dir.mkdir()
+    (session_dir / "final.webm").write_bytes(b"video bytes")
+    append_session(tmp_path, {
+        "id": "aaa", "created_at": "2026-08-01T10:00:00+00:00",
+        "title": "T", "notes": "", "video_path": "", "trashed_at": None,
+    })
+
+    seen_tombstone_before_rmtree = {}
+
+    def fake_rmtree(path, *a, **k):
+        seen_tombstone_before_rmtree["present"] = (Path(path) / TOMBSTONE_FILENAME).exists()
+
+    monkeypatch.setattr("app.sessions_store.shutil.rmtree", fake_rmtree)
+
+    remove_session_permanently(tmp_path, "aaa")
+
+    assert seen_tombstone_before_rmtree["present"] is True
+
+
 def test_remove_session_permanently_does_not_tombstone_a_successfully_removed_dir(tmp_path: Path):
     from app.sessions_store import remove_session_permanently
 

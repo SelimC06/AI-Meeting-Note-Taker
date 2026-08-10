@@ -88,7 +88,13 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 "duration_ms": duration_ms,
             })
             try:
-                await anyio.to_thread.run_sync(_write_log_entry, entry)
+                # Shielded: a client disconnect mid-request cancels this
+                # task, and that cancellation would otherwise reach the
+                # run_sync await as a BaseException (CancelledError) that
+                # `except Exception` below can't catch, silently dropping
+                # the audit entry for exactly the requests worth auditing.
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(_write_log_entry, entry)
             except Exception as log_err:
                 # Best-effort: a logging failure (disk full, permissions)
                 # must never take down the actual request.

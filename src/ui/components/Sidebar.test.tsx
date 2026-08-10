@@ -163,6 +163,22 @@ it("defaults backendUp to true when the prop is omitted", () => {
   expect(screen.getByText(/failed to load: Failed to fetch/i)).toBeInTheDocument();
 });
 
+it("shows the real error once the backend lifecycle has permanently failed, instead of loading forever (re-review-12-13 H1/L1)", () => {
+  // Regression test: backendUp (the 15s health poll) stays false forever
+  // once the backend lifecycle reaches 'failed', so gating solely on it
+  // left this stuck on "loading" forever with no way to ever see the
+  // error. backendFailed lifts the suppression once that's known.
+  renderSidebar({
+    sessions: null,
+    sessionsError: "Failed to fetch",
+    backendUp: false,
+    backendFailed: true,
+  });
+
+  expect(screen.getByText(/failed to load: Failed to fetch/i)).toBeInTheDocument();
+  expect(screen.queryByText(/loading/i)).not.toBeInTheDocument();
+});
+
 it("shows a processing row for an active job and reloads sessions once it finishes", async () => {
   vi.useFakeTimers();
   vi.mocked(listJobs).mockResolvedValue([
