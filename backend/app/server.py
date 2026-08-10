@@ -736,7 +736,6 @@ def _run_process_job(job_id: str) -> None:
     screen_webm = Path(inputs["screen_webm"])
     system_webm = Path(inputs["system_webm"]) if inputs["system_webm"] else None
     mic_webm = Path(inputs["mic_webm"]) if inputs["mic_webm"] else None
-    selected_paths = inputs["frame_paths"]
     whisper_model = inputs["whisper_model"]
 
     try:
@@ -763,12 +762,10 @@ def _run_process_job(job_id: str) -> None:
         jobs.update_job(job_id, stage="transcribing")
         if stop_recording_and_transcribe is not None:
             try:
-                # extract_frames_after=False: the frames actually used by
-                # llava_complete below (frame_paths=selected_paths) come
-                # from the frontend's own uploaded-frame selection, not from
-                # here -- this ffmpeg extraction pass was running for
-                # nothing, its frame_%05d.png outputs just polluting the
-                # session dir (and the export zip) unused.
+                # extract_frames_after=False: summarization is text-only --
+                # llava_complete below runs with no frame_paths, so extracting
+                # frames here would just pollute the session dir (and the
+                # export zip) with frame_%05d.png outputs nothing ever uses.
                 txt_path, _ = stop_recording_and_transcribe(
                     video_path=str(final_path),
                     transcript_prefix=str(session / "transcript_"),
@@ -789,10 +786,6 @@ def _run_process_job(job_id: str) -> None:
                 notes = llava_complete(
                     raw_txt_path=txt_path,
                     out_path=str(session / "notes.md"),
-                    frame_paths=selected_paths,
-                    max_images=min(3, len(selected_paths)),
-                    max_image_px=1280,
-                    jpeg_quality=80,
                     max_chars=12000,
                     stream=False,
                     num_ctx=8192,
@@ -886,7 +879,6 @@ def process(
     screen: UploadFile | None = File(None),   # required logically, but optional type so 422 doesn't fire
     system: UploadFile | None = File(None),   # optional
     mic:    UploadFile | None = File(None),   # optional
-    frames: List[UploadFile] | None = File(None)
 ):
     """
     Accepts blobs from the frontend:
@@ -948,25 +940,6 @@ def process(
         system_webm = save_upload(session, system, "system.webm") if system else None
         mic_webm    = save_upload(session, mic,    "mic.webm")    if mic    else None
 
-        selected_paths: list[str] = []
-        if frames:
-            n = len(frames)
-            # k = min(2, ...) contradicted this comment (only 2 spread points,
-            # not 3) and with exactly 3 uploaded frames both indices rounded to
-            # the same middle one, leaving just ONE frame after dedup. Compute
-            # directly from the 20/50/80% fractions the comment describes,
-            # clamped into the available range.
-            idxs = sorted({min(n - 1, max(0, round(f * (n - 1)))) for f in (0.2, 0.5, 0.8)})  # ~20%,50%,80%, deduped
-
-            frames_dir = session / "frames"
-            frames_dir.mkdir(parents=True, exist_ok=True)
-            for j, idx in enumerate(idxs, start=1):
-                uf = frames[idx]
-                out = frames_dir / f"frame_{j:03d}.png"
-                with out.open("wb") as f:
-                    shutil.copyfileobj(uf.file, f)
-                selected_paths.append(str(out))
-
         job_id = jobs.create_job(
             session_id=session.name,
             inputs={
@@ -974,7 +947,6 @@ def process(
                 "screen_webm": str(screen_webm),
                 "system_webm": str(system_webm) if system_webm else None,
                 "mic_webm": str(mic_webm) if mic_webm else None,
-                "frame_paths": selected_paths,
                 "whisper_model": whisper_model,
             },
         )
