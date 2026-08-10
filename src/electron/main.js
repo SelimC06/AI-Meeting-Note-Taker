@@ -993,6 +993,25 @@ ipcMain.handle('updater:install', async () => {
     try {
         const proceed = await performGuardedClose();
         if (!proceed) return;
+        // Mirror app:quit: destroy the windows BEFORE the jobs wait, so no
+        // new recording can start while the quit is pending, and wait out
+        // the transcription job the guarded stop just created BEFORE
+        // spawning the installer -- quitAndInstall launches NSIS
+        // immediately, and an installer running against a live app +
+        // mid-transcription backend is a file-in-use failure or a corrupted
+        // update.
+        quitRequested = true;
+        for (const w of BrowserWindow.getAllWindows()) {
+            if (!w.isDestroyed()) w.destroy();
+        }
+        const jobs = await fetchActiveJobsForQuitGuard();
+        if (hasActiveJob(jobs)) {
+            await waitForActiveJobsToFinish();
+        }
+        // Jobs are done and windows are gone -- let before-quit take its
+        // fast path (stopBackend + immediate quit) when quitAndInstall
+        // fires app.quit().
+        quitConfirmed = true;
         installUpdate();
     } finally {
         closeInProgress = false;

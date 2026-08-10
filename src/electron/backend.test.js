@@ -330,6 +330,13 @@ test('ensurePortFree kills a process listening on the given port when it matches
         const freed = await ensurePortFree(port, process.execPath, 'win32');
         assert.equal(freed, true);
 
+        // ensurePortFree now detects the port freeing up via a ~1ms bind
+        // probe instead of a PowerShell listing, so it can resolve before
+        // Node's own 'exit' event for the just-killed orphan has been
+        // delivered -- wait for that event directly instead of racing it.
+        if (orphan.exitCode === null && orphan.signalCode === null) {
+            await new Promise((resolve) => orphan.once('exit', resolve));
+        }
         assert.ok(orphan.exitCode !== null || orphan.signalCode !== null, 'orphan process should have been killed');
 
         // Port should now be free: binding a new server on it should succeed.

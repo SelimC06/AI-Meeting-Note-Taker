@@ -227,13 +227,23 @@ def test_mux_video_audio_prefers_libopus(tmp_path, monkeypatch):
 
     monkeypatch.setattr(server_module, "ffmpeg_has_encoder", lambda name: name == "libopus")
     calls = []
-    monkeypatch.setattr(server_module, "run", lambda cmd: (calls.append(cmd), _cp(returncode=0))[1])
+
+    def fake_run(cmd):
+        calls.append(cmd)
+        # mux_video_audio now writes to a "<out>.part" temp name and promotes
+        # it via os.replace() on success -- the real ffmpeg process creates
+        # that file; the mock has to as well.
+        Path(cmd[-1]).write_bytes(b"muxed")
+        return _cp(returncode=0)
+
+    monkeypatch.setattr(server_module, "run", fake_run)
 
     result = server_module.mux_video_audio(video, audio, out_path)
 
     assert result == out_path
     assert result.suffix == ".webm"
     assert "libopus" in calls[0]
+    assert not out_path.with_name(out_path.name + ".part").exists()
 
 
 def test_mux_video_audio_falls_back_to_libvorbis(tmp_path, monkeypatch):
@@ -244,7 +254,12 @@ def test_mux_video_audio_falls_back_to_libvorbis(tmp_path, monkeypatch):
     out_path = tmp_path / "final.webm"
 
     monkeypatch.setattr(server_module, "ffmpeg_has_encoder", lambda name: name == "libvorbis")
-    monkeypatch.setattr(server_module, "run", lambda cmd: _cp(returncode=0))
+
+    def fake_run(cmd):
+        Path(cmd[-1]).write_bytes(b"muxed")
+        return _cp(returncode=0)
+
+    monkeypatch.setattr(server_module, "run", fake_run)
 
     result = server_module.mux_video_audio(video, audio, out_path)
 
@@ -259,7 +274,12 @@ def test_mux_video_audio_falls_back_to_aac_mp4(tmp_path, monkeypatch):
     out_path = tmp_path / "final.webm"
 
     monkeypatch.setattr(server_module, "ffmpeg_has_encoder", lambda name: name == "aac")
-    monkeypatch.setattr(server_module, "run", lambda cmd: _cp(returncode=0))
+
+    def fake_run(cmd):
+        Path(cmd[-1]).write_bytes(b"muxed")
+        return _cp(returncode=0)
+
+    monkeypatch.setattr(server_module, "run", fake_run)
 
     result = server_module.mux_video_audio(video, audio, out_path)
 
@@ -288,7 +308,18 @@ def test_mux_video_audio_raises_on_ffmpeg_failure(tmp_path, monkeypatch):
     out_path = tmp_path / "final.webm"
 
     monkeypatch.setattr(server_module, "ffmpeg_has_encoder", lambda name: name == "libopus")
-    monkeypatch.setattr(server_module, "run", lambda cmd: _cp(returncode=1, stderr="mux boom"))
+
+    def fake_run(cmd):
+        # Simulate ffmpeg having written a partial file before failing.
+        Path(cmd[-1]).write_bytes(b"partial")
+        return _cp(returncode=1, stderr="mux boom")
+
+    monkeypatch.setattr(server_module, "run", fake_run)
 
     with pytest.raises(RuntimeError, match="mux boom"):
         server_module.mux_video_audio(video, audio, out_path)
+
+    # A failed mux must never leave a partial final.* behind for export's
+    # final.* glob to ship as "the recording".
+    assert not out_path.exists()
+    assert not out_path.with_name(out_path.name + ".part").exists()

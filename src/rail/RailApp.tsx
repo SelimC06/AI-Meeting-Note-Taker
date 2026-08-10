@@ -191,7 +191,10 @@ export default function RailApp() {
     // left waiting on an ack nothing would otherwise ever send.
     const handleRetryUpload = () => {
         const formData = pendingUploadRef.current;
-        if (!formData || isProcessing) return;
+        // inFlightUploadRef, not isProcessing: same stale-state hole
+        // handleRecordClick's guard closes -- trackInFlight sets the ref
+        // synchronously, React state a render later.
+        if (!formData || inFlightUploadRef.current) return;
         void trackInFlight(async () => {
             try {
                 await runUpload(formData);

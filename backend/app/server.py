@@ -239,10 +239,16 @@ try:
     purge_expired_trash(STORE)
 except Exception as e:
     print(f"[server] startup trash purge failed (continuing): {e}", flush=True)
-sweep_orphaned_sessions(STORE)
+try:
+    sweep_orphaned_sessions(STORE)
+except Exception as e:
+    print(f"[server] startup orphan sweep failed (continuing): {e}", flush=True)
 # Independent of the sessions index entirely -- runs regardless of whether
 # the sweep above skipped due to a corrupt index.
-sweep_stale_staging_dirs(STORE)
+try:
+    sweep_stale_staging_dirs(STORE)
+except Exception as e:
+    print(f"[server] startup staging sweep failed (continuing): {e}", flush=True)
 _sweep_stale_export_zips()
 WHISPER_MODEL = _settings["whisper_model"]
 OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
@@ -388,17 +394,25 @@ def mux_video_audio(video: Path, audio: Optional[Path], out_path: Path) -> Path:
     if out_path.suffix.lower().lstrip(".") != container:
         out_path = out_path.with_suffix(f".{container}")
 
+    # Write to a temp name and promote only on success -- ffmpeg writing
+    # directly to out_path left a partial final.* behind on failure (a failed
+    # mux, e.g. disk full mid-write), which export's final.* glob then
+    # happily shipped as "the recording".
+    tmp_out = out_path.with_name(out_path.name + ".part")
     args = [
         "-i", str(video),
         "-i", str(audio),
         "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "copy",
         "-c:a", acodec,
-        str(out_path),
+        "-f", container,
+        str(tmp_out),
     ]
     p = run([FFMPEG_BIN, "-y", *args])
     if p.returncode != 0:
+        tmp_out.unlink(missing_ok=True)
         raise RuntimeError(p.stderr[-1200:] if p.stderr else "mux failed")
+    os.replace(tmp_out, out_path)
     return out_path
 
 _OLLAMA_HEALTH_TTL_SECONDS = 10.0
@@ -407,27 +421,39 @@ _ollama_health_lock = threading.Lock()
 
 def _ollama_health_cached() -> bool:
     # /health is polled by the Electron watchdog with a 3s abort -- it must
-    # answer instantly. The real Ollama probe (worst case ~10s against an
-    # unroutable host) runs on at most one request per TTL window; everyone
-    # else -- including every probe while a refresh is in flight -- gets the
-    # cached value.
+    # answer instantly, always. The real Ollama probe (worst case ~10s
+    # against an unroutable host) used to run synchronously on whichever
+    # request's TTL expired, stalling that one caller for the full probe.
+    # Now the probe always runs on a background daemon thread and every
+    # caller -- including the one whose TTL just expired -- gets the cached
+    # value immediately. The lock guards "a refresh thread is already
+    # running" (released by that thread, not by this function), so a plain
+    # Lock is correct even though the acquire/release cross threads.
+    # Bound to locals (not looked up via module globals inside _refresh) so
+    # the background thread keeps operating on the exact lock/dict it
+    # acquired even if something later reassigns the module-level names --
+    # e.g. tests that importlib.reload(server_module) while a refresh from a
+    # previous call is still in flight would otherwise have the thread
+    # release a DIFFERENT, freshly-created (and unlocked) Lock object.
+    health = _ollama_health
+    lock = _ollama_health_lock
     now = time.time()
-    if now - _ollama_health["checked_at"] < _OLLAMA_HEALTH_TTL_SECONDS:
-        return _ollama_health["ok"]
-    if not _ollama_health_lock.acquire(blocking=False):
-        return _ollama_health["ok"]
-    try:
-        ok = assert_ollama_up is not None
-        if ok:
-            try:
-                assert_ollama_up()
-            except Exception:
-                ok = False
-        _ollama_health["ok"] = ok
-        _ollama_health["checked_at"] = time.time()
-        return ok
-    finally:
-        _ollama_health_lock.release()
+    if now - health["checked_at"] >= _OLLAMA_HEALTH_TTL_SECONDS:
+        if lock.acquire(blocking=False):
+            def _refresh():
+                try:
+                    ok = assert_ollama_up is not None
+                    if ok:
+                        try:
+                            assert_ollama_up()
+                        except Exception:
+                            ok = False
+                    health["ok"] = ok
+                    health["checked_at"] = time.time()
+                finally:
+                    lock.release()
+            threading.Thread(target=_refresh, daemon=True).start()
+    return health["ok"]
 
 @app.get("/health")
 @app.get("/healthz")
@@ -586,27 +612,32 @@ def patch_settings(body: SettingsUpdate):
             try:
                 move_storage_dir(STORE, new_dir)
             except StorageMoveError as e:
+                with _store_state_lock:
+                    move_in_progress = False
                 raise HTTPException(400, str(e))
-            finally:
+            # Success: flip STORE and clear move_in_progress in ONE locked step --
+            # clearing first (the old finally) let /process register an upload
+            # against the old, emptied dir in the gap before the flip.
+            with _store_state_lock:
+                STORE = Path(new_dir)
                 move_in_progress = False
-            # The files live in new_dir from this point no matter what happens
-            # below -- flip the live global FIRST so a failed settings.json
-            # write can't leave the server reading the old, emptied directory.
-            STORE = Path(new_dir)
-            STORE.mkdir(parents=True, exist_ok=True)
-            rewrite_index_paths(STORE, old_store_dir, STORE)
             updates["storage_dir"] = str(new_dir)
 
         try:
+            if body.storage_dir is not None:
+                STORE.mkdir(parents=True, exist_ok=True)
+                rewrite_index_paths(STORE, old_store_dir, STORE)
             settings = save_settings(SETTINGS_PATH, updates, ROOT / "uploads")
         except OSError as e:
-            raise HTTPException(
-                500,
-                f"Recordings were moved to {updates['storage_dir']}, but saving "
-                f"settings.json failed: {e}. The app is using the new folder for now; "
-                "fix the settings file (or free disk space) and save settings again -- "
-                "otherwise the app will look in the old folder after a restart.",
-            )
+            if body.storage_dir is not None:
+                raise HTTPException(
+                    500,
+                    f"Recordings were moved to {updates['storage_dir']}, but saving "
+                    f"settings.json failed: {e}. The app is using the new folder for now; "
+                    "fix the settings file (or free disk space) and save settings again -- "
+                    "otherwise the app will look in the old folder after a restart.",
+                )
+            raise HTTPException(500, f"Saving settings failed: {e}")
 
         STORE = Path(settings["storage_dir"])
         STORE.mkdir(parents=True, exist_ok=True)

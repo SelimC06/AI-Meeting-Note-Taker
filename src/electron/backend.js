@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -173,6 +174,25 @@ function samePath(a, b) {
 // After sending the kill signal, the OS can take a while to actually release the socket —
 // measured against the real frozen backend binary, this took ~600ms, well past any short
 // fixed delay. So we poll for the port to actually be free rather than guessing a duration.
+// Cheap (~1ms, no process spawn) "is anything listening" probe: binding
+// succeeds only if the port is actually free. Can't say WHOSE process holds
+// an occupied port -- that still needs the PowerShell-backed
+// findPidsListeningOnPort below, kept for the kill decision.
+function probePortFree(port) {
+    return new Promise((resolve) => {
+        const srv = net.createServer();
+        srv.once('error', () => resolve(false));
+        // Must match the backend's own bind address (127.0.0.1, see
+        // server.py's uvicorn.run) -- binding with no host at all listens on
+        // every interface (0.0.0.0 / ::), which on Windows can succeed
+        // alongside another process already bound to just 127.0.0.1,
+        // reporting an occupied port as free.
+        srv.listen(port, '127.0.0.1', () => {
+            srv.close(() => resolve(true));
+        });
+    });
+}
+
 export async function ensurePortFree(
     port,
     expectedExePath,
@@ -180,6 +200,11 @@ export async function ensurePortFree(
     releaseTimeoutMs = 5000,
     getExecutablePathFn = getProcessExecutablePath
 ) {
+    // The common case on every startup: the port is already free, and the
+    // bind probe answers that without ever spawning powershell.exe (a
+    // 0.5-3s cold start) on the startup critical path.
+    if (await probePortFree(port)) return true;
+
     const pids = await findPidsListeningOnPort(port, platform);
     if (pids.length === 0) return true;
 
@@ -191,17 +216,17 @@ export async function ensurePortFree(
         killedAny = true;
     }
 
-    if (killedAny) {
-        const deadline = Date.now() + releaseTimeoutMs;
-        while (Date.now() < deadline) {
-            const stillListening = await findPidsListeningOnPort(port, platform);
-            if (stillListening.length === 0) return true;
-            await new Promise((resolve) => setTimeout(resolve, 100));
-        }
+    // Nothing we own was holding the port -- the listing above already
+    // answered the question, so skip the redundant final re-query.
+    if (!killedAny) return false;
+
+    const deadline = Date.now() + releaseTimeoutMs;
+    while (Date.now() < deadline) {
+        if (await probePortFree(port)) return true;
+        await new Promise((resolve) => setTimeout(resolve, 100));
     }
 
-    const remaining = await findPidsListeningOnPort(port, platform);
-    return remaining.length === 0;
+    return probePortFree(port);
 }
 
 export const HEALTH_ATTEMPT_TIMEOUT_MS = 3000;

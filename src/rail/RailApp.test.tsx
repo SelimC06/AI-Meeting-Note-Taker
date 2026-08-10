@@ -896,6 +896,49 @@ it("retryUploadForClose waits for (and does not double-ack) an already in-flight
   });
 });
 
+it("handleRetryUpload guards against retryUploadForClose racing it in the same tick (no double-submit)", async () => {
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  const notifyStopAndSaveComplete = vi.fn();
+  const pushRailStatus = vi.fn();
+  vi.stubGlobal("windowControls", { pushRailStatus, onRailCommand, notifyStopAndSaveComplete });
+
+  const record = vi.fn().mockResolvedValue(undefined);
+  const stop = vi.fn().mockResolvedValue({ screen: new Blob(["x"]) });
+  mockHook({ status: "recording", record, stop, error: null });
+
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce({ ok: false, status: 500, text: () => Promise.resolve("boom") })
+    .mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ job_id: "job-1", session_id: "session-1" }),
+    });
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { container, getByRole } = render(<RailApp />);
+  fireEvent.click(container.querySelectorAll("button")[0]); // manual stop -> failed upload
+
+  const retryButton = await waitFor(() => getByRole("button", { name: "retry upload" }));
+
+  // retryUploadForClose fires first and sets inFlightUploadRef synchronously
+  // via trackInFlight, in the same tick as the button click below -- before
+  // React re-renders isProcessing. handleRetryUpload's guard must check that
+  // ref (not the stale isProcessing state) to see the upload already
+  // in-flight and bail, instead of double-POSTing the same FormData.
+  commandCallback?.("retryUploadForClose");
+  fireEvent.click(retryButton);
+
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  // Give a wrongly-fired third POST a chance to happen before asserting it didn't.
+  await act(() => Promise.resolve());
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
 it("calls pause when a pause command arrives while recording", () => {
   let commandCallback: ((action: string) => void) | undefined;
   const onRailCommand = vi.fn((cb: (action: string) => void) => {

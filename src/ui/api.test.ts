@@ -24,6 +24,25 @@ async function collect(gen: AsyncGenerator<string>): Promise<string[]> {
   return out;
 }
 
+// Wraps a stream's getReader() so the returned reader's cancel() is spied on
+// -- a fully-read (already closed) stream's real cancel() is a spec-defined
+// no-op that never reaches the underlying source, so watching for that
+// side effect can't tell us whether streamChatReply actually called it.
+function trackReaderCancel(stream: ReadableStream<Uint8Array>) {
+  const originalGetReader = stream.getReader.bind(stream);
+  const cancelSpy = vi.fn();
+  (stream as unknown as { getReader: typeof stream.getReader }).getReader = ((...args: []) => {
+    const reader = originalGetReader(...args);
+    const originalCancel = reader.cancel.bind(reader);
+    reader.cancel = (reason?: unknown) => {
+      cancelSpy(reason);
+      return originalCancel(reason);
+    };
+    return reader;
+  }) as typeof stream.getReader;
+  return cancelSpy;
+}
+
 it("flushes a multi-byte UTF-8 character split across two network chunks", async () => {
   // "café" -- the "é" encodes to the two bytes 0xC3 0xA9. Split the NDJSON
   // line right between them so neither chunk alone is valid UTF-8.
@@ -57,4 +76,71 @@ it("throws on a mid-stream {error} line instead of yielding it as text", async (
     })()
   ).rejects.toThrow("Chat failed mid-response: ollama died");
   expect(received).toEqual(["chunk one"]);
+});
+
+it("treats a truncated NDJSON tail as a connection interruption, not a raw SyntaxError", async () => {
+  // The backend died mid-line (crash, watchdog restart): the stream ends
+  // cleanly (no error, no more bytes) but the last "line" is a truncated
+  // JSON fragment.
+  const bytes = new TextEncoder().encode(
+    JSON.stringify({ token: "chunk one" }) + "\n" + '{"token": "hal'
+  );
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+  const cancelSpy = trackReaderCancel(stream);
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(stream, { status: 200 })));
+
+  const gen = streamChatReply("s1", "hi", []);
+  const received: string[] = [];
+  await expect(
+    (async () => {
+      for await (const chunk of gen) received.push(chunk);
+    })()
+  ).rejects.toThrow("Chat connection was interrupted before the reply finished.");
+  expect(received).toEqual(["chunk one"]);
+  expect(cancelSpy).toHaveBeenCalled();
+});
+
+it("cancels the stream reader once the generator completes cleanly", async () => {
+  const bytes = new TextEncoder().encode(JSON.stringify({ token: "hi" }) + "\n");
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+  const cancelSpy = trackReaderCancel(stream);
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(stream, { status: 200 })));
+
+  const chunks = await collect(streamChatReply("s1", "hi", []));
+  expect(chunks).toEqual(["hi"]);
+  expect(cancelSpy).toHaveBeenCalled();
+});
+
+it("cancels the stream reader on a mid-stream {error} line too", async () => {
+  const bytes = new TextEncoder().encode(
+    JSON.stringify({ token: "chunk one" }) + "\n" + JSON.stringify({ error: "ollama died" }) + "\n"
+  );
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+  const cancelSpy = trackReaderCancel(stream);
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(stream, { status: 200 })));
+
+  const gen = streamChatReply("s1", "hi", []);
+  await expect(
+    (async () => {
+      for await (const _chunk of gen) {
+        // drain
+      }
+    })()
+  ).rejects.toThrow("Chat failed mid-response: ollama died");
+  expect(cancelSpy).toHaveBeenCalled();
 });

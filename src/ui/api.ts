@@ -103,22 +103,37 @@ export async function* streamChatReply(
     return obj.token ?? "";
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let newline;
-    while ((newline = buffer.indexOf("\n")) !== -1) {
-      const line = buffer.slice(0, newline).trim();
-      buffer = buffer.slice(newline + 1);
-      if (line) yield parseLine(line);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newline;
+      while ((newline = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line) yield parseLine(line);
+      }
     }
+    // Final flush: a multi-byte character split across the last two chunks is
+    // still buffered inside the decoder until this argument-less call.
+    buffer += decoder.decode();
+    const rest = buffer.trim();
+    if (rest) {
+      try {
+        yield parseLine(rest);
+      } catch (e) {
+        if (e instanceof SyntaxError) {
+          // The backend died mid-line -- surface it as what it is instead of
+          // leaking a JSON parser error into the chat UI.
+          throw new Error("Chat connection was interrupted before the reply finished.");
+        }
+        throw e; // a real {"error": ...} line rethrows its own message
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
   }
-  // Final flush: a multi-byte character split across the last two chunks is
-  // still buffered inside the decoder until this argument-less call.
-  buffer += decoder.decode();
-  const rest = buffer.trim();
-  if (rest) yield parseLine(rest);
 }
 
 export type WhisperModelChoice = {

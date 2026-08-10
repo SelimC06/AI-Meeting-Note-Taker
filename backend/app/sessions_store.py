@@ -297,7 +297,7 @@ _SESSION_DIR_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 # dir -- checked separately below) marks a directory as real recording/
 # processing output rather than empty junk, for the sweep's adopt-vs-delete
 # decision.
-_RECORDING_DATA_FILENAMES = ("screen.webm", "system.webm", "mic.webm", "final.webm", "notes.md")
+_RECORDING_DATA_FILENAMES = ("screen.webm", "system.webm", "mic.webm", "final.webm", "final.mp4", "notes.md")
 
 
 def _has_recording_data(session_dir: Path) -> bool:
@@ -333,8 +333,17 @@ def _adopt_orphan_session(store_dir: Path, session_dir: Path) -> dict:
             "session's folder._\n"
         )
 
+    # Mirrors the export endpoint's video_path-then-fallback order: webm is
+    # the normal container, mp4 is what a fallback (aac-only) ffmpeg mux
+    # produces -- either one is a completed recording worth adopting.
     final_webm = session_dir / "final.webm"
-    video_path = str(final_webm) if final_webm.exists() else ""
+    final_mp4 = session_dir / "final.mp4"
+    if final_webm.exists():
+        video_path = str(final_webm)
+    elif final_mp4.exists():
+        video_path = str(final_mp4)
+    else:
+        video_path = ""
 
     record = {
         "id": session_dir.name,

@@ -23,10 +23,23 @@ def client(tmp_path, monkeypatch):
     # Redirect settings.json to a temp file so tests don't pollute/read the
     # real backend/app/settings.json in this checkout.
     monkeypatch.setattr(server_module, "SETTINGS_PATH", tmp_path / "settings.json")
+    # _ollama_health_cached() refreshes on a background daemon thread, which
+    # can still be in flight from the previous test when this fixture runs.
+    # Block on the lock first -- it's only held while a _refresh thread is
+    # running, and released right after that thread's writes -- so by the
+    # time this returns, no stale thread is left that could clobber the
+    # fresh dict installed below.
+    with server_module._ollama_health_lock:
+        pass
     # Reset the /health Ollama status cache so each test starts with a cold
     # cache -- otherwise a cached value from a previous test (module-level
     # state, TTL 10s) would leak into this test's assertions.
     monkeypatch.setattr(server_module, "_ollama_health", {"ok": False, "checked_at": 0.0})
+    # Default to a fast, always-succeeding probe so tests that don't care
+    # about the ollama field never wait on (or race with) a real network
+    # call. Tests that care about a specific outcome monkeypatch
+    # assert_ollama_up again themselves, after this fixture runs.
+    monkeypatch.setattr(server_module, "assert_ollama_up", lambda: None)
     # base_url must be an allowed TrustedHostMiddleware host -- the default
     # "http://testserver" would otherwise get rejected with 400 before
     # reaching any route, since only localhost/127.0.0.1 are allowed.
@@ -34,6 +47,20 @@ def client(tmp_path, monkeypatch):
 
 
 import time
+
+
+def wait_for_ollama_refresh(timeout: float = 2.0) -> None:
+    # _ollama_health_cached() now always kicks the real probe onto a
+    # background daemon thread and returns the cached value instantly --
+    # tests that need to see the probe's *result* have to wait for that
+    # thread to land it in _ollama_health rather than reading the response
+    # of the triggering /health call.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if server_module._ollama_health["checked_at"] > 0.0:
+            return
+        time.sleep(0.01)
+    raise AssertionError("ollama health refresh did not complete in time")
 
 
 def wait_for_job(client: TestClient, job_id: str, timeout: float = 2.0) -> dict:
@@ -1154,14 +1181,23 @@ def test_health_reports_ollama_down_on_read_timeout_instead_of_hanging(client, m
     body = resp.json()
     assert body["ok"] is True
     assert body["backend"] is True
+    # First call on a cold cache always reports the stale cached value (False)
+    # instantly -- the probe itself now runs on a background thread and can
+    # no longer block this request even when it hangs.
     assert body["ollama"] is False
+
+    wait_for_ollama_refresh()
+    assert server_module._ollama_health["ok"] is False
 
 
 def test_health_caches_ollama_status_across_immediate_requests(client, monkeypatch):
     """Regression test for the watchdog kill-loop: /health is polled with a
     3s abort by the Electron watchdog, so it must answer instantly even when
-    the real Ollama probe is slow. Two immediate /health calls should only
-    invoke assert_ollama_up once -- the second is served from the TTL cache.
+    the real Ollama probe is slow. The probe always runs on a background
+    daemon thread now, never on the request thread, so two immediate /health
+    calls both return the cached value instantly and only the first starts a
+    refresh thread -- the second's lock.acquire fails while that thread is
+    still in flight.
     """
     calls = []
 
@@ -1173,13 +1209,15 @@ def test_health_caches_ollama_status_across_immediate_requests(client, monkeypat
 
     first = client.get("/health")
     assert first.status_code == 200
-    assert first.json()["ollama"] is True
-    assert len(calls) == 1
+    assert first.json()["ollama"] is False
 
     second = client.get("/health")
     assert second.status_code == 200
-    assert second.json()["ollama"] is True
-    assert len(calls) == 1, "second immediate call should be served from cache, not re-invoke assert_ollama_up"
+    assert second.json()["ollama"] is False
+    assert len(calls) == 1, "second immediate call should not start a second refresh thread"
+
+    wait_for_ollama_refresh()
+    assert server_module._ollama_health["ok"] is True
 
 
 def test_health_reports_ollama_false_when_assert_ollama_up_raises(client, monkeypatch):
@@ -1194,6 +1232,9 @@ def test_health_reports_ollama_false_when_assert_ollama_up_raises(client, monkey
     assert body["ok"] is True
     assert body["backend"] is True
     assert body["ollama"] is False
+
+    wait_for_ollama_refresh()
+    assert server_module._ollama_health["ok"] is False
 
 
 def test_process_does_not_extract_frames_via_stop_recording_and_transcribe(client, monkeypatch):
