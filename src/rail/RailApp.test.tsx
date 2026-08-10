@@ -30,7 +30,6 @@ function mockHook(overrides: Partial<ReturnType<typeof useThreeTrackSegments>> =
     resume: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue({}),
     error: null,
-    clearError: vi.fn(),
     micStream: null,
     ...overrides,
   });
@@ -270,8 +269,7 @@ it("routes a click while status is 'starting' to stop() and disables the record 
 });
 
 it("renders an ErrorToast with the display error and hides only the toast (not the red dot) on dismiss", async () => {
-  const clearError = vi.fn();
-  mockHook({ error: { kind: "permission-denied", message: "Screen or microphone access denied — check your OS privacy settings." }, clearError });
+  mockHook({ error: { kind: "permission-denied", message: "Screen or microphone access denied — check your OS privacy settings." } });
 
   const { getByText, getByRole, container, queryByText } = render(<RailApp />);
   expect(
@@ -280,12 +278,11 @@ it("renders an ErrorToast with the display error and hides only the toast (not t
 
   fireEvent.click(getByRole("button", { name: "close" }));
 
-  // The toast message is gone...
+  // The toast message is gone, but the underlying error state persists --
+  // the red dot must still reflect it.
   expect(
     queryByText("Screen or microphone access denied — check your OS privacy settings.")
   ).toBeNull();
-  // ...but the underlying error state was never cleared.
-  expect(clearError).not.toHaveBeenCalled();
   const dot = container.querySelector("span[title]") as HTMLElement;
   expect(dot).toHaveAttribute(
     "title",

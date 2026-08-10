@@ -29,6 +29,14 @@ contextBridge.exposeInMainWorld('windowControls', {
     ipcRenderer.on('rail:status', listener);
     return () => ipcRenderer.removeListener('rail:status', listener);
   },
+  getRailStatus: async () => {
+    try {
+      return await ipcRenderer.invoke('rail:getStatus');
+    } catch (e) {
+      console.warn("[preload] getRailStatus failed:", e);
+      return null;
+    }
+  },
 
   beginRailFloatDrag: (slotRect) => ipcRenderer.invoke('rail:beginFloatDrag', slotRect),
   railFloatDragMove: () => ipcRenderer.send('rail:dragMove'),
@@ -59,15 +67,6 @@ contextBridge.exposeInMainWorld('windowControls', {
 });
 
 contextBridge.exposeInMainWorld("electronAPI", {
-  listCaptureSources: async (types = ["screen", "window"]) => {
-    try {
-      return await ipcRenderer.invoke("list-capture-sources", types);
-    } catch (e) {
-      console.warn("[preload] listCaptureSources failed:", e);
-      return [];
-    }
-  },
-
   pickPrimaryScreenId: async () => {
     const list = await ipcRenderer.invoke("list-capture-sources", ["screen"]);
     return list[0]?.id ?? null;
@@ -157,7 +156,7 @@ contextBridge.exposeInMainWorld("updaterAPI", {
       return await ipcRenderer.invoke('updater:getStatus');
     } catch (e) {
       console.warn("[preload] updater getStatus failed:", e);
-      return { state: "idle" };
+      return { state: "not-checked" };
     }
   },
 });

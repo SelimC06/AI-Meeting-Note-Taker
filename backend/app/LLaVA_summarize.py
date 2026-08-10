@@ -66,6 +66,13 @@ def complete(
     _assert_ollama_up()
 
     transcript = Path(raw_txt_path).read_text(encoding="utf-8")
+    # max_chars used to be accepted but never applied -- a long transcript
+    # could blow past num_ctx and Ollama silently truncated the whole
+    # prompt (including the system instructions after it), instead of just
+    # the transcript. Truncate here, before it's ever embedded in the
+    # prompt, so the instructions and template always survive intact.
+    if max_chars is not None and len(transcript) > max_chars:
+        transcript = transcript[:max_chars] + "\n[transcript truncated]"
 
     system_prompt = (
         "You are a precise meeting-notes assistant.\n"

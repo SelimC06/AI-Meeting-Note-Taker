@@ -99,16 +99,3 @@ export function getAudioRecorder(stream: MediaStream, timesliceMs = 1000): Strea
     timesliceMs
   );
 }
-
-/** If you ever want ONE recorder with video + (system/mic) audio */
-export function composeAVStream(
-  screen: MediaStream,
-  systemAudio?: MediaStream,
-  micAudio?: MediaStream
-): MediaStream {
-  const tracks: MediaStreamTrack[] = [];
-  tracks.push(...screen.getVideoTracks());
-  if (systemAudio) tracks.push(...systemAudio.getAudioTracks());
-  if (micAudio) tracks.push(...micAudio.getAudioTracks());
-  return new MediaStream(tracks);
-}

@@ -22,6 +22,11 @@ declare global {
     | { state: "failed"; logTail: string };
 
   type UpdaterStatus =
+    // Before the very first check has ever run (or reported back) --
+    // distinct from "idle" (a completed check that found no update), which
+    // used to be the initial/default state too and rendered "You're on the
+    // latest version" even though no check had actually happened yet.
+    | { state: "not-checked" }
     | { state: "checking" }
     | { state: "available"; version: string }
     | { state: "idle" }
@@ -81,10 +86,20 @@ declare global {
       // stopAndSaveRailRecording / rail:stopAndSaveComplete.
       notifyStopAndSaveComplete: () => void;
       onRailStatus: (callback: (status: RailStatus) => void) => () => void;
+      // Pull side of the pull+push handshake: onRailStatus alone can miss
+      // status pushed before a freshly mounted DockedRail's listener is
+      // wired up (or simply hasn't arrived yet post-reload), leaving it on
+      // DEFAULT_STATUS -- which reads "idle" and enabled -- for up to ~1s.
+      // null if the rail hasn't pushed anything yet.
+      getRailStatus: () => Promise<RailStatus | null>;
       beginRailFloatDrag: (slotRect: RailRect) => Promise<void>;
       railFloatDragMove: () => void;
       endRailFloatDrag: () => Promise<void>;
-      updateDockSlotRect: (slotRect: RailRect) => void;
+      // null explicitly disables the dock slot (sent while the sidebar is
+      // collapsed -- its container's rect doesn't change size when the
+      // outer wrapper collapses, so there's no geometry-based way for main
+      // to detect that on its own).
+      updateDockSlotRect: (slotRect: RailRect | null) => void;
       getRailFloating: () => Promise<boolean>;
       onRailFloating: (callback: (floating: boolean) => void) => () => void;
       reattachRail: () => Promise<void>;
@@ -92,7 +107,6 @@ declare global {
       getVersion: () => Promise<string>;
     };
     electronAPI?: {
-      listCaptureSources: (types?: string[]) => Promise<{ id: string; name: string }[]>;
       pickPrimaryScreenId: () => Promise<string | null>;
       setRailErrorVisible: (visible: boolean) => Promise<void>;
     };

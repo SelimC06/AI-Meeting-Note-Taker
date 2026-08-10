@@ -72,7 +72,7 @@ def stop_recording_and_transcribe(
 
     full_text = " ".join(seg.text for seg in segments).strip()
     out_txt = Path(transcript_prefix).with_suffix(".txt")
-    if (out_txt.exists):
+    if out_txt.exists():
         with out_txt.open("a", encoding="utf-8") as f:
             f.write(f"\n---\n{full_text}")
     else:

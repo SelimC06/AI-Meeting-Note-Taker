@@ -21,9 +21,14 @@ export type Session = {
 // threads the actual port through via window.BACKEND_CONFIG (preload.js).
 // VITE_MEETING_API_URL still wins outright for the plain-vite-dev-server case,
 // where there's no Electron preload to read it from.
+// 127.0.0.1, not localhost: main.js itself binds/probes the backend at
+// 127.0.0.1 (see backend.js's waitForHealth), so "localhost" here resolved
+// through DNS/hosts first -- on a machine where that tries IPv6 (::1)
+// before IPv4, every single request paid a connection-refused fallback
+// before landing on the same IPv4 address main.js was already using.
 export const BACKEND_URL =
   import.meta.env.VITE_MEETING_API_URL ??
-  `http://localhost:${window.BACKEND_CONFIG?.port ?? 8000}`;
+  `http://127.0.0.1:${window.BACKEND_CONFIG?.port ?? 8000}`;
 
 export async function getSessions(includeTrashed = false): Promise<Session[]> {
   const url = includeTrashed

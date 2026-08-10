@@ -21,6 +21,7 @@ import {
 import { sanitizeCaptureSourceTypes } from './captureSources.js';
 import { distReactPath } from './paths.js';
 import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob } from './closeGuard.js';
+import { sanitizeRailStatus, isValidSlotRect } from './railValidation.js';
 
 let railErrorVisible = false;
 let isRailFloatDragging = false;
@@ -45,6 +46,13 @@ let lastRailIsProcessing = false;
 // back via the "retry upload" toast action. Without this, closing here
 // proceeded with no guard at all and silently discarded that recording (G3).
 let lastRailHasPendingUpload = false;
+// The full sanitized last rail:pushStatus payload (not just the three
+// booleans above) -- null until the rail's first push. Lets a freshly
+// mounted DockedRail pull the CURRENT status instead of sitting on
+// DEFAULT_STATUS (which reads "idle"/enabled) for up to ~1s after a
+// dashboard reload, during which a stray click on what looks like "Start
+// recording" would actually stop a live one (brief 12 #4).
+let lastFullRailStatus = null;
 // Set once the user has confirmed closing (via performGuardedClose below,
 // or there was nothing to guard) so the guarded 'close' handler lets a
 // second, self-triggered mainWindow.close() through instead of looping.
@@ -129,6 +137,30 @@ function disableZoom(webContents) {
     if (typeof webContents.setVisualZoomLevelLimits === 'function') {
         webContents.setVisualZoomLevelLimits(1, 1).catch(() => {});
     }
+}
+
+// Hardening only, applied to both windows: each one loads its own bundled
+// HTML file via loadFile() exactly once and does all "navigation"
+// client-side (React state, no real page loads) -- there is no legitimate
+// reason for a real top-level navigation to ever happen afterward. Without
+// this, a compromised/malicious renderer (or a stray link, window.location
+// assignment, etc.) could navigate the window away to attacker-controlled
+// content. External links are handled separately via setWindowOpenHandler.
+function preventNavigation(webContents) {
+    webContents.on('will-navigate', (event) => {
+        event.preventDefault();
+    });
+}
+
+// Denies opening a new window/tab; https(s) links are handed off to the
+// system browser instead of ever loading inside this app.
+function denyWindowOpenExceptExternalHttp(webContents) {
+    webContents.setWindowOpenHandler(({ url }) => {
+        if (/^https?:\/\//.test(url)) {
+            shell.openExternal(url);
+        }
+        return { action: 'deny' };
+    });
 }
 
 // Shared by the click-to-reattach button and by settleFloatingRailPosition's
@@ -287,6 +319,8 @@ function createRailWindow() {
         }, 120);
     });
     disableZoom(railWindow.webContents);
+    preventNavigation(railWindow.webContents);
+    denyWindowOpenExceptExternalHttp(railWindow.webContents);
 
     let railFile;
     try {
@@ -320,12 +354,27 @@ ipcMain.handle('rail:command', (_event, action) => {
 });
 
 ipcMain.handle('rail:pushStatus', (_event, status) => {
-    lastRailStatus = status?.status ?? 'idle';
-    lastRailIsProcessing = !!status?.isProcessing;
-    lastRailHasPendingUpload = !!status?.hasPendingUpload;
+    const sanitized = sanitizeRailStatus(status);
+    if (!sanitized) {
+        console.warn('[main] dropped malformed rail:pushStatus payload:', status);
+        return;
+    }
+    lastFullRailStatus = sanitized;
+    lastRailStatus = sanitized.status;
+    lastRailIsProcessing = sanitized.isProcessing;
+    lastRailHasPendingUpload = sanitized.hasPendingUpload;
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    mainWindow.webContents.send('rail:status', status);
+    mainWindow.webContents.send('rail:status', sanitized);
 });
+
+// Pull side of the same pull+push handshake used for backend:status (see
+// backend:getStatus) -- a freshly mounted DockedRail (e.g. after a
+// dashboard reload) has no way to learn the CURRENT status other than
+// waiting for the next push, which can be ~1s away (RailApp's elapsed-time/
+// level ticks). Until then it would sit on DEFAULT_STATUS, which reads
+// "idle" and leaves the Record button enabled -- one click during that
+// window would send toggleRecord and stop an actually-live recording.
+ipcMain.handle('rail:getStatus', () => lastFullRailStatus);
 
 // Acked by RailApp.tsx once a stop triggered by stopAndSaveRailRecording()
 // below (the "Stop && Save" dialog choice) has finished its upload handoff
@@ -336,6 +385,10 @@ ipcMain.on('rail:stopAndSaveComplete', () => {
 
 ipcMain.handle('rail:beginFloatDrag', (_event, slotRect) => {
     if (!mainWindow || mainWindow.isDestroyed() || !railWindow || railWindow.isDestroyed()) return;
+    if (!isValidSlotRect(slotRect)) {
+        console.warn('[main] dropped malformed slotRect in rail:beginFloatDrag:', slotRect);
+        return;
+    }
     // Set the guard flag and clear any pending settle timer / in-flight
     // animation FIRST, before the setBounds/show() calls below. Those calls
     // can synchronously emit the window's 'moved' event, and if the guard
@@ -382,6 +435,15 @@ ipcMain.handle('rail:endFloatDrag', () => {
 
 ipcMain.on('rail:updateDockSlotRect', (_event, slotRect) => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!isValidSlotRect(slotRect)) {
+        console.warn('[main] dropped malformed slotRect in rail:updateDockSlotRect:', slotRect);
+        return;
+    }
+    // null is DockedRail explicitly disabling the dock slot while the
+    // sidebar is collapsed -- currentDockSlotScreenRect() already treats a
+    // falsy lastDockSlotClientRect as "no valid slot", so this alone is
+    // enough to stop a drop from hit-testing against stale (now-hidden)
+    // coordinates (brief 12 #1).
     lastDockSlotClientRect = slotRect;
 });
 
@@ -562,12 +624,8 @@ function createWindow() {
         }
     });
     disableZoom(mainWindow.webContents);
-    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-        if (/^https?:\/\//.test(url)) {
-            shell.openExternal(url);
-        }
-        return { action: 'deny' };
-    });
+    preventNavigation(mainWindow.webContents);
+    denyWindowOpenExceptExternalHttp(mainWindow.webContents);
     // If the dashboard renderer reloads or crash-recovers mid-drag, its
     // DockedRail component (and whatever pointer state it held) is gone —
     // but isRailFloatDragging is main-process state, so nothing else would

@@ -1,9 +1,17 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import Chat from "./Chat";
 import { streamChatReply, type Session } from "../api";
 
 vi.mock("../api");
+
+// jsdom doesn't implement scrollIntoView at all, but Chat's auto-scroll
+// effect calls it on every turns change (i.e. in nearly every test in this
+// file) -- stub it globally so tests that don't care about scrolling don't
+// have to.
+beforeEach(() => {
+  Element.prototype.scrollIntoView = vi.fn();
+});
 
 const sessionA: Session = {
   id: "a1",
@@ -65,6 +73,56 @@ it("streams chunks and appends them to the last assistant turn", async () => {
   fireEvent.keyDown(input, { key: "Enter" });
 
   expect(await screen.findByText("Hello world")).toBeInTheDocument();
+});
+
+// jsdom's scrollHeight/clientHeight/scrollTop are getter-only and always 0
+// by default -- override them via defineProperty to simulate a real
+// scroll position for the auto-scroll tests below.
+function setScrollMetrics(
+  el: Element,
+  { scrollTop, scrollHeight, clientHeight }: { scrollTop: number; scrollHeight: number; clientHeight: number }
+) {
+  Object.defineProperty(el, "scrollTop", { value: scrollTop, configurable: true });
+  Object.defineProperty(el, "scrollHeight", { value: scrollHeight, configurable: true });
+  Object.defineProperty(el, "clientHeight", { value: clientHeight, configurable: true });
+}
+
+it("auto-scrolls to the bottom as chunks stream in while already near the bottom", async () => {
+  vi.mocked(streamChatReply).mockImplementation(() => twoChunkStream());
+
+  const { container } = render(<Chat sessions={[sessionA]} sessionsError={null} selectedId="a1" />);
+  const messagesContainer = container.querySelector(".overflow-y-auto");
+  if (!messagesContainer) throw new Error("messages container not found");
+  // Already scrolled to (within a few px of) the bottom.
+  setScrollMetrics(messagesContainer, { scrollTop: 480, scrollHeight: 500, clientHeight: 20 });
+  const scrollIntoView = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
+  scrollIntoView.mockClear(); // discard the mount-time call (default 0/0/0 metrics also count as "near bottom")
+
+  const input = await screen.findByLabelText("Chat message");
+  fireEvent.change(input, { target: { value: "what happened?" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  await screen.findByText("Hello world");
+  expect(scrollIntoView).toHaveBeenCalledWith({ block: "end" });
+});
+
+it("does not fight manual scrollback while a reply streams in", async () => {
+  vi.mocked(streamChatReply).mockImplementation(() => twoChunkStream());
+
+  const { container } = render(<Chat sessions={[sessionA]} sessionsError={null} selectedId="a1" />);
+  const messagesContainer = container.querySelector(".overflow-y-auto");
+  if (!messagesContainer) throw new Error("messages container not found");
+  // Scrolled well away from the bottom, reading earlier messages.
+  setScrollMetrics(messagesContainer, { scrollTop: 0, scrollHeight: 500, clientHeight: 20 });
+  const scrollIntoView = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
+  scrollIntoView.mockClear();
+
+  const input = await screen.findByLabelText("Chat message");
+  fireEvent.change(input, { target: { value: "what happened?" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  await screen.findByText("Hello world");
+  expect(scrollIntoView).not.toHaveBeenCalled();
 });
 
 it("aborts the stream when Stop is clicked and shows no error", async () => {

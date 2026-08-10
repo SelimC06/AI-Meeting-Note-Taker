@@ -86,3 +86,77 @@ def test_audit_log_concurrent_writes_do_not_corrupt_lines(tmp_path, monkeypatch)
     assert len(lines) == n
     for line in lines:
         json.loads(line)
+
+
+def test_audit_log_rotates_when_it_exceeds_the_size_cap(tmp_path, monkeypatch):
+    """
+    Regression test for brief 13 #6: audit.jsonl grew unbounded for the life
+    of the app. Once it crosses the size cap, the next write must rotate the
+    existing file aside (keeping exactly one rotated copy) before appending
+    the new entry to a fresh file.
+    """
+    log_path = tmp_path / "audit.jsonl"
+    rotated_path = tmp_path / "audit.jsonl.1"
+    log_path.write_text("old entry\n", encoding="utf-8")
+
+    monkeypatch.setattr(audit, "LOG_PATH", log_path)
+    monkeypatch.setattr(audit, "_LOG_ROTATED_PATH", rotated_path)
+    monkeypatch.setattr(audit, "_LOG_MAX_BYTES", 1)  # anything non-empty exceeds this
+
+    test_app = FastAPI()
+    test_app.add_middleware(audit.AuditMiddleware)
+
+    @test_app.get("/ping")
+    def ping():
+        return {"ok": True}
+
+    client = TestClient(test_app)
+    client.get("/ping")
+
+    assert rotated_path.read_text(encoding="utf-8") == "old entry\n"
+    new_lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(new_lines) == 1
+    json.loads(new_lines[0])
+
+
+def test_audit_log_does_not_rotate_when_under_the_size_cap(tmp_path, monkeypatch):
+    log_path = tmp_path / "audit.jsonl"
+    rotated_path = tmp_path / "audit.jsonl.1"
+    log_path.write_text("old entry\n", encoding="utf-8")
+
+    monkeypatch.setattr(audit, "LOG_PATH", log_path)
+    monkeypatch.setattr(audit, "_LOG_ROTATED_PATH", rotated_path)
+    monkeypatch.setattr(audit, "_LOG_MAX_BYTES", 10 * 1024 * 1024)
+
+    test_app = FastAPI()
+    test_app.add_middleware(audit.AuditMiddleware)
+
+    @test_app.get("/ping")
+    def ping():
+        return {"ok": True}
+
+    client = TestClient(test_app)
+    client.get("/ping")
+
+    assert not rotated_path.exists()
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[0] == "old entry"
+
+
+def test_audit_entry_actor_is_local(tmp_path, monkeypatch):
+    log_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(audit, "LOG_PATH", log_path)
+
+    test_app = FastAPI()
+    test_app.add_middleware(audit.AuditMiddleware)
+
+    @test_app.get("/ping")
+    def ping():
+        return {"ok": True}
+
+    client = TestClient(test_app)
+    client.get("/ping")
+
+    entry = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert entry["actor"] == "local"

@@ -50,13 +50,12 @@ def test_complete_propagates_error_when_ollama_unreachable(tmp_path, monkeypatch
         llava_module.complete(raw_txt_path=str(transcript_path), frame_paths=[])
 
 
-def test_complete_max_chars_does_not_currently_truncate_transcript(tmp_path, monkeypatch):
+def test_complete_truncates_transcript_to_max_chars(tmp_path, monkeypatch):
     """
-    Documents current behavior: `max_chars` is accepted but never applied in
-    complete() -- the full transcript is always sent. Pre-existing bug,
-    flagged not fixed (out of scope for this test-coverage task). If
-    complete() is later changed to actually truncate, update this test to
-    assert the truncation instead of the absence of it.
+    Regression test for brief 13 #2: `max_chars` was accepted but never
+    applied -- a long transcript always went in whole, could blow past
+    num_ctx, and Ollama silently truncated the WHOLE prompt (including the
+    instructions/template that come after it). Now truncated up front.
     """
     monkeypatch.setattr(llava_module._health_client, "list", lambda: {"models": []})
 
@@ -75,7 +74,33 @@ def test_complete_max_chars_does_not_currently_truncate_transcript(tmp_path, mon
     llava_module.complete(raw_txt_path=str(transcript_path), frame_paths=[], max_chars=100)
 
     user_content = captured["messages"][1]["content"]
-    assert long_transcript in user_content
+    assert long_transcript not in user_content
+    assert long_transcript[:100] in user_content
+    assert "[transcript truncated]" in user_content
+    # The instructions/template after the transcript must still be intact.
+    assert "## Key Points" in user_content
+
+
+def test_complete_does_not_truncate_a_transcript_under_max_chars(tmp_path, monkeypatch):
+    monkeypatch.setattr(llava_module._health_client, "list", lambda: {"models": []})
+
+    captured = {}
+
+    def fake_chat(model, messages, options, stream):
+        captured["messages"] = messages
+        return {"message": {"content": "ok"}}
+
+    monkeypatch.setattr(llava_module._client, "chat", fake_chat)
+
+    short_transcript = "hello world"
+    transcript_path = tmp_path / "transcript.txt"
+    transcript_path.write_text(short_transcript, encoding="utf-8")
+
+    llava_module.complete(raw_txt_path=str(transcript_path), frame_paths=[], max_chars=12000)
+
+    user_content = captured["messages"][1]["content"]
+    assert short_transcript in user_content
+    assert "[transcript truncated]" not in user_content
 
 
 def test_complete_skips_unreadable_frame_and_keeps_valid_ones(tmp_path, monkeypatch):

@@ -241,7 +241,7 @@ const Sidebar: React.FC<Props> = ({
       >
         <div className="w-56 h-full flex flex-col border-r border-line bg-panel text-phosphor [-webkit-app-region:no-drag]">
           <div className="p-2 border-b border-line flex flex-col gap-2">
-            <DockedRail />
+            <DockedRail collapsed={collapsed} />
             <input
               type="text"
               value={query}

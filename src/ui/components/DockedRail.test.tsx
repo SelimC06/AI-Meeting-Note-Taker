@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import DockedRail from "./DockedRail";
 
 afterEach(() => {
@@ -9,6 +9,15 @@ afterEach(() => {
 });
 
 const SLOT_RECT = { left: 20, top: 5, right: 300, bottom: 45, width: 280, height: 40, x: 20, y: 5, toJSON: () => {} };
+
+const RECORDING_STATUS: RailStatus = {
+  status: "recording",
+  elapsedLabel: "00:12",
+  level: [0.2, 0.5],
+  recordError: null,
+  isProcessing: false,
+  hasPendingUpload: false,
+};
 
 function mockSlotRect(rect: DOMRect = SLOT_RECT as DOMRect) {
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(rect);
@@ -21,6 +30,7 @@ function stubWindowControls(overrides: Record<string, unknown> = {}) {
   const endRailFloatDrag = vi.fn().mockResolvedValue(undefined);
   const updateDockSlotRect = vi.fn();
   const getRailFloating = vi.fn().mockResolvedValue(false);
+  const getRailStatus = vi.fn().mockResolvedValue(null);
   const reattachRail = vi.fn().mockResolvedValue(undefined);
   let statusCallback: ((status: RailStatus) => void) | undefined;
   let floatingCallback: ((floating: boolean) => void) | undefined;
@@ -34,6 +44,7 @@ function stubWindowControls(overrides: Record<string, unknown> = {}) {
   });
   vi.stubGlobal("windowControls", {
     onRailStatus,
+    getRailStatus,
     sendRailCommand,
     beginRailFloatDrag,
     railFloatDragMove,
@@ -50,24 +61,78 @@ function stubWindowControls(overrides: Record<string, unknown> = {}) {
     railFloatDragMove,
     endRailFloatDrag,
     updateDockSlotRect,
+    getRailStatus,
     reattachRail,
     emitStatus: (s: RailStatus) => act(() => statusCallback?.(s)),
     emitFloating: (f: boolean) => act(() => floatingCallback?.(f)),
   };
 }
 
-it("renders idle state before any status has been pushed", () => {
+it("disables the record button until the first status arrives (brief 12 #4)", () => {
+  // Regression test: DEFAULT_STATUS used to be treated as a real status,
+  // leaving the button enabled and reading "Start recording" for up to ~1s
+  // after mount -- a stray click in that window could stop an actually-live
+  // recording.
   stubWindowControls();
   render(<DockedRail />);
-  expect(screen.getByLabelText("Start recording")).toBeInTheDocument();
+  expect(screen.getByLabelText("Start recording")).toBeDisabled();
   expect(screen.getByText("00:00")).toBeInTheDocument();
 });
 
-it("sends toggleRecord when the record button is clicked", () => {
-  const { sendRailCommand } = stubWindowControls();
+it("enables the record button once a status is pushed", () => {
+  const { emitStatus } = stubWindowControls();
   render(<DockedRail />);
+  emitStatus({ status: "idle", elapsedLabel: "00:00", level: [], recordError: null, isProcessing: false, hasPendingUpload: false });
+  expect(screen.getByLabelText("Start recording")).toBeEnabled();
+});
+
+it("seeds status from getRailStatus() on mount when no push has arrived yet (brief 12 #4)", async () => {
+  stubWindowControls({ getRailStatus: vi.fn().mockResolvedValue(RECORDING_STATUS) });
+  render(<DockedRail />);
+
+  expect(await screen.findByLabelText("Stop recording")).toBeEnabled();
+  expect(screen.getByText("00:12")).toBeInTheDocument();
+});
+
+it("ignores a stale getRailStatus() pull that resolves after a fresher push already landed", async () => {
+  let resolveGetStatus!: (status: RailStatus | null) => void;
+  const { emitStatus } = stubWindowControls({
+    getRailStatus: vi.fn(() => new Promise<RailStatus | null>((resolve) => (resolveGetStatus = resolve))),
+  });
+  render(<DockedRail />);
+
+  emitStatus({ status: "paused", elapsedLabel: "00:20", level: [], recordError: null, isProcessing: false, hasPendingUpload: false });
+  expect(screen.getByLabelText("Resume recording")).toBeInTheDocument();
+
+  await act(async () => {
+    resolveGetStatus(RECORDING_STATUS);
+    await Promise.resolve();
+  });
+
+  // The stale pull must not clobber the fresher push.
+  expect(screen.getByLabelText("Resume recording")).toBeInTheDocument();
+});
+
+it("sends toggleRecord when the record button is clicked", () => {
+  const { sendRailCommand, emitStatus } = stubWindowControls();
+  render(<DockedRail />);
+  emitStatus({ status: "idle", elapsedLabel: "00:00", level: [], recordError: null, isProcessing: false, hasPendingUpload: false });
   fireEvent.click(screen.getByLabelText("Start recording"));
   expect(sendRailCommand).toHaveBeenCalledWith("toggleRecord");
+});
+
+it("does not throw when a pushed status is missing/malformed fields (brief 12 #2 defense-in-depth)", () => {
+  // main.js's own IPC-boundary validation (railValidation.js) is the
+  // primary fix, but this checks the render layer doesn't also crash and
+  // take the whole sidebar down via its ErrorBoundary if something
+  // unsanitized ever gets through.
+  const { emitStatus } = stubWindowControls();
+  render(<DockedRail />);
+
+  expect(() =>
+    emitStatus({ status: "recording" } as unknown as RailStatus)
+  ).not.toThrow();
+  expect(screen.getByLabelText("Stop recording")).toBeInTheDocument();
 });
 
 it("reflects a pushed recording status", () => {
@@ -224,4 +289,67 @@ it("renders a click-to-reattach button while floating, and calls reattachRail on
   fireEvent.click(reattachButton);
 
   expect(reattachRail).toHaveBeenCalledTimes(1);
+});
+
+it("renders the disabled pill instead of flashing the reattach button while settling after a drop (brief 12 #3)", () => {
+  // Regression test: isDragging clears immediately on pointerUp but
+  // isFloating stays true until main's onRailFloating(false) arrives
+  // (~160ms later on a successful dock) -- without isSettling, the
+  // reattach-button branch flashed for that whole window.
+  mockSlotRect();
+  const { endRailFloatDrag } = stubWindowControls();
+  render(<DockedRail />);
+  const handle = screen.getByLabelText("Drag to detach the rail");
+
+  fireEvent.pointerDown(handle, { clientX: 30, clientY: 20, pointerId: 1 });
+  fireEvent.pointerMove(handle, { clientX: 60, clientY: 20, pointerId: 1 });
+  fireEvent.pointerUp(handle, { clientX: 40, clientY: 15, pointerId: 1 });
+
+  expect(endRailFloatDrag).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText("[reattach rail]")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Start recording")).toBeDisabled();
+});
+
+it("clears the settling state once onRailFloating arrives, resuming normal float/dock rendering", () => {
+  mockSlotRect();
+  const { emitFloating } = stubWindowControls();
+  render(<DockedRail />);
+  const handle = screen.getByLabelText("Drag to detach the rail");
+
+  fireEvent.pointerDown(handle, { clientX: 30, clientY: 20, pointerId: 1 });
+  fireEvent.pointerMove(handle, { clientX: 60, clientY: 20, pointerId: 1 });
+  fireEvent.pointerUp(handle, { clientX: 500, clientY: 400, pointerId: 1 }); // far from slot -- stays floating
+
+  emitFloating(true);
+
+  expect(screen.getByText("[reattach rail]")).toBeInTheDocument();
+});
+
+it("does not report a slot rect while floating and the sidebar is collapsed (brief 12 #1)", async () => {
+  mockSlotRect();
+  const { updateDockSlotRect } = stubWindowControls({ getRailFloating: vi.fn().mockResolvedValue(true) });
+  render(<DockedRail collapsed />);
+
+  await waitFor(() => expect(updateDockSlotRect).toHaveBeenCalled());
+  expect(updateDockSlotRect).toHaveBeenLastCalledWith(null);
+});
+
+it("reports a fresh rect once the sidebar is expanded again while still floating (brief 12 #1)", async () => {
+  mockSlotRect();
+  const { updateDockSlotRect } = stubWindowControls({ getRailFloating: vi.fn().mockResolvedValue(true) });
+  const { rerender } = render(<DockedRail collapsed />);
+  await waitFor(() => expect(updateDockSlotRect).toHaveBeenLastCalledWith(null));
+
+  rerender(<DockedRail collapsed={false} />);
+
+  await waitFor(() =>
+    expect(updateDockSlotRect).toHaveBeenLastCalledWith({ x: 20, y: 5, width: 280, height: 40 })
+  );
+});
+
+it("does not push any slot rect while docked (not floating), regardless of collapsed", () => {
+  mockSlotRect();
+  const { updateDockSlotRect } = stubWindowControls();
+  render(<DockedRail collapsed />);
+  expect(updateDockSlotRect).not.toHaveBeenCalled();
 });

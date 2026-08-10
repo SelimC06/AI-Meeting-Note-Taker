@@ -59,6 +59,45 @@ def test_root_respects_app_data_dir_env_var(tmp_path, monkeypatch):
         importlib.reload(server_module)
 
 
+def test_max_upload_mb_falls_back_to_default_on_non_numeric_env(tmp_path, monkeypatch):
+    """
+    Regression test for brief 13 #5: MAX_UPLOAD_MB='garbage' used to crash
+    the whole backend at import time (int('garbage') raises uncaught)
+    instead of just falling back to the default.
+    """
+    import importlib
+    import app.server as server_module
+
+    custom_dir = tmp_path / "app-data"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("APP_DATA_DIR", str(custom_dir))
+    monkeypatch.setenv("MAX_UPLOAD_MB", "not-a-number")
+    try:
+        reloaded = importlib.reload(server_module)
+        assert reloaded.MAX_UPLOAD_MB == 2048
+    finally:
+        monkeypatch.delenv("APP_DATA_DIR", raising=False)
+        monkeypatch.delenv("MAX_UPLOAD_MB", raising=False)
+        importlib.reload(server_module)
+
+
+def test_max_upload_mb_is_configurable_via_env(tmp_path, monkeypatch):
+    import importlib
+    import app.server as server_module
+
+    custom_dir = tmp_path / "app-data"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("APP_DATA_DIR", str(custom_dir))
+    monkeypatch.setenv("MAX_UPLOAD_MB", "10")
+    try:
+        reloaded = importlib.reload(server_module)
+        assert reloaded.MAX_UPLOAD_MB == 10
+    finally:
+        monkeypatch.delenv("APP_DATA_DIR", raising=False)
+        monkeypatch.delenv("MAX_UPLOAD_MB", raising=False)
+        importlib.reload(server_module)
+
+
 def test_main_binds_to_localhost_only(monkeypatch):
     captured = {}
 
@@ -364,7 +403,7 @@ def test_process_falls_back_to_stub_notes_without_transcription(client, monkeypa
     # transcribe() raises so this test exercises the stub-notes ("Key
     # Points") except branch, not the transcript-success branch.
     class FakeWhisperModel:
-        def __init__(self, model_name, compute_type=None):
+        def __init__(self, model_name, device=None, compute_type=None):
             pass
 
         def transcribe(self, path, beam_size=1):
@@ -451,7 +490,7 @@ def test_process_skips_summarization_when_no_transcript(client, monkeypatch, cap
         text = "hi"
 
     class FakeWhisperModel:
-        def __init__(self, model_name, compute_type=None):
+        def __init__(self, model_name, device=None, compute_type=None):
             pass
 
         def transcribe(self, path, beam_size=1):
@@ -632,7 +671,7 @@ def test_process_survives_stop_recording_and_transcribe_failure(client, monkeypa
     )
 
     class FakeWhisperModel:
-        def __init__(self, model_name, compute_type=None):
+        def __init__(self, model_name, device=None, compute_type=None):
             pass
 
         def transcribe(self, path, beam_size=1):
@@ -694,7 +733,7 @@ def test_process_appends_to_sessions_and_get_sessions_returns_it(client, monkeyp
         text = "hi"
 
     class FakeWhisperModel:
-        def __init__(self, model_name, compute_type=None):
+        def __init__(self, model_name, device=None, compute_type=None):
             pass
 
         def transcribe(self, path, beam_size=1):
@@ -752,7 +791,7 @@ def test_sessions_returns_newest_first(client, monkeypatch):
         text = "hi"
 
     class FakeWhisperModel:
-        def __init__(self, model_name, compute_type=None):
+        def __init__(self, model_name, device=None, compute_type=None):
             pass
 
         def transcribe(self, path, beam_size=1):
@@ -1074,7 +1113,7 @@ def test_process_dedupes_frame_indices_for_small_frame_count(client, monkeypatch
         text = "hi"
 
     class FakeWhisperModel:
-        def __init__(self, model_name, compute_type=None):
+        def __init__(self, model_name, device=None, compute_type=None):
             pass
 
         def transcribe(self, path, beam_size=1):
@@ -1084,9 +1123,9 @@ def test_process_dedupes_frame_indices_for_small_frame_count(client, monkeypatch
     fake_module.WhisperModel = FakeWhisperModel
     monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
 
-    # n=2 frames: pre-fix idxs would be [round(1/3*1), round(2/3*1)] = [0, 1] here,
-    # which already doesn't collide -- use n where both picks land on the same
-    # index (n=1: (n-1)=0 for every i) to exercise the dedup path.
+    # n=1 frame: every fraction of (n-1)=0 rounds to index 0, so this
+    # exercises the dedup path regardless of exactly how the fractions map
+    # to indices.
     resp = client.post(
         "/process",
         files=[
@@ -1107,6 +1146,134 @@ def test_process_dedupes_frame_indices_for_small_frame_count(client, monkeypatch
     assert frames_dir is not None
     saved = sorted(frames_dir.glob("frame_*.png"))
     assert len(saved) == 1
+
+
+def test_process_selects_three_distinct_frames_from_exactly_three_uploaded(client, monkeypatch):
+    """
+    Regression test for brief 13 #3: the old `k = min(2, len(frames))`
+    contradicted the "~20%,50%,80%" comment (only 2 spread points, not 3),
+    and with exactly 3 uploaded frames both indices rounded to the same
+    middle one -- the dedupe set left only ONE selected frame instead of
+    (up to) three.
+    """
+    import sys
+    import types
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, device=None, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1):
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files=[
+            ("screen", ("screen.webm", io.BytesIO(b"x"), "video/webm")),
+            ("frames", ("frame0.png", io.BytesIO(b"f0"), "image/png")),
+            ("frames", ("frame1.png", io.BytesIO(b"f1"), "image/png")),
+            ("frames", ("frame2.png", io.BytesIO(b"f2"), "image/png")),
+        ],
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    wait_for_job(client, job_id)
+
+    frames_dir = None
+    for p in server_module.STORE.iterdir():
+        candidate = p / "frames"
+        if candidate.is_dir():
+            frames_dir = candidate
+            break
+    assert frames_dir is not None
+    saved = sorted(frames_dir.glob("frame_*.png"))
+    assert len(saved) == 3
+
+
+def test_process_does_not_extract_frames_via_stop_recording_and_transcribe(client, monkeypatch):
+    """
+    Regression test for brief 13 #4: stop_recording_and_transcribe used to
+    be called with extract_frames_after=True, but its returned frame_paths
+    was discarded (llava_complete actually uses the frontend's own
+    uploaded-frame selection) -- the ffmpeg pass ran, and its frame_%05d.png
+    outputs polluted the session dir, for nothing.
+    """
+    import sys
+    import types
+
+    monkeypatch.setattr(server_module, "llava_complete", None)
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    captured_kwargs = {}
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        captured_kwargs.update(kwargs)
+        return None, None
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe
+    )
+
+    # txt_path is None above, so the job falls through to the faster_whisper
+    # fallback path -- mock it out (same pattern as the frame-selection
+    # tests above) to avoid loading a real WhisperModel.
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, device=None, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1):
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+    wait_for_job(client, job_id)
+
+    assert captured_kwargs["extract_frames_after"] is False
+    assert "frames_out_dir" not in captured_kwargs
 
 
 def test_job_status_404_for_unknown_job_id(client: TestClient):
@@ -1140,7 +1307,7 @@ def test_jobs_list_contains_created_job_with_expected_keys(client, monkeypatch):
         text = "hi"
 
     class FakeWhisperModel:
-        def __init__(self, model_name, compute_type=None):
+        def __init__(self, model_name, device=None, compute_type=None):
             pass
 
         def transcribe(self, path, beam_size=1):
@@ -1197,7 +1364,7 @@ def test_jobs_list_strips_notes_and_video_path_but_job_detail_keeps_them(client,
         text = "hi"
 
     class FakeWhisperModel:
-        def __init__(self, model_name, compute_type=None):
+        def __init__(self, model_name, device=None, compute_type=None):
             pass
 
         def transcribe(self, path, beam_size=1):
@@ -1647,7 +1814,7 @@ def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
         text = "hi"
 
     class FakeWhisperModel:
-        def __init__(self, model_name, compute_type=None):
+        def __init__(self, model_name, device=None, compute_type=None):
             captured["model_name"] = model_name
 
         def transcribe(self, path, beam_size=1):
@@ -1735,6 +1902,32 @@ def test_rename_session_404_for_unknown_id(client: TestClient):
     assert resp.status_code == 404
 
 
+def test_rename_session_returns_404_instead_of_500_when_a_concurrent_delete_races_the_update(
+    client: TestClient, monkeypatch
+):
+    """
+    Regression test for brief 13 #8: a concurrent DELETE landing between
+    update_session_fields() succeeding and the endpoint's own re-read used
+    to IndexError on matching[0] -> 500, instead of the 404 a request that
+    arrived slightly later would get.
+    """
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Old", "notes": "", "video_path": "", "trashed_at": None,
+    })
+
+    # update_session_fields() itself still reads/writes the real store (it
+    # calls sessions_store.load_sessions directly, not through this
+    # binding) -- only the endpoint's OWN post-update re-read is patched to
+    # simulate a session that's just been deleted out from under it.
+    monkeypatch.setattr(server_module, "load_sessions", lambda store: [])
+
+    resp = client.patch("/sessions/abc", json={"title": "New Title"})
+    assert resp.status_code == 404
+
+
 def test_trash_session_sets_trashed_at(client: TestClient):
     from app.sessions_store import append_session
 
@@ -1770,6 +1963,35 @@ def test_trash_session_404_for_unknown_id(client: TestClient):
     assert resp.status_code == 404
 
 
+def test_trash_session_returns_404_instead_of_500_when_a_concurrent_delete_races_the_update(
+    client: TestClient, monkeypatch
+):
+    """Regression test for brief 13 #8 (see the analogous rename test)."""
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "T", "notes": "", "video_path": "", "trashed_at": None,
+    })
+
+    real_load_sessions = server_module.load_sessions
+    call_count = {"n": 0}
+
+    def racy_load_sessions(store):
+        call_count["n"] += 1
+        # First call is the endpoint's own pre-update existence check --
+        # must still find the real session. Every call after that
+        # simulates a concurrent DELETE having already landed.
+        if call_count["n"] == 1:
+            return real_load_sessions(store)
+        return []
+
+    monkeypatch.setattr(server_module, "load_sessions", racy_load_sessions)
+
+    resp = client.post("/sessions/abc/trash")
+    assert resp.status_code == 404
+
+
 def test_restore_session_clears_trashed_at(client: TestClient):
     from app.sessions_store import append_session
 
@@ -1789,6 +2011,23 @@ def test_restore_session_clears_trashed_at(client: TestClient):
 
 def test_restore_session_404_for_unknown_id(client: TestClient):
     resp = client.post("/sessions/does-not-exist/restore")
+    assert resp.status_code == 404
+
+
+def test_restore_session_returns_404_instead_of_500_when_a_concurrent_delete_races_the_update(
+    client: TestClient, monkeypatch
+):
+    """Regression test for brief 13 #8 (see the analogous rename test)."""
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "T", "notes": "", "video_path": "", "trashed_at": "2026-08-02T00:00:00+00:00",
+    })
+
+    monkeypatch.setattr(server_module, "load_sessions", lambda store: [])
+
+    resp = client.post("/sessions/abc/restore")
     assert resp.status_code == 404
 
 

@@ -67,3 +67,61 @@ it("reload() re-fetches", async () => {
   });
   expect(result.current.sessions).toHaveLength(2);
 });
+
+it("ignores a stale reload() response that resolves after a newer one already landed (brief 13 #13)", async () => {
+  // Regression test: two rapid reload() calls can resolve out of order
+  // over the network -- the SECOND (newer) request might resolve first,
+  // and without a request-id guard the FIRST (now-stale) request's
+  // response landing afterward would overwrite the fresh list with
+  // out-of-date data.
+  vi.mocked(getSessions).mockResolvedValue([sessionA]);
+  const { result } = renderHook(() => useSessions(true, false));
+  await waitFor(() => expect(result.current.sessions).toEqual([sessionA]));
+
+  let resolveFirst!: (data: Session[]) => void;
+  let resolveSecond!: (data: Session[]) => void;
+  const first = new Promise<Session[]>((resolve) => (resolveFirst = resolve));
+  const second = new Promise<Session[]>((resolve) => (resolveSecond = resolve));
+  vi.mocked(getSessions).mockReturnValueOnce(first).mockReturnValueOnce(second);
+
+  act(() => {
+    result.current.reload(); // fires the stale (first) request
+  });
+  act(() => {
+    result.current.reload(); // fires the fresh (second) request
+  });
+
+  // The newer request resolves first...
+  await act(async () => {
+    resolveSecond([{ ...sessionA, id: "fresh" }]);
+    await Promise.resolve();
+  });
+  expect(result.current.sessions).toEqual([{ ...sessionA, id: "fresh" }]);
+
+  // ...then the stale one resolves late. It must be ignored.
+  await act(async () => {
+    resolveFirst([{ ...sessionA, id: "stale" }]);
+    await Promise.resolve();
+  });
+  expect(result.current.sessions).toEqual([{ ...sessionA, id: "fresh" }]);
+});
+
+it("ignores an in-flight fetch's response once the view goes inactive", async () => {
+  let resolveFetch!: (data: Session[]) => void;
+  vi.mocked(getSessions).mockReturnValueOnce(
+    new Promise<Session[]>((resolve) => (resolveFetch = resolve))
+  );
+
+  const { result, rerender } = renderHook(({ active }) => useSessions(active, false), {
+    initialProps: { active: true },
+  });
+
+  rerender({ active: false });
+
+  await act(async () => {
+    resolveFetch([sessionA]);
+    await Promise.resolve();
+  });
+
+  expect(result.current.sessions).toBeNull();
+});

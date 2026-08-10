@@ -149,12 +149,43 @@ it("shows the local-first privacy statement", async () => {
   expect(screen.getByText(/permanently deleted after 30 days/i)).toBeInTheDocument();
 });
 
-it("shows the current app version and an idle message by default", async () => {
+it("shows the current app version and a not-checked-yet message before any check has run (brief 13 #14)", async () => {
+  // Regression test: this used to render "You're on the latest version"
+  // (the "idle" message) even before any update check had actually run,
+  // since "idle" doubled as both the not-yet-checked default AND the
+  // completed-check-found-nothing result.
   render(<SettingsPage active={true} />);
   await waitFor(() => {
     expect(screen.getByText(/1\.0\.0/)).toBeInTheDocument();
   });
+  expect(screen.getByText("Not checked yet")).toBeInTheDocument();
+  expect(screen.queryByText("You're on the latest version")).not.toBeInTheDocument();
+});
+
+it("shows 'You're on the latest version' once a completed check reports idle", async () => {
+  let pushStatus: (status: unknown) => void = () => {};
+  Object.defineProperty(window, "updaterAPI", {
+    value: {
+      onStatus: vi.fn((cb) => {
+        pushStatus = cb;
+        return () => {};
+      }),
+      install: vi.fn(),
+    },
+    writable: true,
+    configurable: true,
+  });
+
+  render(<SettingsPage active={true} />);
+  await waitFor(() => expect(screen.getByText(/1\.0\.0/)).toBeInTheDocument());
+  expect(screen.getByText("Not checked yet")).toBeInTheDocument();
+
+  act(() => {
+    pushStatus({ state: "idle" });
+  });
+
   expect(screen.getByText("You're on the latest version")).toBeInTheDocument();
+  expect(screen.queryByText("Not checked yet")).not.toBeInTheDocument();
 });
 
 it("shows a downloading message with percent when an update is downloading", async () => {

@@ -6,10 +6,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("defaults to idle before any status is received", () => {
+it("defaults to not-checked before any status is received (brief 13 #14)", () => {
+  // Regression test: the default used to be "idle", indistinguishable from
+  // a completed check that found no update -- SettingsPage rendered
+  // "You're on the latest version" even before any check had actually run.
   vi.stubGlobal("updaterAPI", { onStatus: vi.fn(() => () => {}), install: vi.fn() });
   const { result } = renderHook(() => useUpdaterStatus());
-  expect(result.current).toEqual({ state: "idle" });
+  expect(result.current).toEqual({ state: "not-checked" });
 });
 
 it("reflects the latest status pushed via onStatus", () => {

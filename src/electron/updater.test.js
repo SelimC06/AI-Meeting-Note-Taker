@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { armAutoUpdate, getLastStatus, getUpdateFeedUrl, installUpdate } from './updater.js';
+import { armAutoUpdate, getLastStatus, getUpdateFeedUrl, installUpdate, UPDATE_CHECK_INTERVAL_MS } from './updater.js';
 
 function makeFakeWindow() {
     const sent = [];
@@ -24,8 +24,8 @@ function makeFakeUpdater() {
 // Must run before any test that arms an updater and emits a status event —
 // getLastStatus() is backed by module-level state that persists for the life
 // of the process, mirroring the single real `autoUpdater` singleton.
-test('getLastStatus returns idle before any status event has fired', () => {
-    assert.deepEqual(getLastStatus(), { state: 'idle' });
+test('getLastStatus returns not-checked before any status event has fired', () => {
+    assert.deepEqual(getLastStatus(), { state: 'not-checked' });
 });
 
 test('getUpdateFeedUrl returns UPDATE_FEED_URL when set', () => {
@@ -133,6 +133,37 @@ test('getLastStatus returns the most recent status after an event fires', () => 
     updater.emit('update-available', { version: '1.2.0' });
 
     assert.deepEqual(getLastStatus(), { state: 'available', version: '1.2.0' });
+});
+
+test('armAutoUpdate re-checks periodically instead of only once at startup', (t) => {
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    const win = makeFakeWindow();
+    const updater = makeFakeUpdater();
+    let checkCount = 0;
+    updater.checkForUpdates = () => { checkCount += 1; };
+
+    armAutoUpdate(win, updater, UPDATE_CHECK_INTERVAL_MS);
+    assert.equal(checkCount, 1); // the initial startup check
+
+    t.mock.timers.tick(UPDATE_CHECK_INTERVAL_MS);
+    assert.equal(checkCount, 2);
+
+    t.mock.timers.tick(UPDATE_CHECK_INTERVAL_MS);
+    assert.equal(checkCount, 3);
+});
+
+test('armAutoUpdate does not re-check before the configured interval has elapsed', (t) => {
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    const win = makeFakeWindow();
+    const updater = makeFakeUpdater();
+    let checkCount = 0;
+    updater.checkForUpdates = () => { checkCount += 1; };
+
+    armAutoUpdate(win, updater, UPDATE_CHECK_INTERVAL_MS);
+    assert.equal(checkCount, 1);
+
+    t.mock.timers.tick(UPDATE_CHECK_INTERVAL_MS - 1);
+    assert.equal(checkCount, 1);
 });
 
 test('armAutoUpdate does not produce an unhandled rejection when checkForUpdates() rejects', async () => {

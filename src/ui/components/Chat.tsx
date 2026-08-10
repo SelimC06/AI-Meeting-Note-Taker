@@ -14,12 +14,19 @@ interface Props {
   backendUp?: boolean;
 }
 
+// How close to the bottom (in px) counts as "already there" for
+// auto-scroll purposes -- a small allowance for sub-pixel/rounding scroll
+// positions, not a real "almost at the bottom" zone.
+const NEAR_BOTTOM_THRESHOLD_PX = 24;
+
 const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId, backendUp = true }) => {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
 
   const selected = sessions?.find((s) => s.id === selectedId) ?? null;
 
@@ -34,6 +41,21 @@ const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId, backendUp 
       abortRef.current?.abort();
     };
   }, []);
+
+  // Auto-scrolls to the newest message/streamed chunk, but only when the
+  // user is already near the bottom -- otherwise a long streamed reply
+  // grows below the fold with no way to see it without manually scrolling
+  // down on every chunk. Checked against the container's scroll position
+  // BEFORE this update (i.e. where the user left it), not after, so
+  // scrolling back up to read earlier messages during a stream is never
+  // fought by the next chunk yanking the view back down.
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (distanceFromBottom > NEAR_BOTTOM_THRESHOLD_PX) return;
+    bottomSentinelRef.current?.scrollIntoView({ block: "end" });
+  }, [turns]);
 
   const handleSend = async () => {
     const message = input.trim();
@@ -105,7 +127,7 @@ const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId, backendUp 
 
       {hasMeetings && selected && (
         <>
-          <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-2 text-xs">
+          <div ref={messagesContainerRef} className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-2 text-xs">
             {turns.length === 0 && (
               <div className="border border-line rounded-sm px-3 py-2 text-dim max-w-md">
                 <p className="text-signal">✦ {selected.title}</p>
@@ -125,6 +147,7 @@ const Chat: React.FC<Props> = ({ sessions, sessionsError, selectedId, backendUp 
               </p>
             ))}
             {error && <p className="text-red-400">error: {error}</p>}
+            <div ref={bottomSentinelRef} />
           </div>
 
           <div className="border-t border-line px-4 py-2 -mx-4 -mb-4 flex items-center gap-2 text-xs [-webkit-app-region:no-drag]">

@@ -11,7 +11,10 @@ import { useAnimationReplayKey } from "../../rail/hooks/useAnimationReplayKey";
 const DOCKED_METER_SAMPLES = 8;
 
 // Pre-sized to DOCKED_METER_SAMPLES zeros so the meter starts at its real
-// width instead of popping in from empty on the first pushed status.
+// width instead of popping in from empty on the first pushed status. Purely
+// a layout placeholder now -- the Record button stays disabled (see
+// hasStatus below) until a real status has actually arrived, so this
+// default's "idle" status is never itself actionable.
 const DEFAULT_STATUS: RailStatus = {
     status: "idle",
     elapsedLabel: "00:00",
@@ -41,20 +44,64 @@ type DragState = {
     crossedThreshold: boolean;
 };
 
-export default function DockedRail() {
-    const [railStatus, setRailStatus] = useState<RailStatus>(DEFAULT_STATUS);
+interface Props {
+    // Mirrors Sidebar's collapsed state -- collapsing animates the sidebar's
+    // OUTER wrapper to w-0 overflow-hidden while this component's container
+    // sits inside the fixed-width INNER column, whose rect never actually
+    // changes size. Neither the ResizeObserver nor a window 'resize' event
+    // fires, so without this prop the dock-slot-reporting effect below has
+    // no way to know the slot just became hidden -- a drop could still dock
+    // the rail into an invisible, inert sidebar (brief 12 #1).
+    collapsed?: boolean;
+}
+
+export default function DockedRail({ collapsed = false }: Props) {
+    const [railStatus, setRailStatus] = useState<RailStatus | null>(null);
     const [isFloating, setIsFloating] = useState(false);
     const [isDragging, setIsDragging] = useState(false);
+    // True from the moment a drag-release is handed off to main (endFloatDrag)
+    // until main tells us the outcome (onRailFloating fires either way) --
+    // isDragging goes false immediately on release, but isFloating doesn't
+    // flip to false until ~160ms after a successful dock (popRailBackToDock's
+    // pop-out animation in main.js). Without this, the reattach-button branch
+    // below flashed for that whole window before the docked pill popped in
+    // (brief 12 #3).
+    const [isSettling, setIsSettling] = useState(false);
     // Bumped every time we (re)become docked — used as the docked pill's
     // `key` below to replay its .rail-pop-in entrance (src/theme.css).
     const [dockGeneration, bumpDockGeneration] = useAnimationReplayKey();
     const containerRef = useRef<HTMLDivElement | null>(null);
     const dragRef = useRef<DragState | null>(null);
     const lastDragMoveSentAtRef = useRef(0);
+    // Guards the pull (getRailStatus) below against clobbering a more recent
+    // push (onRailStatus) that arrived first -- the pull's IPC round-trip
+    // can resolve after a status event that landed in the meantime.
+    const receivedPushRef = useRef(false);
 
     useEffect(() => {
-        const unsubscribe = window.windowControls?.onRailStatus?.(setRailStatus);
+        const unsubscribe = window.windowControls?.onRailStatus?.((status) => {
+            receivedPushRef.current = true;
+            setRailStatus(status);
+        });
         return unsubscribe;
+    }, []);
+
+    // Pull side of the pull+push handshake: a freshly mounted DockedRail
+    // (e.g. after a dashboard reload while a recording is live) has no
+    // status until the rail's next push, which can be close to 1s away
+    // (RailApp's elapsed-time/level ticks). Without this, the pill sat on
+    // DEFAULT_STATUS -- reading "idle" with an enabled Record button -- for
+    // that whole window, and one stray click would send toggleRecord and
+    // stop the actually-live recording (brief 12 #4).
+    useEffect(() => {
+        let cancelled = false;
+        window.windowControls?.getRailStatus?.().then((status) => {
+            if (cancelled || receivedPushRef.current || !status) return;
+            setRailStatus(status);
+        });
+        return () => {
+            cancelled = true;
+        };
     }, []);
 
     useEffect(() => {
@@ -62,7 +109,10 @@ export default function DockedRail() {
         window.windowControls?.getRailFloating?.()?.then((floating) => {
             if (!cancelled) setIsFloating(!!floating);
         });
-        const unsubscribe = window.windowControls?.onRailFloating?.((floating) => setIsFloating(floating));
+        const unsubscribe = window.windowControls?.onRailFloating?.((floating) => {
+            setIsFloating(floating);
+            setIsSettling(false);
+        });
         return () => {
             cancelled = true;
             unsubscribe?.();
@@ -93,10 +143,18 @@ export default function DockedRail() {
     // While floating, keep the main process's cached dock-slot rect fresh —
     // it only knows the rect as of the moment the detach began, and the
     // dashboard window can be resized in the meantime before the user drags
-    // the floating rail back.
+    // the floating rail back. Also re-runs on `collapsed` changing: that's
+    // a pure CSS width transition on an ANCESTOR of this container (see the
+    // Props comment above), which doesn't itself fire the ResizeObserver or
+    // a window 'resize' event, so it needs to be handled explicitly rather
+    // than relying on either of those to ever notice.
     useEffect(() => {
         if (!isFloating) return;
         const reportSlotRect = () => {
+            if (collapsed) {
+                window.windowControls?.updateDockSlotRect?.(null);
+                return;
+            }
             const rect = containerRef.current?.getBoundingClientRect();
             if (!rect) return;
             window.windowControls?.updateDockSlotRect?.({
@@ -108,11 +166,10 @@ export default function DockedRail() {
         };
         reportSlotRect();
         window.addEventListener("resize", reportSlotRect);
-        // A window 'resize' event misses layout-only changes — e.g. the
-        // sidebar collapsing, which is a pure CSS width transition inside a
-        // fixed-size dashboard window, not a window resize at all. Without
-        // this, dragging the floating rail back after a collapse can try to
-        // dock it into a slot rect that's now stale (0-width/invisible).
+        // Catches genuine layout changes to THIS container that a window
+        // 'resize' event would miss (e.g. the dashboard's own flex layout
+        // reflowing for reasons other than a window resize). Collapsing the
+        // sidebar is NOT one of these -- see the `collapsed` handling above.
         let observer: ResizeObserver | undefined;
         if (typeof ResizeObserver !== "undefined" && containerRef.current) {
             observer = new ResizeObserver(reportSlotRect);
@@ -122,9 +179,16 @@ export default function DockedRail() {
             window.removeEventListener("resize", reportSlotRect);
             observer?.disconnect();
         };
-    }, [isFloating]);
+    }, [isFloating, collapsed]);
 
-    const { status, elapsedLabel, level, recordError, isProcessing } = railStatus;
+    const hasStatus = railStatus !== null;
+    const { status, elapsedLabel, level: rawLevel, recordError, isProcessing } = railStatus ?? DEFAULT_STATUS;
+    // main.js's rail:pushStatus handler already sanitizes every pushed
+    // status (see railValidation.js), but this is a second, cheap defense:
+    // a malformed `level` here throwing on .slice() below would otherwise
+    // crash this render and take down the whole sidebar via its
+    // ErrorBoundary (brief 12 #2).
+    const level = Array.isArray(rawLevel) ? rawLevel : [];
     const isRecording = status === "recording";
     const isPaused = status === "paused";
     const isStarting = status === "starting";
@@ -175,6 +239,7 @@ export default function DockedRail() {
         if (!drag?.crossedThreshold) return;
 
         setIsDragging(false);
+        setIsSettling(true);
         // The dock-vs-float decision is made authoritatively by main (see
         // settleFloatingRailPosition in main.js), which pushes the result
         // via onRailFloating. We don't guess locally here: main's hit-test
@@ -194,7 +259,7 @@ export default function DockedRail() {
         handlePointerUp();
     };
 
-    if (isFloating && !isDragging) {
+    if (isFloating && !isDragging && !isSettling) {
         return (
             <div
                 ref={containerRef}
@@ -242,7 +307,12 @@ export default function DockedRail() {
                     </div>
                 </div>
 
-                <Record onClick={() => sendCommand("toggleRecord")} isRecording={isRecording} isStarting={isStarting} disabled={isProcessing || isStarting} />
+                <Record
+                    onClick={() => sendCommand("toggleRecord")}
+                    isRecording={isRecording}
+                    isStarting={isStarting}
+                    disabled={isProcessing || isStarting || isSettling || !hasStatus}
+                />
 
                 <span
                     aria-label="Elapsed recording time"
@@ -257,7 +327,7 @@ export default function DockedRail() {
                 <PauseResume
                     status={isPaused ? "paused" : "recording"}
                     onClick={() => sendCommand(isPaused ? "resume" : "pause")}
-                    disabled={!isRecording && !isPaused}
+                    disabled={(!isRecording && !isPaused) || isSettling}
                 />
 
                 <span

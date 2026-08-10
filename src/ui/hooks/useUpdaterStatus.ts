@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 export function useUpdaterStatus(): UpdaterStatus {
-  const [status, setStatus] = useState<UpdaterStatus>({ state: "idle" });
+  const [status, setStatus] = useState<UpdaterStatus>({ state: "not-checked" });
 
   useEffect(() => {
     let cancelled = false;

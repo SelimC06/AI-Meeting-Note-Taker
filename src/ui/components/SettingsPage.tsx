@@ -328,6 +328,9 @@ export default function SettingsPage({ active }: { active: boolean }) {
         <p className="text-xs text-phosphor">
           {appVersion ? `version ${appVersion}` : "loading version..."}
         </p>
+        {updaterStatus.state === "not-checked" && (
+          <p className="text-xs text-dim">Not checked yet</p>
+        )}
         {updaterStatus.state === "idle" && (
           <p className="text-xs text-dim">You're on the latest version</p>
         )}

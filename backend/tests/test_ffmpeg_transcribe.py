@@ -188,13 +188,13 @@ def test_stop_recording_and_transcribe_appends_to_existing_transcript(tmp_path, 
     assert content == "first part\n---\nsecond part"
 
 
-def test_stop_recording_and_transcribe_prefixes_new_transcript_with_separator(tmp_path, monkeypatch):
+def test_stop_recording_and_transcribe_writes_a_fresh_transcript_without_separator(tmp_path, monkeypatch):
     """
-    Documents current behavior: ffmpeg_transcribe.py:74 tests `out_txt.exists`
-    (the bound method reference, always truthy) instead of `out_txt.exists()`,
-    so even a brand-new transcript is written in append mode and gets a
-    leading "\n---\n" separator. Pre-existing bug, flagged not fixed. When
-    line 74 is corrected, change this assertion to `== "second part"`.
+    Regression test for brief 13 #1: `out_txt.exists` (missing parens) tested
+    the bound method reference, which is always truthy, so even a brand-new
+    transcript was written in append mode and got a spurious leading
+    "\n---\n" separator that then fed into the summarizer prompt. Fixed to
+    `out_txt.exists()` -- a fresh transcript must have no separator.
     """
     import app.ffmpeg_transcribe as ft
 
@@ -233,4 +233,4 @@ def test_stop_recording_and_transcribe_prefixes_new_transcript_with_separator(tm
     )
 
     content = Path(out_txt).read_text(encoding="utf-8")
-    assert content == "\n---\nsecond part"
+    assert content == "second part"

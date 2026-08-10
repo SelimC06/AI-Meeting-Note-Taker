@@ -113,7 +113,16 @@ ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://loc
 
 ORIGINS = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
 
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "2048"))
+_DEFAULT_MAX_UPLOAD_MB = 2048
+try:
+    MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", _DEFAULT_MAX_UPLOAD_MB))
+except ValueError:
+    print(
+        f"[server] ignoring non-numeric MAX_UPLOAD_MB={os.environ['MAX_UPLOAD_MB']!r}, "
+        f"using default {_DEFAULT_MAX_UPLOAD_MB}",
+        flush=True,
+    )
+    MAX_UPLOAD_MB = _DEFAULT_MAX_UPLOAD_MB
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 
@@ -418,6 +427,11 @@ def rename_session(session_id: str, body: SessionRename):
     if not ok:
         raise HTTPException(404, "Session not found")
     matching = [s for s in load_sessions(store) if s.get("id") == session_id]
+    if not matching:
+        # A concurrent DELETE landed between the update above and this
+        # re-read -- report the same 404 a request that arrived slightly
+        # later would get, instead of an IndexError -> 500.
+        raise HTTPException(404, "Session not found")
     return matching[0]
 
 
@@ -430,6 +444,11 @@ def trash_session(session_id: str):
     if not matching[0].get("trashed_at"):
         update_session_fields(store, session_id, trashed_at=datetime.now(timezone.utc).isoformat())
     matching = [s for s in load_sessions(store) if s.get("id") == session_id]
+    if not matching:
+        # A concurrent DELETE landed between the update above and this
+        # re-read -- report the same 404 a request that arrived slightly
+        # later would get, instead of an IndexError -> 500.
+        raise HTTPException(404, "Session not found")
     return matching[0]
 
 
@@ -440,6 +459,11 @@ def restore_session(session_id: str):
     if not ok:
         raise HTTPException(404, "Session not found")
     matching = [s for s in load_sessions(store) if s.get("id") == session_id]
+    if not matching:
+        # A concurrent DELETE landed between the update above and this
+        # re-read -- report the same 404 a request that arrived slightly
+        # later would get, instead of an IndexError -> 500.
+        raise HTTPException(404, "Session not found")
     return matching[0]
 
 
@@ -680,18 +704,18 @@ def _run_process_job(job_id: str) -> None:
         jobs.update_job(job_id, stage="transcribing")
         if stop_recording_and_transcribe is not None:
             try:
+                # extract_frames_after=False: the frames actually used by
+                # llava_complete below (frame_paths=selected_paths) come
+                # from the frontend's own uploaded-frame selection, not from
+                # here -- this ffmpeg extraction pass was running for
+                # nothing, its frame_%05d.png outputs just polluting the
+                # session dir (and the export zip) unused.
                 txt_path, _ = stop_recording_and_transcribe(
                     video_path=str(final_path),
                     transcript_prefix=str(session / "transcript_"),
                     model_name=whisper_model,
                     separate_tracks=False,
-                    extract_frames_after=True,
-                    frames_out_dir=str(session / "frames"),
-                    every_n_seconds=5.0,
-                    scale_width=960,
-                    image_ext="png",
-                    quality=2,
-                    max_frames=3,
+                    extract_frames_after=False,
                 )
             except Exception as e:
                 log(f"stop_recording_and_transcribe failed, falling back to raw transcription: {e}")
@@ -745,7 +769,13 @@ def _run_process_job(job_id: str) -> None:
         if not notes:
             try:
                 from faster_whisper import WhisperModel
-                model = get_whisper_model(WhisperModel, whisper_model, compute_type="int8")
+                # device="cpu" matches ffmpeg_transcribe.py's call exactly --
+                # whisper_cache keys on the literal kwargs passed, and
+                # WhisperModel's own default (device="auto") is a DIFFERENT
+                # value than "cpu", not an equivalent one, so omitting it
+                # here used to create a second cached model instance (and
+                # double the RAM) for what's otherwise the same model.
+                model = get_whisper_model(WhisperModel, whisper_model, device="cpu", compute_type="int8")
                 segments, info = model.transcribe(str(final_path), beam_size=1)
                 transcript = "\n".join(s.text.strip() for s in segments if s.text)
                 notes = (
@@ -854,9 +884,13 @@ def process(
 
     selected_paths: list[str] = []
     if frames:
-        k = min(2, len(frames))
         n = len(frames)
-        idxs = sorted({round((i + 1) / (k + 1) * (n - 1)) for i in range(k)})  # ~20%,50%,80%, deduped
+        # k = min(2, ...) contradicted this comment (only 2 spread points,
+        # not 3) and with exactly 3 uploaded frames both indices rounded to
+        # the same middle one, leaving just ONE frame after dedup. Compute
+        # directly from the 20/50/80% fractions the comment describes,
+        # clamped into the available range.
+        idxs = sorted({min(n - 1, max(0, round(f * (n - 1)))) for f in (0.2, 0.5, 0.8)})  # ~20%,50%,80%, deduped
 
         frames_dir = session / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
