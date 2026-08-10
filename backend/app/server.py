@@ -16,6 +16,7 @@ import asyncio
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import os
@@ -387,18 +388,38 @@ def mux_video_audio(video: Path, audio: Optional[Path], out_path: Path) -> Path:
         raise RuntimeError(p.stderr[-1200:] if p.stderr else "mux failed")
     return out_path
 
+_OLLAMA_HEALTH_TTL_SECONDS = 10.0
+_ollama_health = {"ok": False, "checked_at": 0.0}
+_ollama_health_lock = threading.Lock()
+
+def _ollama_health_cached() -> bool:
+    # /health is polled by the Electron watchdog with a 3s abort -- it must
+    # answer instantly. The real Ollama probe (worst case ~10s against an
+    # unroutable host) runs on at most one request per TTL window; everyone
+    # else -- including every probe while a refresh is in flight -- gets the
+    # cached value.
+    now = time.time()
+    if now - _ollama_health["checked_at"] < _OLLAMA_HEALTH_TTL_SECONDS:
+        return _ollama_health["ok"]
+    if not _ollama_health_lock.acquire(blocking=False):
+        return _ollama_health["ok"]
+    try:
+        ok = assert_ollama_up is not None
+        if ok:
+            try:
+                assert_ollama_up()
+            except Exception:
+                ok = False
+        _ollama_health["ok"] = ok
+        _ollama_health["checked_at"] = time.time()
+        return ok
+    finally:
+        _ollama_health_lock.release()
+
 @app.get("/health")
 @app.get("/healthz")
 def health():
-    ollama_ok = True
-    try:
-        if assert_ollama_up is not None:
-            assert_ollama_up()
-        else:
-            ollama_ok = False
-    except Exception:
-        ollama_ok = False
-    return {"ok": True, "backend": True, "ollama": ollama_ok}
+    return {"ok": True, "backend": True, "ollama": _ollama_health_cached()}
 
 @app.get("/")
 def root():

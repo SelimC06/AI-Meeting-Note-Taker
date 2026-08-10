@@ -424,6 +424,56 @@ test('attemptRecovery aborts immediately without spawning a backend when isShutt
     }
 });
 
+test('attemptRecovery kills the just-spawned child and bails when isShuttingDown() flips true right after the spawn (zombie-after-quit race)', async () => {
+    // Reproduces the 2D race: quit begins between the pre-spawn check and the
+    // spawn itself (before-quit's stopBackend already ran against the
+    // *previous* process), so without a post-spawn re-check this child would
+    // never be killed and would outlive the app.
+    const port = await findFreePort();
+    const logDir = makeTmpLogDir();
+    const win = makeFakeWindow();
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-recovery-marker-'));
+    const marker = path.join(markerDir, 'ready');
+    fs.writeFileSync(marker, '');
+    let calls = 0;
+    // False through the pre-spawn checks (top-of-function, top-of-loop,
+    // post-delay); true from the first check made after startBackend runs
+    // (the new post-spawn re-check this fix adds) onward.
+    const isShuttingDown = () => {
+        calls += 1;
+        return calls > 3;
+    };
+    try {
+        await attemptRecovery({
+            pythonExe: process.execPath,
+            args: ['-e', HEALTH_SERVER_SCRIPT],
+            cwd: process.cwd(),
+            env: { ...process.env, SDD_MARKER: marker, SDD_PORT: String(port) },
+            backendUrl: `http://127.0.0.1:${port}`,
+            mainWindow: win,
+            logDir,
+            crashInfo: { exitCode: 1, signal: null },
+            delays: [0],
+            isShuttingDown,
+        });
+
+        assert.equal(win.sent.length, 1, 'expected only the "restarting" publish -- no "up" after a post-spawn shutdown');
+        assert.equal(win.sent[0].payload.state, 'restarting');
+        assert.equal(isRecovering(), false);
+
+        // Give the spawned child a moment to have bound the port if it was
+        // somehow left running, then confirm nothing is listening -- proof
+        // the post-spawn shutdown check actually killed it instead of
+        // leaving a zombie backend holding the port past this "quit".
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await assert.rejects(() => fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) }));
+    } finally {
+        stopBackend();
+        fs.rmSync(logDir, { recursive: true, force: true });
+        fs.rmSync(markerDir, { recursive: true, force: true });
+    }
+});
+
 test('attemptRecovery stops between attempts once isShuttingDown() flips true, instead of spawning another backend', async () => {
     const logDir = makeTmpLogDir();
     const win = makeFakeWindow();

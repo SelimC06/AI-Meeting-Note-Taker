@@ -96,25 +96,29 @@ export function disarmCrashMonitor(childProcess, listener) {
     childProcess.removeListener('exit', listener);
 }
 
-async function findPidsListeningOnPort(port, platform) {
+export async function findPidsListeningOnPort(port, platform, execFileAsyncFn = execFileAsync) {
     if (platform === 'win32') {
-        let stdout;
+        // Get-NetTCPConnection returns structured objects, so this is immune
+        // to the localized state names netstat prints on non-English Windows
+        // (LISTENING -> ABHÖREN etc.), which the old regex silently never
+        // matched -- reporting an orphan-held port as free.
         try {
-            ({ stdout } = await execFileAsync('netstat', ['-ano']));
+            const { stdout } = await execFileAsyncFn('powershell', [
+                '-NoProfile', '-NonInteractive', '-Command',
+                `(Get-NetTCPConnection -LocalPort ${Number(port)} -State Listen -ErrorAction Stop).OwningProcess`,
+            ]);
+            return [...new Set(
+                stdout.split('\n').map((l) => l.trim()).filter(Boolean).map(Number).filter(Number.isFinite)
+            )];
         } catch {
+            // Get-NetTCPConnection throws when there are no matching
+            // connections -- that's the normal "port is free" case -- or PS
+            // is unavailable; either way, treat it as no listeners found.
             return [];
         }
-        const pids = new Set();
-        for (const line of stdout.split('\n')) {
-            const match = line.match(/^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i);
-            if (match && Number(match[1]) === port) {
-                pids.add(Number(match[2]));
-            }
-        }
-        return [...pids];
     }
     try {
-        const { stdout } = await execFileAsync('lsof', ['-t', '-i', `tcp:${port}`, '-sTCP:LISTEN']);
+        const { stdout } = await execFileAsyncFn('lsof', ['-t', '-i', `tcp:${port}`, '-sTCP:LISTEN']);
         return stdout
             .split('\n')
             .map((line) => line.trim())
@@ -200,11 +204,14 @@ export async function ensurePortFree(
     return remaining.length === 0;
 }
 
+export const HEALTH_ATTEMPT_TIMEOUT_MS = 3000;
+
 export function waitForHealth(url, timeoutMs, childProcess = null) {
     const start = Date.now();
     return new Promise((resolve, reject) => {
         let settled = false;
         let interval;
+        let attemptInFlight = false;
 
         const finish = (fn) => {
             if (settled) return;
@@ -231,15 +238,25 @@ export function waitForHealth(url, timeoutMs, childProcess = null) {
         }
 
         const attempt = async () => {
-            if (settled) return;
+            if (settled || attemptInFlight) return;
+            attemptInFlight = true;
+            // Cap the abort at whatever's left of the overall deadline, so a
+            // single slow/hung attempt can't itself push the rejection past
+            // timeoutMs -- the deadline is only re-checked once an attempt
+            // settles, so the attempt must never outlive the deadline.
+            const remainingMs = timeoutMs - (Date.now() - start);
+            const attemptTimeoutMs = Math.max(1, Math.min(HEALTH_ATTEMPT_TIMEOUT_MS, remainingMs));
             try {
-                const res = await fetch(`${url}/health`);
+                const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(attemptTimeoutMs) });
                 if (res.ok) {
                     finish(resolve);
                     return;
                 }
             } catch {
-                // backend not accepting connections yet, keep polling
+                // backend not accepting connections yet (or the per-attempt
+                // timeout fired), keep polling
+            } finally {
+                attemptInFlight = false;
             }
             if (!settled && Date.now() - start >= timeoutMs) {
                 finish(() => reject(new Error(`backend did not become healthy within ${timeoutMs}ms`)));

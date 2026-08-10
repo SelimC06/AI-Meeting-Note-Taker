@@ -72,7 +72,19 @@ export async function attemptRecovery({
                 const freed = await ensurePortFree(Number(new URL(backendUrl).port), pythonExe);
                 if (!freed) throw new Error('backend port is held by another process');
                 const child = startBackend(pythonExe, args, cwd, env);
+                if (isShuttingDown()) {
+                    // Quit began between the check above and the spawn -- this
+                    // child would outlive the app (before-quit's stopBackend
+                    // already ran, against the previous process). Kill it and
+                    // stop recovering.
+                    await stopBackend();
+                    return;
+                }
                 await waitForHealth(backendUrl, healthTimeoutMs, child);
+                if (isShuttingDown()) {
+                    await stopBackend();
+                    return;
+                }
                 armCrashMonitor(child, (code, signal) => {
                     attemptRecovery({ pythonExe, args, cwd, env, backendUrl, mainWindow, logDir, crashInfo: { exitCode: code, signal }, delays, healthTimeoutMs, isShuttingDown, onStatus });
                 });

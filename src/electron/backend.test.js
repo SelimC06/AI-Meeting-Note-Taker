@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { resolveVenvPython, resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree, getProcessExecutablePath } from './backend.js';
+import { resolveVenvPython, resolveBackendCommand, startBackend, stopBackend, waitForHealth, HEALTH_ATTEMPT_TIMEOUT_MS, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree, getProcessExecutablePath, findPidsListeningOnPort } from './backend.js';
 
 function makeTmpProjectRoot() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'backend-test-'));
@@ -177,6 +177,33 @@ test('waitForHealth rejects after timeoutMs when nothing responds', async () => 
     );
 });
 
+test('waitForHealth rejects within the deadline when the server accepts connections but never responds', async () => {
+    // A server that accepts the TCP connection but never writes a response
+    // reproduces the hang: without a per-attempt fetch timeout, the overall
+    // deadline check (only reached after a fetch settles) would never fire.
+    const server = net.createServer((socket) => {
+        // deliberately never write/end -- simulate a deadlocked backend
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    const start = Date.now();
+    try {
+        await assert.rejects(
+            () => waitForHealth(`http://127.0.0.1:${port}`, 2000),
+            /did not become healthy/
+        );
+    } finally {
+        server.close();
+    }
+    const elapsed = Date.now() - start;
+    assert.ok(elapsed < 3000, `should reject close to the 2000ms deadline, took ${elapsed}ms`);
+});
+
+test('HEALTH_ATTEMPT_TIMEOUT_MS is exported for tests to reference', () => {
+    assert.equal(typeof HEALTH_ATTEMPT_TIMEOUT_MS, 'number');
+    assert.ok(HEALTH_ATTEMPT_TIMEOUT_MS > 0);
+});
+
 test('waitForHealth rejects immediately if the child process exits first', async () => {
     const child = startBackend(process.execPath, ['-e', 'process.exit(1)'], process.cwd());
     const start = Date.now();
@@ -260,6 +287,24 @@ function getFreePort() {
         });
     });
 }
+
+test('findPidsListeningOnPort (win32) parses PIDs from a mocked Get-NetTCPConnection invocation', async () => {
+    const fakeExecFileAsync = async (command, args) => {
+        assert.equal(command, 'powershell');
+        assert.ok(args.some((a) => a.includes('Get-NetTCPConnection')));
+        return { stdout: '1234\n5678\n' };
+    };
+    const pids = await findPidsListeningOnPort(8000, 'win32', fakeExecFileAsync);
+    assert.deepEqual(pids, [1234, 5678]);
+});
+
+test('findPidsListeningOnPort (win32) returns [] when Get-NetTCPConnection errors (no matching connections)', async () => {
+    const fakeExecFileAsync = async () => {
+        throw new Error('Get-NetTCPConnection: no matching connections found');
+    };
+    const pids = await findPidsListeningOnPort(8000, 'win32', fakeExecFileAsync);
+    assert.deepEqual(pids, []);
+});
 
 test('ensurePortFree kills a process listening on the given port when it matches expectedExePath (orphaned zombie scenario)', async () => {
     const port = await getFreePort();

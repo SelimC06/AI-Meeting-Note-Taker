@@ -22,6 +22,10 @@ def client(tmp_path, monkeypatch):
     # Redirect settings.json to a temp file so tests don't pollute/read the
     # real backend/app/settings.json in this checkout.
     monkeypatch.setattr(server_module, "SETTINGS_PATH", tmp_path / "settings.json")
+    # Reset the /health Ollama status cache so each test starts with a cold
+    # cache -- otherwise a cached value from a previous test (module-level
+    # state, TTL 10s) would leak into this test's assertions.
+    monkeypatch.setattr(server_module, "_ollama_health", {"ok": False, "checked_at": 0.0})
     # base_url must be an allowed TrustedHostMiddleware host -- the default
     # "http://testserver" would otherwise get rejected with 400 before
     # reaching any route, since only localhost/127.0.0.1 are allowed.
@@ -1078,6 +1082,45 @@ def test_health_reports_ollama_down_on_read_timeout_instead_of_hanging(client, m
         raise httpx.ReadTimeout("timed out waiting for Ollama")
 
     monkeypatch.setattr(server_module, "assert_ollama_up", raise_timeout)
+
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["backend"] is True
+    assert body["ollama"] is False
+
+
+def test_health_caches_ollama_status_across_immediate_requests(client, monkeypatch):
+    """Regression test for the watchdog kill-loop: /health is polled with a
+    3s abort by the Electron watchdog, so it must answer instantly even when
+    the real Ollama probe is slow. Two immediate /health calls should only
+    invoke assert_ollama_up once -- the second is served from the TTL cache.
+    """
+    calls = []
+
+    def slow_ok():
+        calls.append(1)
+        time.sleep(0.2)
+
+    monkeypatch.setattr(server_module, "assert_ollama_up", slow_ok)
+
+    first = client.get("/health")
+    assert first.status_code == 200
+    assert first.json()["ollama"] is True
+    assert len(calls) == 1
+
+    second = client.get("/health")
+    assert second.status_code == 200
+    assert second.json()["ollama"] is True
+    assert len(calls) == 1, "second immediate call should be served from cache, not re-invoke assert_ollama_up"
+
+
+def test_health_reports_ollama_false_when_assert_ollama_up_raises(client, monkeypatch):
+    def raise_unreachable():
+        raise RuntimeError("ollama unreachable")
+
+    monkeypatch.setattr(server_module, "assert_ollama_up", raise_unreachable)
 
     resp = client.get("/health")
     assert resp.status_code == 200
