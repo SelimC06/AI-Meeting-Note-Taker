@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -881,7 +882,37 @@ def test_chat_streams_reply_for_known_session(client: TestClient, monkeypatch):
 
     resp = client.post("/chat/abc123", json={"message": "what did we discuss?", "history": []})
     assert resp.status_code == 200
-    assert resp.text == "We discussed things."
+    lines = [line for line in resp.text.splitlines() if line]
+    assert [json.loads(line) for line in lines] == [{"token": "We "}, {"token": "discussed things."}]
+
+
+def test_chat_stream_error_mid_generation_yields_typed_error_line(client: TestClient, monkeypatch):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc123",
+        "created_at": "2026-08-03T00:00:00+00:00",
+        "title": "Test Meeting",
+        "notes": "notes",
+        "video_path": "x",
+    })
+
+    def fake_stream_chat_reply(notes, message, history, **kwargs):
+        yield "chunk one"
+        yield "chunk two"
+        raise RuntimeError("ollama died")
+
+    monkeypatch.setattr(server_module, "assert_ollama_up", lambda: None)
+    monkeypatch.setattr(server_module, "stream_chat_reply", fake_stream_chat_reply)
+
+    resp = client.post("/chat/abc123", json={"message": "hi", "history": []})
+    assert resp.status_code == 200
+    lines = [json.loads(line) for line in resp.text.splitlines() if line]
+    assert lines == [
+        {"token": "chunk one"},
+        {"token": "chunk two"},
+        {"error": "ollama died"},
+    ]
 
 
 def test_chat_passes_history_through(client: TestClient, monkeypatch):
@@ -2381,6 +2412,33 @@ def test_export_zip_contains_final_webm_and_notes(client: TestClient):
     assert "notes.md" in names
     assert "transcript_1.txt" in names
     assert zf.read("notes.md").decode("utf-8") == "# notes here"
+
+
+def test_export_zip_contains_final_mp4_when_muxed_with_aac_fallback(client: TestClient):
+    """Regression test for batch 04, fix 4B: mux_video_audio names its output
+    final.mp4 on an aac-only ffmpeg. The export endpoint used to look only for
+    the literal final.webm, silently producing a recording-less zip."""
+    import zipfile
+    import io as io_module
+    from app.sessions_store import append_session
+
+    session_dir = server_module.STORE / "abc"
+    session_dir.mkdir()
+    (session_dir / "final.mp4").write_bytes(b"fake mp4 bytes")
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "My Meeting", "notes": "# notes here",
+        "video_path": str(session_dir / "final.mp4"), "trashed_at": None,
+    })
+
+    resp = client.get("/sessions/abc/export/zip")
+    assert resp.status_code == 200
+
+    zf = zipfile.ZipFile(io_module.BytesIO(resp.content))
+    names = set(zf.namelist())
+    assert "final.mp4" in names
+    assert zf.read("final.mp4") == b"fake mp4 bytes"
 
 
 def test_export_zip_streams_a_large_file_from_disk_without_buffering_it_whole(client: TestClient):

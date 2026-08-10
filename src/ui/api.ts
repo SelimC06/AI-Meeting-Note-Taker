@@ -93,11 +93,32 @@ export async function* streamChatReply(
 
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
+  let buffer = "";
+
+  const parseLine = (line: string): string => {
+    const obj = JSON.parse(line) as { token?: string; error?: string };
+    if (obj.error !== undefined) {
+      throw new Error(`Chat failed mid-response: ${obj.error}`);
+    }
+    return obj.token ?? "";
+  };
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    yield decoder.decode(value, { stream: true });
+    buffer += decoder.decode(value, { stream: true });
+    let newline;
+    while ((newline = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (line) yield parseLine(line);
+    }
   }
+  // Final flush: a multi-byte character split across the last two chunks is
+  // still buffered inside the decoder until this argument-less call.
+  buffer += decoder.decode();
+  const rest = buffer.trim();
+  if (rest) yield parseLine(rest);
 }
 
 export type WhisperModelChoice = {

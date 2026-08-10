@@ -13,6 +13,7 @@ from typing import Optional, List
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 import asyncio
+import json
 import shutil
 import subprocess
 import tempfile
@@ -675,14 +676,19 @@ def chat(session_id: str, body: ChatRequest):
     history = [{"role": m.role, "content": m.content} for m in body.history]
 
     def token_stream():
+        # NDJSON, one object per line: {"token": ...} for model output,
+        # {"error": ...} for a mid-stream failure. Plain-text streaming made an
+        # error indistinguishable from something the model said -- it got
+        # rendered as assistant text and echoed back in the next turn's
+        # history.
         try:
             for chunk in stream_chat_reply(session_record["notes"], body.message, history, model=chat_model):
-                yield chunk
+                yield json.dumps({"token": chunk}) + "\n"
         except Exception as e:
             log(f"chat stream failed: {e}")
-            yield f"\n[error: {e}]"
+            yield json.dumps({"error": str(e)}) + "\n"
 
-    return StreamingResponse(token_stream(), media_type="text/plain")
+    return StreamingResponse(token_stream(), media_type="application/x-ndjson")
 
 def _record_failed_session(session: Path, error: str) -> None:
     """Best-effort: append a status:"failed" session record so a failed
@@ -1059,9 +1065,22 @@ def export_session_zip(session_id: str):
     tmp_path = tmp.name
     try:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-            final_webm = session_dir / "final.webm"
-            if final_webm.exists():
-                zf.write(final_webm, arcname="final.webm")
+            # The mux picks its container from the available encoders (webm
+            # normally, mp4 on an aac-only ffmpeg) -- the literal "final.webm"
+            # name silently dropped the recording from exports for
+            # mp4-fallback sessions.
+            video_file = None
+            recorded_path = record.get("video_path")
+            if recorded_path:
+                candidate = Path(recorded_path)
+                if candidate.exists():
+                    video_file = candidate
+            if video_file is None:
+                for candidate in sorted(session_dir.glob("final.*")):
+                    video_file = candidate
+                    break
+            if video_file is not None:
+                zf.write(video_file, arcname=video_file.name)
 
             notes_md = session_dir / "notes.md"
             if notes_md.exists():
