@@ -215,6 +215,10 @@ export default function RailApp() {
                 setProcessError(null);
                 await record();
             } else if (status === "recording" || status === "paused" || status === "starting") {
+                // A stop+upload span is already running (double-click landed in the
+                // recorder-flush window) -- layers below make stop() re-entrant, but
+                // without this check the same Combined would be uploaded twice.
+                if (inFlightUploadRef.current) return;
                 await stopAndUpload();
             }
         } catch (err) {

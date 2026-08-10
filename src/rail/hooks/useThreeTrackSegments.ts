@@ -145,17 +145,9 @@ export function useThreeTrackSegments() {
   };
 
   // ----- STOP -----
-  const stop = async (): Promise<Combined> => {
-    if (status === "idle") return {};
+  const stopInFlightRef = useRef<Promise<Combined> | null>(null);
 
-    if (status === "starting") {
-      // getSeparateCapture() is still in flight -- recRef/streamsRef aren't
-      // populated yet, so there's nothing to stop here. Flag the abort for
-      // record()'s continuation to pick up once capture resolves.
-      abortRequestedRef.current = true;
-      return {};
-    }
-
+  const doStop = async (): Promise<Combined> => {
     const s = recRef.current;
     // Captured now, before the finally block below replaces segsRef.current
     // with a fresh empty object -- this still points at the live arrays
@@ -196,6 +188,21 @@ export function useThreeTrackSegments() {
     };
 
     return combined;
+  };
+
+  const stop = (): Promise<Combined> => {
+    if (stopInFlightRef.current) return stopInFlightRef.current;
+    if (status === "idle") return Promise.resolve({});
+    if (status === "starting") {
+      // getSeparateCapture() is still in flight -- recRef/streamsRef aren't
+      // populated yet, so there's nothing to stop here. Flag the abort for
+      // record()'s continuation to pick up once capture resolves.
+      abortRequestedRef.current = true;
+      return Promise.resolve({});
+    }
+    const p = doStop().finally(() => { stopInFlightRef.current = null; });
+    stopInFlightRef.current = p;
+    return p;
   };
 
   return { status, record, pause, resume, stop, error, micStream };

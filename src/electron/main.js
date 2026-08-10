@@ -982,7 +982,22 @@ app.whenReady().then(async () => {
     }
 });
 
-ipcMain.handle('updater:install', () => installUpdate());
+ipcMain.handle('updater:install', async () => {
+    // Same guard app:quit uses: quitAndInstall() fires app.quit(), whose
+    // before-quit handler sets isQuitting and lets every window close
+    // unguarded -- so the recording/pending-upload guard has to run HERE,
+    // before the quit machinery is ever engaged. closeInProgress prevents
+    // this overlapping with an already-running close/quit sequence.
+    if (closeInProgress) return;
+    closeInProgress = true;
+    try {
+        const proceed = await performGuardedClose();
+        if (!proceed) return;
+        installUpdate();
+    } finally {
+        closeInProgress = false;
+    }
+});
 ipcMain.handle('updater:getStatus', () => getLastStatus());
 
 ipcMain.handle('app:getVersion', () => app.getVersion());

@@ -42,31 +42,40 @@ export function getRecorder(
     }
   };
 
+  let stopPromise: Promise<void> | null = null;
+
   return {
     mediaRecorder: mr,
     mimeType: mimeType || mr.mimeType,
     start: () => mr.start(timesliceMs),
     pause: () => mr.pause(),
     resume: () => mr.resume(),
-    stop: () =>
-      new Promise<void>((resolve) => {
-        // MediaRecorder.stop() throws InvalidStateError if the recorder is
-        // already inactive (e.g. called twice, or called after an earlier
-        // internal error already stopped it). Treat that as "already
-        // stopped" and resolve immediately, instead of letting the throw
-        // reject this promise and abort whatever caller is awaiting
-        // cleanup (see useThreeTrackSegments.ts's stop()).
-        if (mr.state === "inactive") {
-          resolve();
-          return;
-        }
-        // stop() flushes one final ondataavailable (with whatever's been
-        // buffered since the last timeslice) before firing onstop, so the
-        // caller's ondata callback has already received every chunk by the
-        // time this resolves.
+    stop: () => {
+      // Same promise for every caller: a second stop() while the first is
+      // still flushing must wait for that same final ondataavailable, not
+      // resolve early (state is already "inactive" the moment stop() is
+      // called) and not clobber the first caller's onstop.
+      if (stopPromise) return stopPromise;
+      // MediaRecorder.stop() throws InvalidStateError if the recorder is
+      // already inactive (e.g. called after an earlier internal error
+      // already stopped it). Treat that as "already stopped" and resolve
+      // immediately, instead of letting the throw reject this promise and
+      // abort whatever caller is awaiting cleanup (see
+      // useThreeTrackSegments.ts's stop()).
+      if (mr.state === "inactive") {
+        stopPromise = Promise.resolve();
+        return stopPromise;
+      }
+      // stop() flushes one final ondataavailable (with whatever's been
+      // buffered since the last timeslice) before firing onstop, so the
+      // caller's ondata callback has already received every chunk by the
+      // time this resolves.
+      stopPromise = new Promise<void>((resolve) => {
         mr.onstop = () => resolve();
         mr.stop();
-      }),
+      });
+      return stopPromise;
+    },
     ondata: (cb) => {
       ondataCb = cb;
     },

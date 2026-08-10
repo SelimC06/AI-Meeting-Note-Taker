@@ -709,6 +709,43 @@ it("does not start a second stopAndUpload when stopForClose arrives while stop()
   });
 });
 
+it("double-clicking Stop while the recorder is still flushing only uploads once (1B)", async () => {
+  // Regression test: clicking Stop twice in quick succession before React
+  // re-renders (status closure still "recording") used to call
+  // stopAndUpload() -> stop() twice, producing two POST /process calls (one
+  // truncated). inFlightUploadRef is set synchronously by the first call's
+  // trackInFlight, so the second click's guard must bail before starting a
+  // second span.
+  const record = vi.fn().mockResolvedValue(undefined);
+  let resolveStop: (value: { screen: Blob }) => void = () => {};
+  const stopPromise = new Promise<{ screen: Blob }>((resolve) => {
+    resolveStop = resolve;
+  });
+  const stop = vi.fn().mockReturnValue(stopPromise);
+  mockHook({ status: "recording", record, stop, error: null });
+
+  const fetchMock = vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ job_id: "job-1", session_id: "session-1" }),
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { container } = render(<RailApp />);
+  const recordButton = container.querySelectorAll("button")[0];
+
+  fireEvent.click(recordButton); // click 1: stopAndUpload() -> stop() (still pending)
+  fireEvent.click(recordButton); // click 2 (double-click): must bail immediately
+
+  expect(stop).toHaveBeenCalledTimes(1);
+
+  resolveStop({ screen: new Blob(["x"]) });
+
+  await waitFor(() => {
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 it("pushes hasPendingUpload:true after a failed upload and false again once a retry succeeds (G3)", async () => {
   const pushRailStatus = vi.fn();
   vi.stubGlobal("windowControls", { pushRailStatus, onRailCommand: vi.fn(() => () => {}) });

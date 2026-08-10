@@ -78,6 +78,19 @@ it("ondata fires for every chunk, including the final flush stop() triggers, wit
   expect(received).toEqual([chunk1, chunk2]);
 });
 
+it("two stop() calls made while still recording return the same promise and both resolve after onstop fires once", async () => {
+  const fakeStream = {} as MediaStream;
+  const rec = getRecorder(fakeStream, "video/webm");
+
+  rec.start();
+  const first = rec.stop();
+  const second = rec.stop();
+
+  expect(second).toBe(first);
+  await expect(first).resolves.toBeUndefined();
+  await expect(second).resolves.toBeUndefined();
+});
+
 it("ignores an ondataavailable event with a zero-size (or missing) data payload", () => {
   const fakeStream = {} as MediaStream;
   const rec = getRecorder(fakeStream, "video/webm");

@@ -16,7 +16,7 @@ export function useMicLevel(stream: MediaStream | null): number[] {
       return;
     }
 
-    let audioCtx: AudioContext;
+    let audioCtx: AudioContext | undefined;
     let source: MediaStreamAudioSourceNode;
     let analyser: AnalyserNode;
     try {
@@ -29,10 +29,10 @@ export function useMicLevel(stream: MediaStream | null): number[] {
       analyser.fftSize = 256;
       source.connect(analyser);
     } catch {
-      // AudioContext unavailable, or the stream couldn't be wired into it.
-      // Leave levels at their default all-zeros value rather than letting
-      // this throw escape the effect (there's no error boundary around the
-      // rail, so an uncaught throw here would blank the whole UI).
+      // Partial construction: the context may exist even though wiring it to
+      // the stream failed -- close it, or each failed attempt leaks a live
+      // AudioContext (browsers cap how many can exist at once).
+      audioCtx?.close().catch(() => {});
       return;
     }
 
@@ -54,7 +54,7 @@ export function useMicLevel(stream: MediaStream | null): number[] {
       clearInterval(intervalId);
       source.disconnect();
       analyser.disconnect();
-      audioCtx.close();
+      audioCtx?.close();
     };
   }, [stream]);
 

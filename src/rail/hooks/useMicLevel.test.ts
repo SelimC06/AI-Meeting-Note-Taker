@@ -23,7 +23,7 @@ class FakeAudioContext {
   createMediaStreamSource = vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() }));
   createAnalyser = vi.fn(() => new FakeAnalyserNode());
   resume = vi.fn().mockResolvedValue(undefined);
-  close = vi.fn();
+  close = vi.fn().mockResolvedValue(undefined);
 }
 
 afterEach(() => {
@@ -51,6 +51,30 @@ it("samples the analyser on an interval and pushes levels into a rolling buffer"
   expect(result.current).toHaveLength(20);
   const last = result.current[result.current.length - 1];
   expect(last).toBeGreaterThan(0.9);
+});
+
+it("closes the AudioContext if wiring it to the stream throws mid-construction", () => {
+  let created: FakeAudioContext | undefined;
+  class ThrowingAudioContext extends FakeAudioContext {
+    createMediaStreamSource = vi.fn(() => {
+      throw new Error("dead stream");
+    });
+  }
+  vi.stubGlobal(
+    "AudioContext",
+    vi.fn(function AudioContextCtor() {
+      created = new ThrowingAudioContext();
+      return created;
+    })
+  );
+
+  const stream = new MediaStream();
+  const { result } = renderHook(() => useMicLevel(stream));
+
+  // The construction failed, so the hook falls back to its default silent
+  // levels -- but the AudioContext it already created must still be closed.
+  expect(result.current.every((v) => v === 0)).toBe(true);
+  expect(created?.close).toHaveBeenCalledTimes(1);
 });
 
 it("resets to zeros when the stream goes back to null", () => {
