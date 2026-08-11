@@ -20,7 +20,7 @@ export async function getSeparateCapture(): Promise<CaptureStreams> {
   }
 
   // Browser fallback (no system audio)
-  const screen = await (navigator.mediaDevices as any).getDisplayMedia({
+  const screen = await navigator.mediaDevices.getDisplayMedia({
     video: { frameRate: 30 },
     audio: false,
   });

@@ -35,7 +35,7 @@ test('getUpdateFeedUrl returns UPDATE_FEED_URL when set', () => {
 
 test('getUpdateFeedUrl falls back to the default production feed when unset', () => {
     const url = getUpdateFeedUrl({});
-    assert.equal(url, 'https://pub-e9fb1382ea6345b5bfcda99097519034.r2.dev');
+    assert.equal(url, 'https://updates.deskrecap.com');
 });
 
 test('armAutoUpdate sets autoDownload, sets the feed URL, and triggers a check', () => {

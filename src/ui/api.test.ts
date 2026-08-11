@@ -137,8 +137,8 @@ it("cancels the stream reader on a mid-stream {error} line too", async () => {
   const gen = streamChatReply("s1", "hi", []);
   await expect(
     (async () => {
-      for await (const _chunk of gen) {
-        // drain
+      for await (const chunk of gen) {
+        void chunk; // drain
       }
     })()
   ).rejects.toThrow("Chat failed mid-response: ollama died");

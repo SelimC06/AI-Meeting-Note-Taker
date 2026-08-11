@@ -117,8 +117,8 @@ pieces of config, serving two different purposes — both must stay correct:
   a new release. It requires write credentials (see below) and is never
   read by the running app.
 - **The runtime feed URL the app actually checks** — `DEFAULT_FEED_URL` in
-  `src/electron/updater.js`, currently the bucket's public R2.dev URL
-  (`https://pub-e9fb1382ea6345b5bfcda99097519034.r2.dev`), overridable via
+  `src/electron/updater.js`, currently a custom domain in front of the
+  bucket (`https://updates.deskrecap.com`), overridable via
   the `UPDATE_FEED_URL` environment variable. `armAutoUpdate` calls
   `updater.setFeedURL({ provider: 'generic', url: getUpdateFeedUrl() })`
   unconditionally, which overrides whatever `app-update.yml`

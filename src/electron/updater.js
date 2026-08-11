@@ -1,7 +1,6 @@
 import electronUpdater from 'electron-updater';
 
-// TODO: move off rate-limited r2.dev before wide distribution
-const DEFAULT_FEED_URL = 'https://pub-e9fb1382ea6345b5bfcda99097519034.r2.dev';
+const DEFAULT_FEED_URL = 'https://updates.deskrecap.com';
 
 export function getUpdateFeedUrl(env = process.env) {
     return env.UPDATE_FEED_URL || DEFAULT_FEED_URL;
