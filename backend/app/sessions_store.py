@@ -527,12 +527,15 @@ def sweep_stale_partial_mux_files(store_dir: Path, max_age_seconds: int = 3600) 
     max_age_seconds. Meant to run once at backend startup, alongside the
     other sweeps.
 
-    mux_video_audio writes to a dotted "<name>.part" temp file and
+    mux_video_audio writes to a dotted "." + "<name>.part" temp file and
     os.replace()s it onto the real output on success, with an unlink in the
     ffmpeg failure path -- but a hard kill (crash, watchdog kill, power loss)
     mid-mux skips both, leaving the temp file behind forever with nothing
     else to clean it up. Age-gated so a mux actually in progress right now is
     never touched.
+
+    Also matches the pre-batch-10 undotted "final.*.part" name, so partials
+    left by an older build aren't stuck on disk forever after an upgrade.
 
     Returns the names of files actually removed.
     """
@@ -540,7 +543,15 @@ def sweep_stale_partial_mux_files(store_dir: Path, max_age_seconds: int = 3600) 
     if not store_dir.exists():
         return removed
     cutoff = time.time() - max_age_seconds
-    for entry in sorted(store_dir.glob("*/.*.part")):
+    seen: set = set()
+    entries: List[Path] = []
+    for pattern in ("*/.*.part", "*/final.*.part"):
+        for entry in store_dir.glob(pattern):
+            if entry in seen:
+                continue
+            seen.add(entry)
+            entries.append(entry)
+    for entry in sorted(entries):
         if not entry.is_file():
             continue
         try:

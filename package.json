@@ -1,6 +1,7 @@
 {
   "name": "meeting-note-taker",
   "private": true,
+  "license": "UNLICENSED",
   "version": "1.0.0",
   "type": "module",
   "main": "src/electron/main.js",

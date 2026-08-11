@@ -243,7 +243,7 @@ def test_mux_video_audio_prefers_libopus(tmp_path, monkeypatch):
     assert result == out_path
     assert result.suffix == ".webm"
     assert "libopus" in calls[0]
-    assert not out_path.with_name(out_path.name + ".part").exists()
+    assert not out_path.with_name("." + out_path.name + ".part").exists()
 
 
 def test_mux_video_audio_falls_back_to_libvorbis(tmp_path, monkeypatch):
@@ -322,4 +322,4 @@ def test_mux_video_audio_raises_on_ffmpeg_failure(tmp_path, monkeypatch):
     # A failed mux must never leave a partial final.* behind for export's
     # final.* glob to ship as "the recording".
     assert not out_path.exists()
-    assert not out_path.with_name(out_path.name + ".part").exists()
+    assert not out_path.with_name("." + out_path.name + ".part").exists()

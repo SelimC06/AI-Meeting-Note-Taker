@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob } from './closeGuard.js';
+import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence } from './closeGuard.js';
 
 test('shouldPromptBeforeClose is true for starting, recording, and paused', () => {
     assert.equal(shouldPromptBeforeClose('starting'), true);
@@ -59,4 +59,42 @@ test('hasActiveJob is false when all jobs are done/failed or the list is empty',
 test('hasActiveJob is false for non-array input', () => {
     assert.equal(hasActiveJob(undefined), false);
     assert.equal(hasActiveJob(null), false);
+});
+
+test('runInstallShutdownSequence stops the watchdog and marks shutting-down/quit-requested before the jobs wait', async () => {
+    const calls = [];
+    await runInstallShutdownSequence({
+        stopHealthWatchdog: () => calls.push('stopHealthWatchdog'),
+        markShuttingDown: () => calls.push('markShuttingDown'),
+        markQuitRequested: () => calls.push('markQuitRequested'),
+        destroyAllWindows: () => calls.push('destroyAllWindows'),
+        fetchActiveJobsForQuitGuard: async () => {
+            calls.push('fetchActiveJobsForQuitGuard');
+            return [{ status: 'running' }];
+        },
+        waitForActiveJobsToFinish: async () => calls.push('waitForActiveJobsToFinish'),
+    });
+
+    assert.deepEqual(calls, [
+        'stopHealthWatchdog',
+        'markShuttingDown',
+        'markQuitRequested',
+        'destroyAllWindows',
+        'fetchActiveJobsForQuitGuard',
+        'waitForActiveJobsToFinish',
+    ]);
+});
+
+test('runInstallShutdownSequence skips the jobs wait when nothing is active', async () => {
+    const calls = [];
+    await runInstallShutdownSequence({
+        stopHealthWatchdog: () => calls.push('stopHealthWatchdog'),
+        markShuttingDown: () => calls.push('markShuttingDown'),
+        markQuitRequested: () => calls.push('markQuitRequested'),
+        destroyAllWindows: () => calls.push('destroyAllWindows'),
+        fetchActiveJobsForQuitGuard: async () => [{ status: 'done' }],
+        waitForActiveJobsToFinish: async () => calls.push('waitForActiveJobsToFinish'),
+    });
+
+    assert.ok(!calls.includes('waitForActiveJobsToFinish'));
 });

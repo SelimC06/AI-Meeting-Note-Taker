@@ -1237,6 +1237,49 @@ def test_health_reports_ollama_false_when_assert_ollama_up_raises(client, monkey
     assert server_module._ollama_health["ok"] is False
 
 
+def test_health_releases_ollama_lock_when_thread_start_fails(client, monkeypatch):
+    """Regression: if threading.Thread.start() raises (e.g. resource
+    exhaustion) inside _ollama_health_cached, the lock guarding "a refresh is
+    already running" must still be released in the except branch -- otherwise
+    every later call's lock.acquire(blocking=False) fails forever and the
+    cached Ollama status is frozen stale until restart.
+    """
+    import threading
+
+    # TestClient itself spins up threads for the ASGI portal -- only the
+    # health-refresh thread (target=_refresh) should be made to fail.
+    original_start = threading.Thread.start
+    calls = {"n": 0}
+
+    def flaky_start(self):
+        if getattr(self._target, "__name__", None) == "_refresh":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("thread creation failed")
+        return original_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", flaky_start)
+
+    first = client.get("/health")
+    assert first.status_code == 200
+    assert first.json()["ollama"] is False
+
+    # The failed start must have released the lock -- otherwise this would
+    # block (or, with blocking=False, fail to acquire) forever.
+    assert server_module._ollama_health_lock.acquire(blocking=False)
+    server_module._ollama_health_lock.release()
+
+    # checked_at was never updated by the crashed refresh, so the TTL is
+    # still expired and this call retries the refresh -- this time the
+    # (unpatched-after-first-call) thread start succeeds.
+    second = client.get("/health")
+    assert second.status_code == 200
+
+    wait_for_ollama_refresh()
+    assert server_module._ollama_health["ok"] is True
+    assert calls["n"] == 2
+
+
 def test_process_does_not_extract_frames_via_stop_recording_and_transcribe(client, monkeypatch):
     """
     Regression test for brief 13 #4: stop_recording_and_transcribe used to

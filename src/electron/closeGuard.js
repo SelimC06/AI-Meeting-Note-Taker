@@ -31,3 +31,28 @@ export function hasActiveJob(jobs) {
     if (!Array.isArray(jobs)) return false;
     return jobs.some((j) => j?.status === 'queued' || j?.status === 'running');
 }
+
+// Shared by updater:install and before-quit: stop the health watchdog and
+// mark the app as shutting down BEFORE the jobs wait below, not after --
+// otherwise a CPU-saturated backend missing watchdog probes during the wait
+// gets kill-restarted by attemptRecovery mid-transcription, destroying the
+// very job the wait exists to protect. Callbacks are injected (rather than
+// this module touching main.js's module-level state/Electron APIs directly)
+// so the ordering can be unit-tested without a full Electron harness.
+export async function runInstallShutdownSequence({
+    stopHealthWatchdog,
+    markShuttingDown,
+    markQuitRequested,
+    destroyAllWindows,
+    fetchActiveJobsForQuitGuard,
+    waitForActiveJobsToFinish,
+}) {
+    stopHealthWatchdog();
+    markShuttingDown();
+    markQuitRequested();
+    destroyAllWindows();
+    const jobs = await fetchActiveJobsForQuitGuard();
+    if (hasActiveJob(jobs)) {
+        await waitForActiveJobsToFinish();
+    }
+}

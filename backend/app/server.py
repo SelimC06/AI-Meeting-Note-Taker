@@ -388,7 +388,11 @@ def mux_video_audio(video: Path, audio: Optional[Path], out_path: Path) -> Path:
         # disk-full mid-copy of an up-to-2GB screen.webm must never leave a
         # truncated final.webm behind for export to ship.
         tmp_out = out_path.with_name("." + out_path.name + ".part")
-        shutil.copy(video, tmp_out)
+        try:
+            shutil.copy(video, tmp_out)
+        except Exception:
+            tmp_out.unlink(missing_ok=True)
+            raise
         os.replace(tmp_out, out_path)
         return out_path
 

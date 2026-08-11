@@ -20,7 +20,7 @@ import {
 } from './railGeometry.js';
 import { sanitizeCaptureSourceTypes } from './captureSources.js';
 import { distReactPath } from './paths.js';
-import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob } from './closeGuard.js';
+import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence } from './closeGuard.js';
 import { sanitizeRailStatus, isValidSlotRect } from './railValidation.js';
 
 let railErrorVisible = false;
@@ -1004,16 +1004,18 @@ ipcMain.handle('updater:install', async () => {
         // recovery spawns once install has begun -- the watchdog killing a
         // CPU-saturated backend during the jobs wait below would destroy the
         // very transcription the wait exists to protect.
-        stopHealthWatchdog();
-        shuttingDown = true;
-        quitRequested = true;
-        for (const w of BrowserWindow.getAllWindows()) {
-            if (!w.isDestroyed()) w.destroy();
-        }
-        const jobs = await fetchActiveJobsForQuitGuard();
-        if (hasActiveJob(jobs)) {
-            await waitForActiveJobsToFinish();
-        }
+        await runInstallShutdownSequence({
+            stopHealthWatchdog,
+            markShuttingDown: () => { shuttingDown = true; },
+            markQuitRequested: () => { quitRequested = true; },
+            destroyAllWindows: () => {
+                for (const w of BrowserWindow.getAllWindows()) {
+                    if (!w.isDestroyed()) w.destroy();
+                }
+            },
+            fetchActiveJobsForQuitGuard,
+            waitForActiveJobsToFinish,
+        });
         // Jobs are done and windows are gone -- let before-quit take its
         // fast path (stopBackend + immediate quit) when quitAndInstall
         // fires app.quit().

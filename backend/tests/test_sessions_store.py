@@ -12,6 +12,7 @@ from app.sessions_store import (
     load_sessions,
     append_session,
     update_session_fields,
+    sweep_stale_partial_mux_files,
 )
 
 
@@ -992,3 +993,56 @@ def test_load_sessions_returned_records_are_copies_not_cache_aliases(tmp_path: P
 
     second = load_sessions(tmp_path)
     assert second[0]["title"] == "First"
+
+
+def _age_file(path: Path, seconds_old: int) -> None:
+    old = datetime.now(timezone.utc).timestamp() - seconds_old
+    os.utime(path, (old, old))
+
+
+def test_sweep_stale_partial_mux_files_removes_new_and_old_style_names(tmp_path: Path):
+    session_dir = tmp_path / "sess-1"
+    session_dir.mkdir()
+    new_style = session_dir / ".final.webm.part"
+    old_style = session_dir / "final.webm.part"
+    new_style.write_bytes(b"partial")
+    old_style.write_bytes(b"partial")
+    _age_file(new_style, 7200)
+    _age_file(old_style, 7200)
+
+    removed = sweep_stale_partial_mux_files(tmp_path, max_age_seconds=3600)
+
+    assert set(removed) == {".final.webm.part", "final.webm.part"}
+    assert not new_style.exists()
+    assert not old_style.exists()
+
+
+def test_sweep_stale_partial_mux_files_skips_files_within_the_age_cutoff(tmp_path: Path):
+    session_dir = tmp_path / "sess-1"
+    session_dir.mkdir()
+    fresh_new = session_dir / ".final.webm.part"
+    fresh_old = session_dir / "final.webm.part"
+    fresh_new.write_bytes(b"partial")
+    fresh_old.write_bytes(b"partial")
+
+    removed = sweep_stale_partial_mux_files(tmp_path, max_age_seconds=3600)
+
+    assert removed == []
+    assert fresh_new.exists()
+    assert fresh_old.exists()
+
+
+def test_sweep_stale_partial_mux_files_does_not_double_process_a_file(tmp_path: Path):
+    session_dir = tmp_path / "sess-1"
+    session_dir.mkdir()
+    stale = session_dir / ".final.webm.part"
+    stale.write_bytes(b"partial")
+    _age_file(stale, 7200)
+
+    removed = sweep_stale_partial_mux_files(tmp_path, max_age_seconds=3600)
+
+    assert removed == [".final.webm.part"]
+
+
+def test_sweep_stale_partial_mux_files_missing_store_dir_returns_empty(tmp_path: Path):
+    assert sweep_stale_partial_mux_files(tmp_path / "does-not-exist") == []
