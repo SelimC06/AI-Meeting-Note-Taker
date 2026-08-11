@@ -520,3 +520,34 @@ def sweep_stale_staging_dirs(store_dir: Path, max_age_seconds: int = 3600) -> Li
         except OSError:
             continue
     return removed
+
+
+def sweep_stale_partial_mux_files(store_dir: Path, max_age_seconds: int = 3600) -> List[str]:
+    """Removes leftover .part mux temp files (see mux_video_audio) older than
+    max_age_seconds. Meant to run once at backend startup, alongside the
+    other sweeps.
+
+    mux_video_audio writes to a dotted "<name>.part" temp file and
+    os.replace()s it onto the real output on success, with an unlink in the
+    ffmpeg failure path -- but a hard kill (crash, watchdog kill, power loss)
+    mid-mux skips both, leaving the temp file behind forever with nothing
+    else to clean it up. Age-gated so a mux actually in progress right now is
+    never touched.
+
+    Returns the names of files actually removed.
+    """
+    removed: List[str] = []
+    if not store_dir.exists():
+        return removed
+    cutoff = time.time() - max_age_seconds
+    for entry in sorted(store_dir.glob("*/.*.part")):
+        if not entry.is_file():
+            continue
+        try:
+            if entry.stat().st_mtime > cutoff:
+                continue
+            entry.unlink()
+            removed.append(entry.name)
+        except OSError:
+            continue
+    return removed

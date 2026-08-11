@@ -1000,6 +1000,12 @@ ipcMain.handle('updater:install', async () => {
         // immediately, and an installer running against a live app +
         // mid-transcription backend is a file-in-use failure or a corrupted
         // update.
+        // Mirror before-quit exactly: no watchdog-triggered restarts and no
+        // recovery spawns once install has begun -- the watchdog killing a
+        // CPU-saturated backend during the jobs wait below would destroy the
+        // very transcription the wait exists to protect.
+        stopHealthWatchdog();
+        shuttingDown = true;
         quitRequested = true;
         for (const w of BrowserWindow.getAllWindows()) {
             if (!w.isDestroyed()) w.destroy();
@@ -1012,7 +1018,16 @@ ipcMain.handle('updater:install', async () => {
         // fast path (stopBackend + immediate quit) when quitAndInstall
         // fires app.quit().
         quitConfirmed = true;
-        installUpdate();
+        try {
+            installUpdate();
+        } catch (err) {
+            // quitAndInstall throws if the downloaded update is gone/corrupt
+            // (AV quarantine). Windows are already destroyed and quitRequested
+            // suppressed window-all-closed's quit -- without this fallback the
+            // app survives as an unquittable, windowless process.
+            console.error('[updater] quitAndInstall failed, quitting without installing:', err);
+            app.quit();
+        }
     } finally {
         closeInProgress = false;
     }

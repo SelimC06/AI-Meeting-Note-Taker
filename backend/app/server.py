@@ -37,6 +37,7 @@ from .sessions_store import (
     rewrite_index_paths,
     sweep_orphaned_sessions,
     sweep_stale_staging_dirs,
+    sweep_stale_partial_mux_files,
     compute_storage_usage,
     STAGING_DIR_PREFIX,
 )
@@ -249,6 +250,10 @@ try:
     sweep_stale_staging_dirs(STORE)
 except Exception as e:
     print(f"[server] startup staging sweep failed (continuing): {e}", flush=True)
+try:
+    sweep_stale_partial_mux_files(STORE)
+except Exception as e:
+    print(f"[server] startup partial-mux sweep failed (continuing): {e}", flush=True)
 _sweep_stale_export_zips()
 WHISPER_MODEL = _settings["whisper_model"]
 OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
@@ -379,7 +384,12 @@ def mux_video_audio(video: Path, audio: Optional[Path], out_path: Path) -> Path:
       - Fallback to MP4 with aac
     """
     if audio is None:
-        shutil.copy(video, out_path)
+        # Same temp-then-promote as the ffmpeg branch below -- a crash or
+        # disk-full mid-copy of an up-to-2GB screen.webm must never leave a
+        # truncated final.webm behind for export to ship.
+        tmp_out = out_path.with_name("." + out_path.name + ".part")
+        shutil.copy(video, tmp_out)
+        os.replace(tmp_out, out_path)
         return out_path
 
     if ffmpeg_has_encoder("libopus"):
@@ -397,8 +407,10 @@ def mux_video_audio(video: Path, audio: Optional[Path], out_path: Path) -> Path:
     # Write to a temp name and promote only on success -- ffmpeg writing
     # directly to out_path left a partial final.* behind on failure (a failed
     # mux, e.g. disk full mid-write), which export's final.* glob then
-    # happily shipped as "the recording".
-    tmp_out = out_path.with_name(out_path.name + ".part")
+    # happily shipped as "the recording". Leading dot keeps the temp name out
+    # of export's sorted(glob("final.*")) fallback, which "final.webm.part"
+    # (no dot) used to match.
+    tmp_out = out_path.with_name("." + out_path.name + ".part")
     args = [
         "-i", str(video),
         "-i", str(audio),
@@ -452,7 +464,12 @@ def _ollama_health_cached() -> bool:
                     health["checked_at"] = time.time()
                 finally:
                     lock.release()
-            threading.Thread(target=_refresh, daemon=True).start()
+            try:
+                threading.Thread(target=_refresh, daemon=True).start()
+            except RuntimeError:
+                # Thread creation failed (resource exhaustion) -- release so a
+                # later call can retry, and serve the stale value meanwhile.
+                lock.release()
     return health["ok"]
 
 @app.get("/health")
