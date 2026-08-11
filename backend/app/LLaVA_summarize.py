@@ -1,36 +1,22 @@
 from pathlib import Path
-import httpx
-import ollama
 import base64, io, os
 from PIL import Image
 from typing import List
 
-OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://localhost:11434"
+from . import ollama_client
+
+OLLAMA_BASE = ollama_client.resolve_ollama_base()
 DEFAULT_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:7b-v1.5-q4_K_M")
 
-# ollama.Client defaults to timeout=None, which disables httpx's timeout
-# entirely -- a wedged Ollama then blocks the job worker's summarize step
-# forever, permanently stalling every recording queued behind it. Health
-# checks get a short, fixed timeout; the generation call gets a generous,
-# configurable one (local vision models can take minutes to produce a first
-# token after a cold load).
-_DEFAULT_OLLAMA_TIMEOUT_SECONDS = 300.0
-try:
-    OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", _DEFAULT_OLLAMA_TIMEOUT_SECONDS))
-except ValueError:
-    print(
-        f"[LLaVA_summarize] ignoring non-numeric OLLAMA_TIMEOUT_SECONDS={os.environ['OLLAMA_TIMEOUT_SECONDS']!r}, "
-        f"using default {_DEFAULT_OLLAMA_TIMEOUT_SECONDS}s",
-        flush=True,
-    )
-    OLLAMA_TIMEOUT_SECONDS = _DEFAULT_OLLAMA_TIMEOUT_SECONDS
-_HEALTH_TIMEOUT = httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0)
-_GENERATION_TIMEOUT = httpx.Timeout(connect=5.0, read=OLLAMA_TIMEOUT_SECONDS, write=30.0, pool=30.0)
+# Health checks get a short, fixed timeout; the generation call gets a
+# generous, configurable one (local vision models can take minutes to
+# produce a first token after a cold load).
+OLLAMA_TIMEOUT_SECONDS = ollama_client.resolve_timeout_seconds("LLaVA_summarize")
 
-_client = ollama.Client(host=OLLAMA_BASE, timeout=_GENERATION_TIMEOUT)
+_client = ollama_client.make_generation_client(OLLAMA_BASE, OLLAMA_TIMEOUT_SECONDS)
 # Separate instance from _client so the health check's short timeout can never
 # be affected by (or fight with) whatever timeout the generation call needs.
-_health_client = ollama.Client(host=OLLAMA_BASE, timeout=_HEALTH_TIMEOUT)
+_health_client = ollama_client.make_health_client(OLLAMA_BASE)
 
 def _assert_ollama_up():
     # Quick connectivity check; will raise if server isn’t up

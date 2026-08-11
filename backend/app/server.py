@@ -464,6 +464,13 @@ def health():
 def root():
     return {"service": "meeting-api", "ok": True}
 
+def _get_session_or_404(store: Path, session_id: str) -> dict:
+    for record in load_sessions(store):
+        if record.get("id") == session_id:
+            return record
+    raise HTTPException(404, "Session not found")
+
+
 @app.get("/sessions")
 def sessions(include_trashed: bool = False):
     store = STORE
@@ -486,30 +493,22 @@ def rename_session(session_id: str, body: SessionRename):
     ok = update_session_fields(store, session_id, title=title)
     if not ok:
         raise HTTPException(404, "Session not found")
-    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
-    if not matching:
-        # A concurrent DELETE landed between the update above and this
-        # re-read -- report the same 404 a request that arrived slightly
-        # later would get, instead of an IndexError -> 500.
-        raise HTTPException(404, "Session not found")
-    return matching[0]
+    # A concurrent DELETE landed between the update above and this re-read --
+    # report the same 404 a request that arrived slightly later would get,
+    # instead of an IndexError -> 500.
+    return _get_session_or_404(store, session_id)
 
 
 @app.post("/sessions/{session_id}/trash")
 def trash_session(session_id: str):
     store = STORE
-    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
-    if not matching:
-        raise HTTPException(404, "Session not found")
-    if not matching[0].get("trashed_at"):
+    record = _get_session_or_404(store, session_id)
+    if not record.get("trashed_at"):
         update_session_fields(store, session_id, trashed_at=datetime.now(timezone.utc).isoformat())
-    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
-    if not matching:
-        # A concurrent DELETE landed between the update above and this
-        # re-read -- report the same 404 a request that arrived slightly
-        # later would get, instead of an IndexError -> 500.
-        raise HTTPException(404, "Session not found")
-    return matching[0]
+    # A concurrent DELETE landed between the update above and this re-read --
+    # report the same 404 a request that arrived slightly later would get,
+    # instead of an IndexError -> 500.
+    return _get_session_or_404(store, session_id)
 
 
 @app.post("/sessions/{session_id}/restore")
@@ -518,13 +517,10 @@ def restore_session(session_id: str):
     ok = update_session_fields(store, session_id, trashed_at=None)
     if not ok:
         raise HTTPException(404, "Session not found")
-    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
-    if not matching:
-        # A concurrent DELETE landed between the update above and this
-        # re-read -- report the same 404 a request that arrived slightly
-        # later would get, instead of an IndexError -> 500.
-        raise HTTPException(404, "Session not found")
-    return matching[0]
+    # A concurrent DELETE landed between the update above and this re-read --
+    # report the same 404 a request that arrived slightly later would get,
+    # instead of an IndexError -> 500.
+    return _get_session_or_404(store, session_id)
 
 
 @app.delete("/sessions/{session_id}")
@@ -694,10 +690,7 @@ def chat(session_id: str, body: ChatRequest):
     if stream_chat_reply is None or assert_ollama_up is None:
         raise HTTPException(503, "Chat is unavailable on this server")
 
-    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
-    if not matching:
-        raise HTTPException(404, "Session not found")
-    session_record = matching[0]
+    session_record = _get_session_or_404(store, session_id)
 
     try:
         assert_ollama_up()
@@ -1026,10 +1019,7 @@ def _is_valid_session_id(session_id: str) -> bool:
 @app.get("/sessions/{session_id}/export/notes")
 def export_session_notes(session_id: str):
     store = STORE
-    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
-    if not matching:
-        raise HTTPException(404, "Session not found")
-    record = matching[0]
+    record = _get_session_or_404(store, session_id)
     notes = record.get("notes", "")
     filename = _slugify_filename(record.get("title") or "session") + ".md"
     return Response(
@@ -1044,10 +1034,7 @@ def export_session_zip(session_id: str):
     if not _is_valid_session_id(session_id):
         raise HTTPException(400, "Invalid session id")
     store = STORE
-    matching = [s for s in load_sessions(store) if s.get("id") == session_id]
-    if not matching:
-        raise HTTPException(404, "Session not found")
-    record = matching[0]
+    record = _get_session_or_404(store, session_id)
     session_dir = store / session_id
     if not session_dir.exists():
         raise HTTPException(404, "Session files not found")

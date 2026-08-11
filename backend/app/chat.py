@@ -3,37 +3,20 @@ import os
 import re
 from typing import Iterator, List, Dict
 
-import httpx
-import ollama
+from . import ollama_client
 
-OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://localhost:11434"
+OLLAMA_BASE = ollama_client.resolve_ollama_base()
 DEFAULT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "gemma3:4b")
 
-# ollama.Client defaults to timeout=None, which disables httpx's timeout
-# entirely -- a wedged Ollama (model-load hang, OOM) then blocks whichever
-# thread called it forever. Health checks get a short, fixed timeout since
-# they're polled frequently (including by /health) and must fail fast rather
-# than exhausting the threadpool. Chat gets a generous, configurable one:
-# local models can legitimately take minutes to produce a first token after a
-# cold load, and streamed chunks each get their own read-timeout window, so a
+# Chat gets ollama_client's generous, configurable generation timeout:
+# streamed chunks each get their own read-timeout window, so a
 # slow-but-alive generation survives while a genuine stall is still caught.
-_DEFAULT_OLLAMA_TIMEOUT_SECONDS = 300.0
-try:
-    OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", _DEFAULT_OLLAMA_TIMEOUT_SECONDS))
-except ValueError:
-    print(
-        f"[chat] ignoring non-numeric OLLAMA_TIMEOUT_SECONDS={os.environ['OLLAMA_TIMEOUT_SECONDS']!r}, "
-        f"using default {_DEFAULT_OLLAMA_TIMEOUT_SECONDS}s",
-        flush=True,
-    )
-    OLLAMA_TIMEOUT_SECONDS = _DEFAULT_OLLAMA_TIMEOUT_SECONDS
-_HEALTH_TIMEOUT = httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0)
-_CHAT_TIMEOUT = httpx.Timeout(connect=5.0, read=OLLAMA_TIMEOUT_SECONDS, write=30.0, pool=30.0)
+OLLAMA_TIMEOUT_SECONDS = ollama_client.resolve_timeout_seconds("chat")
 
-_client = ollama.Client(host=OLLAMA_BASE, timeout=_CHAT_TIMEOUT)
+_client = ollama_client.make_generation_client(OLLAMA_BASE, OLLAMA_TIMEOUT_SECONDS)
 # Separate instance from _client so the health check's short timeout can never
 # be affected by (or fight with) whatever timeout a concurrent chat call needs.
-_health_client = ollama.Client(host=OLLAMA_BASE, timeout=_HEALTH_TIMEOUT)
+_health_client = ollama_client.make_health_client(OLLAMA_BASE)
 
 # How many characters (or until the first blank line, whichever comes first)
 # to buffer before deciding whether the response opens with a title-style

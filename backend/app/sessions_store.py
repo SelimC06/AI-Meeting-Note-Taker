@@ -11,7 +11,17 @@ from typing import List
 
 SESSIONS_INDEX_FILENAME = "sessions_index.json"
 
-_APPEND_LOCK = threading.Lock()
+# RLock: load_sessions() below acquires this itself, but writers (which
+# already hold it across their whole read-modify-write) call load_sessions()
+# too -- a plain Lock would deadlock a writer against its own read.
+_APPEND_LOCK = threading.RLock()
+
+# str(store_dir) -> (mtime_ns, records) of the last index parsed from disk.
+# Guarded by _APPEND_LOCK. Keeps every /sessions poll, session lookup, and
+# chat request from re-reading and re-parsing the whole index file every
+# time -- only a write (via _write_sessions_atomic) or an externally
+# modified mtime actually triggers a reparse.
+_index_cache: dict = {}
 
 
 def extract_title(notes: str) -> str:
@@ -67,18 +77,42 @@ def _index_exists_but_is_corrupt(store_dir: Path) -> bool:
 
 
 def load_sessions(store_dir: Path) -> List[dict]:
-    """Read the sessions index. Missing or corrupt file -> empty list."""
+    """Read the sessions index. Missing or corrupt file -> empty list.
+
+    Cached on the index file's mtime (see _index_cache) -- a cache hit
+    returns copies of the cached records (callers mutate what they get back)
+    without touching disk. A missing file or a read/parse error always
+    invalidates the cache entry, so the resilience paths below never serve a
+    stale cache instead of reflecting reality.
+    """
     path = _index_path(store_dir)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        _preserve_corrupt_index(path)
-        return []
-    if not isinstance(data, list):
-        return []
-    return data
+    key = str(store_dir)
+    with _APPEND_LOCK:
+        if not path.exists():
+            _index_cache.pop(key, None)
+            return []
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            _index_cache.pop(key, None)
+            return []
+
+        cached = _index_cache.get(key)
+        if cached is not None and cached[0] == mtime_ns:
+            return [dict(r) for r in cached[1]]
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            _preserve_corrupt_index(path)
+            _index_cache.pop(key, None)
+            return []
+        if not isinstance(data, list):
+            _index_cache.pop(key, None)
+            return []
+
+        _index_cache[key] = (mtime_ns, data)
+        return [dict(r) for r in data]
 
 
 def _write_sessions_atomic(store_dir: Path, sessions: List[dict]) -> None:
@@ -89,6 +123,11 @@ def _write_sessions_atomic(store_dir: Path, sessions: List[dict]) -> None:
     swaps it into place with os.replace(). Without the fsync, a power loss
     between write and replace could leave an empty/truncated index behind.
     Callers must hold _APPEND_LOCK.
+
+    Refreshes _index_cache with the just-written records afterward so the
+    next load_sessions() call (by this process) doesn't have to reparse what
+    it just wrote. Falls back to invalidating the entry if the post-write
+    stat fails, so a reparse happens rather than serving stale data.
     """
     final_path = _index_path(store_dir)
     tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
@@ -97,6 +136,14 @@ def _write_sessions_atomic(store_dir: Path, sessions: List[dict]) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp_path, final_path)
+
+    key = str(store_dir)
+    try:
+        mtime_ns = final_path.stat().st_mtime_ns
+    except OSError:
+        _index_cache.pop(key, None)
+        return
+    _index_cache[key] = (mtime_ns, [dict(r) for r in sessions])
 
 
 def append_session(store_dir: Path, record: dict) -> None:

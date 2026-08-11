@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from app.sessions_store import extract_title, load_sessions, append_session
+from app import sessions_store
+from app.sessions_store import (
+    extract_title,
+    load_sessions,
+    append_session,
+    update_session_fields,
+)
 
 
 def test_extract_title_plain_heading():
@@ -912,3 +918,77 @@ def test_rewrite_index_paths_leaves_none_and_foreign_paths_untouched(tmp_path: P
     records = {r["id"]: r for r in load_sessions(new_root)}
     assert records["no-path"]["video_path"] is None
     assert records["foreign"]["video_path"] == str(other_root / "foreign" / "final.webm")
+
+
+def test_load_sessions_cache_hit_does_not_reparse(tmp_path: Path, monkeypatch):
+    append_session(tmp_path, {
+        "id": "aaa", "created_at": "2026-01-01T00:00:00+00:00",
+        "title": "First", "notes": "", "video_path": None, "trashed_at": None,
+    })
+    load_sessions(tmp_path)  # warm the cache
+
+    calls = []
+    real_loads = json.loads
+
+    def counting_loads(*args, **kwargs):
+        calls.append(True)
+        return real_loads(*args, **kwargs)
+
+    monkeypatch.setattr(sessions_store.json, "loads", counting_loads)
+    try:
+        loaded = load_sessions(tmp_path)
+    finally:
+        monkeypatch.setattr(sessions_store.json, "loads", real_loads)
+
+    assert calls == []
+    assert [r["id"] for r in loaded] == ["aaa"]
+
+
+def test_load_sessions_cache_invalidated_after_write(tmp_path: Path):
+    append_session(tmp_path, {
+        "id": "aaa", "created_at": "2026-01-01T00:00:00+00:00",
+        "title": "First", "notes": "", "video_path": None, "trashed_at": None,
+    })
+    assert [r["id"] for r in load_sessions(tmp_path)] == ["aaa"]
+
+    update_session_fields(tmp_path, "aaa", title="Renamed")
+
+    loaded = load_sessions(tmp_path)
+    assert loaded[0]["title"] == "Renamed"
+
+
+def test_load_sessions_reparses_after_external_modification(tmp_path: Path):
+    append_session(tmp_path, {
+        "id": "aaa", "created_at": "2026-01-01T00:00:00+00:00",
+        "title": "First", "notes": "", "video_path": None, "trashed_at": None,
+    })
+    load_sessions(tmp_path)  # warm the cache
+
+    index_path = tmp_path / "sessions_index.json"
+    data = json.loads(index_path.read_text(encoding="utf-8"))
+    data.append({
+        "id": "bbb", "created_at": "2026-01-02T00:00:00+00:00",
+        "title": "Second", "notes": "", "video_path": None, "trashed_at": None,
+    })
+    index_path.write_text(json.dumps(data), encoding="utf-8")
+    # Force a distinct mtime -- some filesystems have coarse mtime
+    # resolution, and the write above can otherwise land within the same
+    # tick as the cached entry's.
+    current = os.stat(index_path).st_mtime_ns
+    os.utime(index_path, ns=(current + 1_000_000_000, current + 1_000_000_000))
+
+    loaded = load_sessions(tmp_path)
+    assert {r["id"] for r in loaded} == {"aaa", "bbb"}
+
+
+def test_load_sessions_returned_records_are_copies_not_cache_aliases(tmp_path: Path):
+    append_session(tmp_path, {
+        "id": "aaa", "created_at": "2026-01-01T00:00:00+00:00",
+        "title": "First", "notes": "", "video_path": None, "trashed_at": None,
+    })
+
+    first = load_sessions(tmp_path)
+    first[0]["title"] = "Mutated by caller"
+
+    second = load_sessions(tmp_path)
+    assert second[0]["title"] == "First"
