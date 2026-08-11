@@ -136,6 +136,32 @@ contextBridge.exposeInMainWorld("backendAPI", {
   },
 });
 
+contextBridge.exposeInMainWorld("consentAPI", {
+  // Called from the rail (RailApp.tsx) right before a recording actually
+  // starts. Resolves true immediately after the first time it's ever been
+  // confirmed; the very first call instead waits on the dashboard window
+  // (see onShowRecordingNotice/respondToRecordingNotice below) for a
+  // response, which is what this Promise is actually waiting on.
+  ensureRecordingConsent: async () => {
+    try {
+      return await ipcRenderer.invoke('consent:ensureRecordingConsent');
+    } catch (e) {
+      console.warn("[preload] ensureRecordingConsent failed:", e);
+      return true;
+    }
+  },
+
+  // Dashboard-window side of the same flow: shown once, ever.
+  onShowRecordingNotice: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('consent:showRecordingNotice', listener);
+    return () => ipcRenderer.removeListener('consent:showRecordingNotice', listener);
+  },
+  respondToRecordingNotice: (proceed) => {
+    ipcRenderer.send('consent:recordingNoticeResponse', proceed);
+  },
+});
+
 contextBridge.exposeInMainWorld("diagnosticsAPI", {
   reportRendererError: (payload) => {
     try {

@@ -511,7 +511,7 @@ it("pushes its recording status to windowControls whenever status/elapsed/level/
   );
 });
 
-it("calls the record handler when a toggleRecord command arrives from the dashboard", () => {
+it("calls the record handler when a toggleRecord command arrives from the dashboard", async () => {
   let commandCallback: ((action: string) => void) | undefined;
   const onRailCommand = vi.fn((cb: (action: string) => void) => {
     commandCallback = cb;
@@ -524,7 +524,43 @@ it("calls the record handler when a toggleRecord command arrives from the dashbo
   render(<RailApp />);
   commandCallback?.("toggleRecord");
 
-  expect(record).toHaveBeenCalledTimes(1);
+  // Recording now waits on consentAPI.ensureRecordingConsent() first (a
+  // no-op resolving true when window.consentAPI isn't stubbed, as here) --
+  // that adds a microtask hop before record() is actually called.
+  await waitFor(() => {
+    expect(record).toHaveBeenCalledTimes(1);
+  });
+});
+
+it("does not start recording when consentAPI.ensureRecordingConsent resolves false", async () => {
+  const ensureRecordingConsent = vi.fn().mockResolvedValue(false);
+  vi.stubGlobal("consentAPI", { ensureRecordingConsent });
+  const record = vi.fn().mockResolvedValue(undefined);
+  mockHook({ status: "idle", record });
+
+  const { container } = render(<RailApp />);
+  const recordButton = container.querySelectorAll("button")[0];
+  fireEvent.click(recordButton);
+
+  await waitFor(() => {
+    expect(ensureRecordingConsent).toHaveBeenCalledTimes(1);
+  });
+  expect(record).not.toHaveBeenCalled();
+});
+
+it("starts recording once consentAPI.ensureRecordingConsent resolves true", async () => {
+  const ensureRecordingConsent = vi.fn().mockResolvedValue(true);
+  vi.stubGlobal("consentAPI", { ensureRecordingConsent });
+  const record = vi.fn().mockResolvedValue(undefined);
+  mockHook({ status: "idle", record });
+
+  const { container } = render(<RailApp />);
+  const recordButton = container.querySelectorAll("button")[0];
+  fireEvent.click(recordButton);
+
+  await waitFor(() => {
+    expect(record).toHaveBeenCalledTimes(1);
+  });
 });
 
 it("calls stop (not record) for a stopForClose command while recording, and acks when it resolves", async () => {

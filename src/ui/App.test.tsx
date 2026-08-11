@@ -166,6 +166,28 @@ it("allows collapsing the sidebar while recording once the rail is floating, sin
   expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeInTheDocument();
 });
 
+it("shows the recording consent notice when the main process asks for it, and reports the user's choice back", async () => {
+  let showCallback: (() => void) | undefined;
+  const onShowRecordingNotice = vi.fn((cb: () => void) => {
+    showCallback = cb;
+    return () => {};
+  });
+  const respondToRecordingNotice = vi.fn();
+  vi.stubGlobal("consentAPI", { onShowRecordingNotice, respondToRecordingNotice });
+
+  render(<App />);
+  await screen.findByText("Sprint Planning");
+
+  expect(screen.queryByText(/let people know they're being recorded/i)).not.toBeInTheDocument();
+
+  act(() => showCallback?.());
+  expect(await screen.findByText(/let people know they're being recorded/i)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /got it/i }));
+  expect(respondToRecordingNotice).toHaveBeenCalledWith(true);
+  expect(screen.queryByText(/let people know they're being recorded/i)).not.toBeInTheDocument();
+});
+
 it("blurs whatever got auto-focused on the first window-focus event after launch, but leaves later focus alone", async () => {
   render(<App />);
   await screen.findByText("Sprint Planning");

@@ -23,6 +23,7 @@ import { distReactPath } from './paths.js';
 import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence } from './closeGuard.js';
 import { sanitizeRailStatus, isValidSlotRect } from './railValidation.js';
 import { armProcessCrashLogging, logRendererCrash, logRendererError } from './crashLog.js';
+import { hasSeenRecordingConsentNotice, markRecordingConsentNoticeSeen } from './consentStore.js';
 
 let railErrorVisible = false;
 let isRailFloatDragging = false;
@@ -498,6 +499,33 @@ ipcMain.handle('dialog:chooseFolder', async () => {
 ipcMain.handle('shell:openPrivacySettings', (_event, kind) => {
     const page = kind === 'camera' ? 'ms-settings:privacy-webcam' : 'ms-settings:privacy-microphone';
     shell.openExternal(page).catch(() => {});
+});
+
+// Called from RailApp.tsx right before it actually starts a recording --
+// the single choke point both a direct click on the rail's own button and a
+// remote toggleRecord command (relayed from DockedRail.tsx in the
+// dashboard) already funnel through. The very first time ever, this shows a
+// one-time notice in the dashboard window and blocks the recording on the
+// user's response; every time after that it resolves true immediately with
+// no round trip. If mainWindow doesn't exist for some reason, fails open
+// (resolves true) -- this is a reminder, not an access-control gate, and
+// silently blocking recording forever with nowhere to show the notice would
+// be worse than skipping it.
+const consentFilePath = () => path.join(app.getPath('userData'), 'consent.json');
+
+ipcMain.handle('consent:ensureRecordingConsent', async () => {
+    if (hasSeenRecordingConsentNotice(consentFilePath())) return true;
+    if (!mainWindow || mainWindow.isDestroyed()) return true;
+
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.send('consent:showRecordingNotice');
+
+    const proceed = await new Promise((resolve) => {
+        ipcMain.once('consent:recordingNoticeResponse', (_event, value) => resolve(value === true));
+    });
+    if (proceed) markRecordingConsentNoticeSeen(consentFilePath());
+    return proceed;
 });
 
 // Reports a JS error caught in a renderer (window.onerror /

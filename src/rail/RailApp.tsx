@@ -215,6 +215,11 @@ export default function RailApp() {
 
         try {
             if (status === "idle") {
+                // Resolves immediately (true) every time after the first --
+                // only the very first call in the app's lifetime actually
+                // shows anything, in the dashboard window, and waits on it.
+                const canRecord = await window.consentAPI?.ensureRecordingConsent?.() ?? true;
+                if (!canRecord) return;
                 setProcessError(null);
                 await record();
             } else if (status === "recording" || status === "paused" || status === "starting") {

@@ -138,5 +138,12 @@ declare global {
       reportRendererError: (payload: { kind: string; message: string; stack?: string }) => void;
       openLogsFolder: () => Promise<void>;
     };
+    consentAPI?: {
+      // Called from the rail right before a recording starts; resolves
+      // false only if the user explicitly declines the one-time notice.
+      ensureRecordingConsent: () => Promise<boolean>;
+      onShowRecordingNotice: (callback: () => void) => () => void;
+      respondToRecordingNotice: (proceed: boolean) => void;
+    };
   }
 }

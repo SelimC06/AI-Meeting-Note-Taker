@@ -5,6 +5,7 @@ import Sidebar from "./components/Sidebar";
 import Chat from "./components/Chat";
 import StatusLine from "./components/StatusLine";
 import SettingsModal from "./components/SettingsModal";
+import RecordingConsentModal from "./components/RecordingConsentModal";
 import ErrorBoundary from "./components/ErrorBoundary";
 import BackendStatusBanner from "./components/BackendStatusBanner";
 import OllamaOnboardingGate from "./components/OllamaOnboardingGate";
@@ -15,6 +16,15 @@ import { useBackendLifecycle } from "./hooks/useBackendLifecycle";
 function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showRecordingConsent, setShowRecordingConsent] = useState(false);
+  useEffect(() => {
+    const unsubscribe = window.consentAPI?.onShowRecordingNotice?.(() => setShowRecordingConsent(true));
+    return unsubscribe;
+  }, []);
+  const respondToRecordingConsent = (proceed: boolean) => {
+    window.consentAPI?.respondToRecordingNotice?.(proceed);
+    setShowRecordingConsent(false);
+  };
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarView, setSidebarView] = useState<"active" | "trash">("active");
   const { sessions, error: sessionsError, reload: reloadSessions } = useSessions(true, false);
@@ -157,6 +167,12 @@ function App() {
           <OllamaOnboardingGate active={backendUp} />
 
           {settingsOpen && <SettingsModal active onClose={() => setSettingsOpen(false)} />}
+          {showRecordingConsent && (
+            <RecordingConsentModal
+              onCancel={() => respondToRecordingConsent(false)}
+              onConfirm={() => respondToRecordingConsent(true)}
+            />
+          )}
         </main>
       </div>
     </div>
