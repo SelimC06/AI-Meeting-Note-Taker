@@ -132,5 +132,11 @@ declare global {
       install: () => Promise<void>;
       getStatus: () => Promise<UpdaterStatus>;
     };
+    diagnosticsAPI?: {
+      // Fire-and-forget: called from a global window.onerror/unhandledrejection
+      // handler, so it can't itself risk throwing or await anything.
+      reportRendererError: (payload: { kind: string; message: string; stack?: string }) => void;
+      openLogsFolder: () => Promise<void>;
+    };
   }
 }

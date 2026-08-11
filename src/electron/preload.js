@@ -136,6 +136,24 @@ contextBridge.exposeInMainWorld("backendAPI", {
   },
 });
 
+contextBridge.exposeInMainWorld("diagnosticsAPI", {
+  reportRendererError: (payload) => {
+    try {
+      ipcRenderer.send('diagnostics:reportRendererError', payload);
+    } catch (e) {
+      console.warn("[preload] reportRendererError failed:", e);
+    }
+  },
+
+  openLogsFolder: async () => {
+    try {
+      await ipcRenderer.invoke('diagnostics:openLogsFolder');
+    } catch (e) {
+      console.warn("[preload] openLogsFolder failed:", e);
+    }
+  },
+});
+
 contextBridge.exposeInMainWorld("updaterAPI", {
   onStatus: (callback) => {
     const listener = (_event, status) => callback(status);

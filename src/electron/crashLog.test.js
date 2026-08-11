@@ -1,0 +1,129 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import {
+    appendCrashLog,
+    armProcessCrashLogging,
+    logRendererCrash,
+    logRendererError,
+} from './crashLog.js';
+
+function makeTmpLogDir() {
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'crash-log-test-'));
+}
+
+function readLines(logDir, filename) {
+    const filePath = path.join(logDir, filename);
+    return fs.readFileSync(filePath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+}
+
+test('appendCrashLog creates the log directory and appends a JSON line with a timestamp', () => {
+    const logDir = makeTmpLogDir();
+    try {
+        appendCrashLog(logDir, 'test.log', { kind: 'thing', message: 'boom' });
+        const [line] = readLines(logDir, 'test.log');
+        assert.equal(line.kind, 'thing');
+        assert.equal(line.message, 'boom');
+        assert.ok(typeof line.timestamp === 'string' && line.timestamp.length > 0);
+    } finally {
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});
+
+test('appendCrashLog appends multiple lines across calls', () => {
+    const logDir = makeTmpLogDir();
+    try {
+        appendCrashLog(logDir, 'test.log', { n: 1 });
+        appendCrashLog(logDir, 'test.log', { n: 2 });
+        const lines = readLines(logDir, 'test.log');
+        assert.equal(lines.length, 2);
+        assert.equal(lines[0].n, 1);
+        assert.equal(lines[1].n, 2);
+    } finally {
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});
+
+test('armProcessCrashLogging logs an uncaughtException with message and stack, then exits', () => {
+    const logDir = makeTmpLogDir();
+    try {
+        const fakeProcess = new EventEmitter();
+        let exitCode = null;
+        fakeProcess.exit = (code) => { exitCode = code; };
+
+        armProcessCrashLogging(logDir, fakeProcess);
+        fakeProcess.emit('uncaughtException', new Error('kaboom'));
+
+        const [line] = readLines(logDir, 'main-crashes.log');
+        assert.equal(line.kind, 'uncaughtException');
+        assert.equal(line.message, 'kaboom');
+        assert.ok(line.stack.includes('kaboom'));
+        assert.equal(exitCode, 1);
+    } finally {
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});
+
+test('armProcessCrashLogging logs an unhandledRejection without exiting', () => {
+    const logDir = makeTmpLogDir();
+    try {
+        const fakeProcess = new EventEmitter();
+        let exited = false;
+        fakeProcess.exit = () => { exited = true; };
+
+        armProcessCrashLogging(logDir, fakeProcess);
+        fakeProcess.emit('unhandledRejection', new Error('rejected'));
+
+        const [line] = readLines(logDir, 'main-crashes.log');
+        assert.equal(line.kind, 'unhandledRejection');
+        assert.equal(line.message, 'rejected');
+        assert.equal(exited, false);
+    } finally {
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});
+
+test('armProcessCrashLogging handles a non-Error rejection reason', () => {
+    const logDir = makeTmpLogDir();
+    try {
+        const fakeProcess = new EventEmitter();
+        fakeProcess.exit = () => {};
+
+        armProcessCrashLogging(logDir, fakeProcess);
+        fakeProcess.emit('unhandledRejection', 'just a string reason');
+
+        const [line] = readLines(logDir, 'main-crashes.log');
+        assert.equal(line.message, 'just a string reason');
+    } finally {
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});
+
+test('logRendererCrash appends a render-process-gone record', () => {
+    const logDir = makeTmpLogDir();
+    try {
+        logRendererCrash(logDir, { reason: 'oom', exitCode: -1 });
+        const [line] = readLines(logDir, 'renderer-crashes.log');
+        assert.equal(line.kind, 'render-process-gone');
+        assert.equal(line.reason, 'oom');
+        assert.equal(line.exitCode, -1);
+    } finally {
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});
+
+test('logRendererError appends a renderer JS error record', () => {
+    const logDir = makeTmpLogDir();
+    try {
+        logRendererError(logDir, { kind: 'window.onerror', message: 'undefined is not a function', stack: 'at foo.tsx:12' });
+        const [line] = readLines(logDir, 'renderer-errors.log');
+        assert.equal(line.kind, 'window.onerror');
+        assert.equal(line.message, 'undefined is not a function');
+        assert.equal(line.stack, 'at foo.tsx:12');
+    } finally {
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});

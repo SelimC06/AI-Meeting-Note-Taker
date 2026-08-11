@@ -241,6 +241,23 @@ export default function SettingsPage({ active }: { active: boolean }) {
 
       <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
         <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+          diagnostics
+        </h2>
+        <p className="text-xs text-phosphor">
+          If something breaks, this app writes what happened to a local log file — nothing is
+          sent anywhere automatically. Open the folder below to find it if you want to look into
+          an issue yourself, or attach it if you're reporting a bug.
+        </p>
+        <button
+          onClick={() => window.diagnosticsAPI?.openLogsFolder()}
+          className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+        >
+          Open logs folder
+        </button>
+      </div>
+
+      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
+        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
           storage usage
         </h2>
         {usageError && <p className="text-xs text-red-400">{usageError}</p>}

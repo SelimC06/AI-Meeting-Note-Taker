@@ -22,6 +22,7 @@ import { sanitizeCaptureSourceTypes } from './captureSources.js';
 import { distReactPath } from './paths.js';
 import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence } from './closeGuard.js';
 import { sanitizeRailStatus, isValidSlotRect } from './railValidation.js';
+import { armProcessCrashLogging, logRendererCrash, logRendererError } from './crashLog.js';
 
 let railErrorVisible = false;
 let isRailFloatDragging = false;
@@ -314,6 +315,12 @@ function createRailWindow() {
         }
         railWindow = null;
     });
+    // The rail window hosts the actual recording engine -- if its renderer
+    // process dies outright (OOM kill, GPU crash) rather than just throwing
+    // a catchable JS error, a live capture is lost with nothing to say why.
+    railWindow.webContents.on('render-process-gone', (_event, details) => {
+        logRendererCrash(crashLogDir(), { window: 'rail', reason: details.reason, exitCode: details.exitCode });
+    });
     // Debounced rather than immediate: 'moved' fires continuously while the
     // user is actively dragging the floating window (via its own
     // -webkit-app-region:drag), and snapping mid-drag would fight the
@@ -493,6 +500,26 @@ ipcMain.handle('shell:openPrivacySettings', (_event, kind) => {
     shell.openExternal(page).catch(() => {});
 });
 
+// Reports a JS error caught in a renderer (window.onerror /
+// unhandledrejection, wired up in src/ui/main.tsx and src/rail/main.tsx) --
+// the renderer process is still alive here, unlike render-process-gone
+// above, but this is the far more common failure mode for a React UI (a
+// broken/blank screen) than an actual process death.
+ipcMain.on('diagnostics:reportRendererError', (_event, payload) => {
+    logRendererError(crashLogDir(), payload);
+});
+
+// Everything logged above (main-crashes.log, renderer-crashes.log,
+// renderer-errors.log) and the backend's own backend-crashes.log all land in
+// this same folder -- this is the only way to get at them, by design: they
+// stay on-device unless the user chooses to open and share this folder
+// themselves, the same local-only stance as the rest of the app.
+ipcMain.handle('diagnostics:openLogsFolder', async () => {
+    const dir = crashLogDir();
+    fs.mkdirSync(dir, { recursive: true });
+    await shell.openPath(dir);
+});
+
 
 // Waits for the rail:stopAndSaveComplete ack (see the ipcMain.on handler
 // above), or gives up after timeoutMs so a renderer that never acks (crash,
@@ -635,6 +662,9 @@ function createWindow() {
     disableZoom(mainWindow.webContents);
     preventNavigation(mainWindow.webContents);
     denyWindowOpenExceptExternalHttp(mainWindow.webContents);
+    mainWindow.webContents.on('render-process-gone', (_event, details) => {
+        logRendererCrash(crashLogDir(), { window: 'main', reason: details.reason, exitCode: details.exitCode });
+    });
     // If the dashboard renderer reloads or crash-recovers mid-drag, its
     // DockedRail component (and whatever pointer state it held) is gone —
     // but isRailFloatDragging is main-process state, so nothing else would
@@ -873,7 +903,15 @@ async function resolveBackendPort(expectedExePath) {
     );
 }
 
+// userData is only guaranteed stable once the app is ready, so crash logging
+// is armed as the very first thing in the whenReady callback below rather
+// than at module load -- anything that throws before that point still goes
+// to Electron's own crash dialog/console, same as before this existed.
+const crashLogDir = () => path.join(app.getPath('userData'), 'logs');
+
 app.whenReady().then(async () => {
+    armProcessCrashLogging(crashLogDir());
+
     const projectRoot = app.getAppPath();
     const backend = resolveBackendCommand(projectRoot, process.resourcesPath, app.isPackaged);
     if (!backend) {
@@ -933,7 +971,7 @@ app.whenReady().then(async () => {
         cwd: backend.cwd,
         env: backendEnv,
         backendUrl: BACKEND_URL,
-        logDir: path.join(app.getPath('userData'), 'logs'),
+        logDir: crashLogDir(),
         isShuttingDown: () => shuttingDown,
         // Recovery's own health wait must tolerate the same slow cold start
         // the initial launch does -- attemptRecovery's hardcoded 15s default
