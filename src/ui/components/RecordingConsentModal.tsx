@@ -1,9 +1,19 @@
+import { useEffect } from "react";
+
 interface Props {
   onCancel: () => void;
   onConfirm: () => void;
 }
 
 export default function RecordingConsentModal({ onCancel, onConfirm }: Props) {
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
   return (
     <div className="absolute inset-0 z-50 bg-void/90 flex items-center justify-center px-6 py-6 [-webkit-app-region:no-drag]">
       <div className="w-full max-w-sm bg-panel border border-line rounded-sm p-5 flex flex-col gap-3">

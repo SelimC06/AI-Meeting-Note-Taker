@@ -513,19 +513,41 @@ ipcMain.handle('shell:openPrivacySettings', (_event, kind) => {
 // be worse than skipping it.
 const consentFilePath = () => path.join(app.getPath('userData'), 'consent.json');
 
+// A single shared in-flight promise instead of a fresh ipcMain.once per
+// call: without this, a second ensureRecordingConsent() invocation while
+// the first is still awaiting the modal (nothing disables the Record button
+// during that wait) registers a SECOND once-listener, and Node's
+// EventEmitter fires every listener on one emit -- both invocations resolve
+// together and both proceed to record() concurrently.
+let pendingConsentResolve = null;
+
 ipcMain.handle('consent:ensureRecordingConsent', async () => {
     if (hasSeenRecordingConsentNotice(consentFilePath())) return true;
     if (!mainWindow || mainWindow.isDestroyed()) return true;
+
+    if (pendingConsentResolve) {
+        // Already showing/awaiting the notice for an earlier call -- wait on
+        // that same decision instead of showing a second dialog.
+        return new Promise((resolve) => {
+            const prev = pendingConsentResolve;
+            pendingConsentResolve = (value) => { prev(value); resolve(value); };
+        });
+    }
 
     mainWindow.show();
     mainWindow.focus();
     mainWindow.webContents.send('consent:showRecordingNotice');
 
     const proceed = await new Promise((resolve) => {
-        ipcMain.once('consent:recordingNoticeResponse', (_event, value) => resolve(value === true));
+        pendingConsentResolve = resolve;
     });
+    pendingConsentResolve = null;
     if (proceed) markRecordingConsentNoticeSeen(consentFilePath());
     return proceed;
+});
+
+ipcMain.on('consent:recordingNoticeResponse', (_event, value) => {
+    pendingConsentResolve?.(value === true);
 });
 
 // Reports a JS error caught in a renderer (window.onerror /
@@ -760,6 +782,8 @@ function createWindow() {
         if (railWindow && !railWindow.isDestroyed()) {
             railWindow.destroy();
         }
+        pendingConsentResolve?.(true);
+        pendingConsentResolve = null;
         mainWindow = null;
     });
 }

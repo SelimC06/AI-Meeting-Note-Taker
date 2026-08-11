@@ -115,6 +115,21 @@ test('logRendererCrash appends a render-process-gone record', () => {
     }
 });
 
+test('logRendererCrash ignores benign render-process-gone reasons', () => {
+    const logDir = makeTmpLogDir();
+    try {
+        logRendererCrash(logDir, { reason: 'clean-exit', exitCode: 0 });
+        logRendererCrash(logDir, { reason: 'killed', exitCode: 0 });
+        assert.equal(fs.existsSync(path.join(logDir, 'renderer-crashes.log')), false);
+
+        logRendererCrash(logDir, { reason: 'crashed', exitCode: -1 });
+        const [line] = readLines(logDir, 'renderer-crashes.log');
+        assert.equal(line.reason, 'crashed');
+    } finally {
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});
+
 test('logRendererError appends a renderer JS error record', () => {
     const logDir = makeTmpLogDir();
     try {

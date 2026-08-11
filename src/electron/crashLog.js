@@ -1,13 +1,9 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import { appendJsonLine } from './jsonlLog.js';
 
-// Appends a single JSON-line record to `filename` inside `logDir` -- same
-// shape/append-only format as backendRecovery.js's logCrash, so every crash
-// log under userData/logs reads the same way.
+// Same shape/append-only format as backendRecovery.js's logCrash, so every
+// crash log under userData/logs reads the same way.
 export function appendCrashLog(logDir, filename, payload) {
-    fs.mkdirSync(logDir, { recursive: true });
-    const line = JSON.stringify({ timestamp: new Date().toISOString(), ...payload });
-    fs.appendFileSync(path.join(logDir, filename), line + '\n');
+    appendJsonLine(logDir, filename, payload);
 }
 
 function serializeError(err) {
@@ -31,9 +27,14 @@ export function armProcessCrashLogging(logDir, proc = process) {
     });
 }
 
+// render-process-gone fires for benign exits too (e.g. clean-exit, killed),
+// not just actual crashes -- don't log those as crashes.
+const BENIGN_RENDER_GONE_REASONS = new Set(['clean-exit', 'killed']);
+
 // The renderer *process* died outright (OOM kill, GPU crash, etc.) rather
 // than just throwing a JS error the page could catch.
 export function logRendererCrash(logDir, { reason, exitCode }) {
+    if (BENIGN_RENDER_GONE_REASONS.has(reason)) return;
     appendCrashLog(logDir, 'renderer-crashes.log', { kind: 'render-process-gone', reason, exitCode });
 }
 

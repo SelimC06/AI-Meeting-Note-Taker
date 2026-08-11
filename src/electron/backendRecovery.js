@@ -1,16 +1,8 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { startBackend, stopBackend, waitForHealth, armCrashMonitor, getBackendLogTail, ensurePortFree } from './backend.js';
+import { appendJsonLine } from './jsonlLog.js';
 
 export function logCrash(logDir, { exitCode, signal, logTail }) {
-    fs.mkdirSync(logDir, { recursive: true });
-    const line = JSON.stringify({
-        timestamp: new Date().toISOString(),
-        exitCode,
-        signal,
-        logTail,
-    });
-    fs.appendFileSync(path.join(logDir, 'backend-crashes.log'), line + '\n');
+    appendJsonLine(logDir, 'backend-crashes.log', { exitCode, signal, logTail });
 }
 
 let recovering = false;
