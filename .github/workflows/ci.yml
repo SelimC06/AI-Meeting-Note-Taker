@@ -35,6 +35,16 @@ jobs:
           python-version: "3.13"
           cache: pip
 
+      # bin_paths.py resolves ffmpeg/ffprobe via PATH when FFMPEG_BIN/
+      # FFPROBE_BIN aren't set (the dev-mode default) -- the vendored
+      # binaries under vendor/ffmpeg are gitignored, so this runner has
+      # neither on PATH without an explicit install. Without this,
+      # ffprobe_ok() crashes with FileNotFoundError instead of the
+      # graceful "invalid file" handling it has for every other failure
+      # mode, failing test_process_rejects_invalid_screen_upload and
+      # test_process_leaves_no_orphan_session_dir_on_rejected_upload.
+      - run: choco install ffmpeg -y
+
       - run: pip install -r requirements.txt
       - run: python -m pytest -q
         working-directory: backend
