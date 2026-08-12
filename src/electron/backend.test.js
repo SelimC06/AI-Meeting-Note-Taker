@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { resolveVenvPython, resolveBackendCommand, startBackend, stopBackend, waitForHealth, HEALTH_ATTEMPT_TIMEOUT_MS, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree, getProcessExecutablePath, findPidsListeningOnPort } from './backend.js';
+import { resolveVenvPython, resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, waitForHealth, HEALTH_ATTEMPT_TIMEOUT_MS, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree, getProcessExecutablePath, findPidsListeningOnPort } from './backend.js';
 
 function makeTmpProjectRoot() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'backend-test-'));
@@ -104,6 +104,18 @@ test('resolveBackendCommand returns null in dev mode when .venv is missing', () 
     } finally {
         fs.rmSync(projectRoot, { recursive: true, force: true });
     }
+});
+
+test('resolveFfmpegPaths appends .exe on win32', () => {
+    const result = resolveFfmpegPaths('C:\\resources', 'win32');
+    assert.strictEqual(result.ffmpegBin, path.join('C:\\resources', 'ffmpeg', 'ffmpeg.exe'));
+    assert.strictEqual(result.ffprobeBin, path.join('C:\\resources', 'ffmpeg', 'ffprobe.exe'));
+});
+
+test('resolveFfmpegPaths has no extension on darwin', () => {
+    const result = resolveFfmpegPaths('/resources', 'darwin');
+    assert.strictEqual(result.ffmpegBin, path.join('/resources', 'ffmpeg', 'ffmpeg'));
+    assert.strictEqual(result.ffprobeBin, path.join('/resources', 'ffmpeg', 'ffprobe'));
 });
 
 test('stopBackend is a no-op when no process was started', () => {
@@ -392,7 +404,7 @@ test('ensurePortFree resolves to true without error when nothing is listening on
     assert.equal(freed, true);
 });
 
-test('getProcessExecutablePath resolves the real executable path of a running process', async () => {
+test('getProcessExecutablePath resolves the real executable path of a running process', { skip: process.platform !== 'win32' }, async () => {
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
     try {
         await new Promise((resolve) => setTimeout(resolve, 200)); // let the process fully start
@@ -403,9 +415,25 @@ test('getProcessExecutablePath resolves the real executable path of a running pr
     }
 });
 
-test('getProcessExecutablePath returns null for a pid that does not exist', async () => {
+test('getProcessExecutablePath returns null for a pid that does not exist', { skip: process.platform !== 'win32' }, async () => {
     const resolvedPath = await getProcessExecutablePath(999999, 'win32');
     assert.equal(resolvedPath, null);
+});
+
+test('getProcessExecutablePath resolves the exe path on darwin via `ps`', async () => {
+    const fakeExecFileAsync = async (cmd, args) => {
+        assert.strictEqual(cmd, 'ps');
+        assert.deepStrictEqual(args, ['-p', '4242', '-o', 'comm=']);
+        return { stdout: '/Applications/DeskRecap.app/Contents/Resources/backend/app-backend\n' };
+    };
+    const path = await getProcessExecutablePath(4242, 'darwin', fakeExecFileAsync);
+    assert.strictEqual(path, '/Applications/DeskRecap.app/Contents/Resources/backend/app-backend');
+});
+
+test('getProcessExecutablePath returns null on darwin if ps fails (process already gone)', async () => {
+    const fakeExecFileAsync = async () => { throw new Error('No such process'); };
+    const path = await getProcessExecutablePath(4242, 'darwin', fakeExecFileAsync);
+    assert.strictEqual(path, null);
 });
 
 function tryBind(port) {

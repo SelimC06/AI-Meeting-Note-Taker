@@ -1,9 +1,9 @@
-import { app, BrowserWindow, screen, ipcMain, desktopCapturer, dialog, shell } from 'electron';
+import { app, BrowserWindow, screen, ipcMain, desktopCapturer, dialog, shell, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { resolveBackendCommand, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, ensurePortFree } from './backend.js';
+import { resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, ensurePortFree } from './backend.js';
 import { attemptRecovery, isRecovering } from './backendRecovery.js';
 import { nextWatchdogState, probeHealthOnce, WATCHDOG_INTERVAL_MS } from './backendWatchdog.js';
 import { armAutoUpdate, getLastStatus, installUpdate } from './updater.js';
@@ -497,7 +497,11 @@ ipcMain.handle('dialog:chooseFolder', async () => {
 });
 
 ipcMain.handle('shell:openPrivacySettings', (_event, kind) => {
-    const page = kind === 'camera' ? 'ms-settings:privacy-webcam' : 'ms-settings:privacy-microphone';
+    const page = process.platform === 'darwin'
+        ? (kind === 'screenRecording'
+            ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
+            : 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone')
+        : (kind === 'camera' ? 'ms-settings:privacy-webcam' : 'ms-settings:privacy-microphone');
     shell.openExternal(page).catch(() => {});
 });
 
@@ -964,6 +968,22 @@ const crashLogDir = () => path.join(app.getPath('userData'), 'logs');
 app.whenReady().then(async () => {
     armProcessCrashLogging(crashLogDir());
 
+    // Fallback for the renderer's darwin getDisplayMedia() call
+    // (src/rail/capture/electronCapture.ts). On macOS 15+ with the native
+    // system picker available, Electron resolves the request via the
+    // picker directly and never invokes this handler at all -- it exists
+    // only for macOS <15 or if the picker is ever unavailable, in which
+    // case we hand back the first screen source with no system audio
+    // (there is no Electron-mediated system-audio path on macOS below 15;
+    // mic capture is unaffected -- it's handled entirely client-side).
+    session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+        desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+            callback({ video: sources[0] });
+        }).catch(() => {
+            callback({});
+        });
+    }, { useSystemPicker: true });
+
     const projectRoot = app.getAppPath();
     const backend = resolveBackendCommand(projectRoot, process.resourcesPath, app.isPackaged);
     if (!backend) {
@@ -991,8 +1011,10 @@ app.whenReady().then(async () => {
         PORT: String(backendPort),
         ...(app.isPackaged ? {
             APP_DATA_DIR: app.getPath('userData'),
-            FFMPEG_BIN: path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe'),
-            FFPROBE_BIN: path.join(process.resourcesPath, 'ffmpeg', 'ffprobe.exe'),
+            ...(() => {
+                const { ffmpegBin, ffprobeBin } = resolveFfmpegPaths(process.resourcesPath);
+                return { FFMPEG_BIN: ffmpegBin, FFPROBE_BIN: ffprobeBin };
+            })(),
         } : {}),
     };
     const backendProcess = startBackend(backend.command, backend.args, backend.cwd, backendEnv);

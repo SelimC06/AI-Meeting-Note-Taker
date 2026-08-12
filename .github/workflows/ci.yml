@@ -38,3 +38,35 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m pytest -q
         working-directory: backend
+
+  frontend-mac:
+    name: Lint, build, and test (Node, macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm run test:main
+      - run: npm run test:ui
+
+  backend-mac:
+    name: Backend tests (Python, macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+        working-directory: backend

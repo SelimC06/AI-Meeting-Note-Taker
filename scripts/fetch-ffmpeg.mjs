@@ -7,8 +7,10 @@ import crypto from 'node:crypto';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, '..');
 const vendorDir = path.join(projectRoot, 'vendor', 'ffmpeg');
-const ffmpegExe = path.join(vendorDir, 'ffmpeg.exe');
-const ffprobeExe = path.join(vendorDir, 'ffprobe.exe');
+const isWin = process.platform === 'win32';
+const exeSuffix = isWin ? '.exe' : '';
+const ffmpegExe = path.join(vendorDir, `ffmpeg${exeSuffix}`);
+const ffprobeExe = path.join(vendorDir, `ffprobe${exeSuffix}`);
 
 // Pinned to a specific, versioned gyan.dev "packages" URL rather than the rolling
 // "ffmpeg-release-essentials.zip" link, which silently tracks whatever the latest
@@ -23,6 +25,26 @@ const FFMPEG_ZIP_URL = 'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0-e
 // the same way, and update this constant to match.
 const FFMPEG_ZIP_SHA256 = 'e6b54767a6065919048f1a098eb27211ca4e12b4348a05d88777a5855d0b6e71';
 
+// macOS (arm64/Apple Silicon) source. evermeet.cx — the closest macOS analogue to
+// gyan.dev — explicitly does not build for Apple Silicon (Intel-only, run under
+// Rosetta), so this pins to osxexperts.net's native arm64 static builds instead,
+// which ship ffmpeg and ffprobe as two SEPARATE per-tool zips (no combined
+// "essentials" bundle like gyan.dev), hence the two independent URL/hash pairs
+// below rather than one FFMPEG_ZIP_URL-shaped constant. Pinned to their "9.0 (Apple
+// Silicon)" build (binary filenames `ffmpeg9arm.zip` / `ffprobe9arm.zip` encode the
+// major.minor version, not a patch/date, so re-verify the hash on every repin even
+// if the URL text doesn't change). Downloaded both zips and computed SHA-256 with
+// `sha256sum` (cross-checked with node:crypto) on 2026-08-12; note the checksums
+// osxexperts.net displays on-page (591260c9...0a95e for ffmpeg,
+// e11c17e8...469106 for ffprobe) did NOT match the bytes actually served at these
+// URLs on that date — the constants below are what was independently recomputed
+// from the real downloaded files, per this task's verification requirement, not
+// what the page claims.
+const FFMPEG_MAC_ZIP_URL = 'https://www.osxexperts.net/ffmpeg9arm.zip';
+const FFMPEG_MAC_ZIP_SHA256 = 'd0c06c5c68ce48af3143b262f7a9118a7c9f67de1e237fcc24ffb14df9c67af9';
+const FFPROBE_MAC_ZIP_URL = 'https://www.osxexperts.net/ffprobe9arm.zip';
+const FFPROBE_MAC_ZIP_SHA256 = '0c94fbdd8917022f28115eca512196cf4648732bc9e5db9ec8896c7e519d02aa';
+
 if (fs.existsSync(ffmpegExe) && fs.existsSync(ffprobeExe)) {
     console.log(`ffmpeg/ffprobe already present at ${vendorDir}, skipping download.`);
     process.exit(0);
@@ -31,40 +53,59 @@ if (fs.existsSync(ffmpegExe) && fs.existsSync(ffprobeExe)) {
 fs.mkdirSync(vendorDir, { recursive: true });
 
 const tmpDir = fs.mkdtempSync(path.join(projectRoot, 'vendor', 'tmp-ffmpeg-'));
-const zipPath = path.join(tmpDir, 'ffmpeg.zip');
 
-console.log(`Downloading ffmpeg from ${FFMPEG_ZIP_URL} ...`);
-const response = await fetch(FFMPEG_ZIP_URL);
-if (!response.ok) {
-    console.error(`Download failed: HTTP ${response.status}`);
-    process.exit(1);
+async function downloadAndVerify(url, expectedSha256, destFilename) {
+    console.log(`Downloading ${url} ...`);
+    const response = await fetch(url);
+    if (!response.ok) {
+        console.error(`Download failed: HTTP ${response.status}`);
+        process.exit(1);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    console.log('Verifying checksum...');
+    const actualHash = crypto.createHash('sha256').update(buffer).digest('hex');
+    if (actualHash !== expectedSha256) {
+        console.error(
+            `Checksum mismatch for downloaded archive at ${url}.\n` +
+            `  expected: ${expectedSha256}\n` +
+            `  actual:   ${actualHash}\n` +
+            `Refusing to extract a file that does not match the pinned checksum.`,
+        );
+        process.exit(1);
+    }
+    console.log('Checksum OK.');
+
+    const destPath = path.join(tmpDir, destFilename);
+    fs.writeFileSync(destPath, buffer);
+    return destPath;
 }
-const buffer = Buffer.from(await response.arrayBuffer());
 
-console.log('Verifying checksum...');
-const actualHash = crypto.createHash('sha256').update(buffer).digest('hex');
-if (actualHash !== FFMPEG_ZIP_SHA256) {
-    console.error(
-        `Checksum mismatch for downloaded ffmpeg archive.\n` +
-        `  expected: ${FFMPEG_ZIP_SHA256}\n` +
-        `  actual:   ${actualHash}\n` +
-        `Refusing to extract a file that does not match the pinned checksum.`,
-    );
-    process.exit(1);
+function extractZip(zipPath, extractDir) {
+    console.log(`Extracting ${zipPath} ...`);
+    fs.mkdirSync(extractDir, { recursive: true });
+    const result = isWin
+        ? spawnSync('powershell.exe', [
+            '-NoProfile', '-NonInteractive', '-Command',
+            `Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force`,
+        ], { stdio: 'inherit' })
+        : spawnSync('unzip', ['-o', zipPath, '-d', extractDir], { stdio: 'inherit' });
+    if (result.status !== 0) {
+        console.error('Extraction failed.');
+        process.exit(result.status ?? 1);
+    }
 }
-console.log('Checksum OK.');
 
-fs.writeFileSync(zipPath, buffer);
-
-console.log('Extracting archive...');
 const extractDir = path.join(tmpDir, 'extracted');
-const result = spawnSync('powershell.exe', [
-    '-NoProfile', '-NonInteractive', '-Command',
-    `Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force`,
-], { stdio: 'inherit' });
-if (result.status !== 0) {
-    console.error('Extraction failed.');
-    process.exit(result.status ?? 1);
+
+if (isWin) {
+    const zipPath = await downloadAndVerify(FFMPEG_ZIP_URL, FFMPEG_ZIP_SHA256, 'ffmpeg.zip');
+    extractZip(zipPath, extractDir);
+} else {
+    const ffmpegZipPath = await downloadAndVerify(FFMPEG_MAC_ZIP_URL, FFMPEG_MAC_ZIP_SHA256, 'ffmpeg.zip');
+    const ffprobeZipPath = await downloadAndVerify(FFPROBE_MAC_ZIP_URL, FFPROBE_MAC_ZIP_SHA256, 'ffprobe.zip');
+    extractZip(ffmpegZipPath, extractDir);
+    extractZip(ffprobeZipPath, extractDir);
 }
 
 function findFile(dir, filename) {
@@ -80,15 +121,22 @@ function findFile(dir, filename) {
     return null;
 }
 
-const foundFfmpeg = findFile(extractDir, 'ffmpeg.exe');
-const foundFfprobe = findFile(extractDir, 'ffprobe.exe');
+const foundFfmpeg = findFile(extractDir, `ffmpeg${exeSuffix}`);
+const foundFfprobe = findFile(extractDir, `ffprobe${exeSuffix}`);
 if (!foundFfmpeg || !foundFfprobe) {
-    console.error('Could not locate ffmpeg.exe/ffprobe.exe inside the downloaded archive.');
+    console.error(`Could not locate ffmpeg${exeSuffix}/ffprobe${exeSuffix} inside the downloaded archive.`);
     process.exit(1);
 }
 
 fs.copyFileSync(foundFfmpeg, ffmpegExe);
 fs.copyFileSync(foundFfprobe, ffprobeExe);
+if (!isWin) {
+    // unzip on macOS generally preserves the executable bit from the archive, but
+    // set it explicitly so a repin to a zip that doesn't store it can't silently
+    // produce a non-executable binary.
+    fs.chmodSync(ffmpegExe, 0o755);
+    fs.chmodSync(ffprobeExe, 0o755);
+}
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
 console.log(`ffmpeg/ffprobe ready at ${vendorDir}`);

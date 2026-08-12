@@ -19,7 +19,9 @@ function run(command, args, opts = {}) {
     }
 }
 
-const venvPython = path.join(venvDir, 'Scripts', 'python.exe');
+const venvPython = process.platform === 'win32'
+    ? path.join(venvDir, 'Scripts', 'python.exe')
+    : path.join(venvDir, 'bin', 'python');
 if (!fs.existsSync(venvPython)) {
     console.error(`No .venv found at ${venvDir}. Run "npm run setup:backend" first.`);
     process.exit(1);
