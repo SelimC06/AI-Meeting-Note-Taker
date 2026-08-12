@@ -20,7 +20,7 @@
   },
   "build": {
     "appId": "com.meetingnotetaker.app",
-    "productName": "Meeting Note Taker",
+    "productName": "DeskRecap",
     "asar": true,
     "directories": {
       "output": "release"

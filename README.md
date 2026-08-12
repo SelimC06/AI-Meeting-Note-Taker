@@ -1,4 +1,4 @@
-# Meeting Note Taker
+# DeskRecap
 
 A local-first desktop app for recording meetings, transcribing them, summarizing
 the transcript, and chatting with an LLM about the notes afterward — all

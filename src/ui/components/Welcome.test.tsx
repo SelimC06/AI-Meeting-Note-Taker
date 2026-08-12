@@ -24,7 +24,7 @@ function makeSession(overrides: Partial<Session>): Session {
 
 it("shows the app name, tagline, and tips with no meetings", () => {
   render(<Welcome sessions={[]} />);
-  expect(screen.getByText(/meeting note taker/i)).toBeInTheDocument();
+  expect(screen.getByText(/deskrecap/i)).toBeInTheDocument();
   expect(screen.getByText(/record.*transcribe.*summarize.*chat/i)).toBeInTheDocument();
   expect(screen.getByText(/click start to open the rail, then hit record/i)).toBeInTheDocument();
   expect(screen.getByText(/select a meeting to ask questions about it/i)).toBeInTheDocument();

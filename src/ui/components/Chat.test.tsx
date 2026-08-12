@@ -54,13 +54,13 @@ afterEach(() => {
 
 it("shows the Welcome panel when nothing is selected", () => {
   render(<Chat sessions={[sessionA]} sessionsError={null} selectedId={null} />);
-  expect(screen.getByText(/meeting note taker/i)).toBeInTheDocument();
+  expect(screen.getByText(/deskrecap/i)).toBeInTheDocument();
   expect(screen.getByText(/1 meeting recorded/i)).toBeInTheDocument();
 });
 
 it("shows the Welcome panel's no-meetings state when there are no meetings", () => {
   render(<Chat sessions={[]} sessionsError={null} selectedId={null} />);
-  expect(screen.getByText(/meeting note taker/i)).toBeInTheDocument();
+  expect(screen.getByText(/deskrecap/i)).toBeInTheDocument();
   expect(screen.getByText(/no meetings recorded yet/i)).toBeInTheDocument();
 });
 

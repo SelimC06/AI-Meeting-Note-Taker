@@ -37,7 +37,7 @@ const Welcome: React.FC<Props> = ({ sessions }) => {
             {GLYPH}
           </pre>
           <div>
-            <p className="text-signal font-semibold">Meeting Note Taker</p>
+            <p className="text-signal font-semibold">DeskRecap</p>
             <p className="text-dim">record → transcribe → summarize → chat</p>
           </div>
           <div>
