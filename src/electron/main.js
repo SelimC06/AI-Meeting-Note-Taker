@@ -275,13 +275,26 @@ function createRailWindow() {
         skipTaskbar: true,
         hasShadow: false,
         alwaysOnTop: true,
-        titleBarStyle: 'hidden',
+        // Deliberately no titleBarStyle: on macOS 'hidden' hides the title bar
+        // but KEEPS the standard traffic-light controls (close/minimize/zoom),
+        // which is exactly what it did here -- painting them over a floating
+        // rail that is supposed to be chromeless, and offering a close button
+        // for a window whose 'close' handler only hides it anyway. `frame:
+        // false` above already removes all window chrome on every platform,
+        // and on Windows 'hidden' without a titleBarOverlay adds nothing over
+        // it, so dropping this is a no-op there.
         webPreferences: {
             preload: path.join(__dirname, "preload.js"),
             contextIsolation: true,
             backgroundThrottling: false,
         },
     });
+
+    // Belt and braces for macOS: even frameless windows can be given the
+    // traffic lights back by other config, and this rail must never show them.
+    if (process.platform === 'darwin' && typeof railWindow.setWindowButtonVisibility === 'function') {
+        railWindow.setWindowButtonVisibility(false);
+    }
 
     // Intercept user-close gestures (Alt+F4, OS close, etc.) — this window has
     // no close button, but it's focusable so OS-level close gestures still

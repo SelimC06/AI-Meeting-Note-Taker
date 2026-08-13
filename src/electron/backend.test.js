@@ -318,6 +318,15 @@ test('findPidsListeningOnPort (win32) returns [] when Get-NetTCPConnection error
     assert.deepEqual(pids, []);
 });
 
+// The three ensurePortFree tests below exercise the REAL listener lookup (no mocked
+// execFileAsync), so they must run against the host platform rather than a hardcoded
+// 'win32'. Passing 'win32' on macOS sent them down the PowerShell branch, which can't
+// resolve `powershell` at all -- findPidsListeningOnPort swallowed the spawn error and
+// reported "no listeners", so the orphan was never killed and the first test hung
+// forever awaiting an 'exit' that could not arrive (npm run test:main never finished
+// on macOS, in CI as well as locally).
+const HOST_PLATFORM = process.platform;
+
 test('ensurePortFree kills a process listening on the given port when it matches expectedExePath (orphaned zombie scenario)', async () => {
     const port = await getFreePort();
     // Spawned directly via child_process, NOT through startBackend/stopBackend — this
@@ -339,7 +348,7 @@ test('ensurePortFree kills a process listening on the given port when it matches
             });
         });
 
-        const freed = await ensurePortFree(port, process.execPath, 'win32');
+        const freed = await ensurePortFree(port, process.execPath, HOST_PLATFORM);
         assert.equal(freed, true);
 
         // ensurePortFree now detects the port freeing up via a ~1ms bind
@@ -385,8 +394,14 @@ test('ensurePortFree does not kill a foreign process and reports the port as sti
             });
         });
 
-        const fakeLookup = async () => 'C:\\Some\\Other\\App\\unrelated.exe';
-        const freed = await ensurePortFree(port, 'C:\\Program Files\\App\\app-backend.exe', 'win32', 1000, fakeLookup);
+        const foreignExe = HOST_PLATFORM === 'win32'
+            ? 'C:\\Some\\Other\\App\\unrelated.exe'
+            : '/opt/some-other-app/unrelated';
+        const ourExe = HOST_PLATFORM === 'win32'
+            ? 'C:\\Program Files\\App\\app-backend.exe'
+            : '/Applications/DeskRecap.app/Contents/Resources/backend/app-backend';
+        const fakeLookup = async () => foreignExe;
+        const freed = await ensurePortFree(port, ourExe, HOST_PLATFORM, 1000, fakeLookup);
 
         assert.equal(freed, false);
         assert.equal(foreign.exitCode, null, 'foreign process should not have been killed');
@@ -400,7 +415,7 @@ test('ensurePortFree does not kill a foreign process and reports the port as sti
 
 test('ensurePortFree resolves to true without error when nothing is listening on the port', async () => {
     const port = await getFreePort();
-    const freed = await ensurePortFree(port, process.execPath, 'win32');
+    const freed = await ensurePortFree(port, process.execPath, HOST_PLATFORM);
     assert.equal(freed, true);
 });
 

@@ -5,6 +5,10 @@
   "version": "1.0.0",
   "type": "module",
   "main": "src/electron/main.js",
+  "engines": {
+    "node": ">=20",
+    "npm": ">=9"
+  },
   "scripts": {
     "dev:react": "vite",
     "dev:electron": "electron .",
@@ -52,18 +56,8 @@
     },
     "mac": {
       "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "arm64"
-          ]
-        },
-        {
-          "target": "zip",
-          "arch": [
-            "arm64"
-          ]
-        }
+        "dmg",
+        "zip"
       ],
       "icon": "build/icon.icns",
       "category": "public.app-category.productivity",

@@ -2028,6 +2028,101 @@ def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
     assert captured["model_name"] == "medium.en"
 
 
+def test_process_summarizes_with_the_configured_chat_model(client, monkeypatch):
+    """The summarize step must run on the configured chat model, not on
+    LLaVA_summarize's vision-model default.
+
+    Summarization is called with no frame_paths (text-only), so the vision
+    default was a second model users were never told to pull -- and when it was
+    absent, Ollama's 404 made every recording fall back to the raw transcript.
+    """
+    import app.server as server_module
+
+    server_module.OLLAMA_CHAT_MODEL = "gemma3:4b"
+
+    captured = {}
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        txt = Path(kwargs["transcript_prefix"] + "raw.txt")
+        txt.write_text("some transcript", encoding="utf-8")
+        return str(txt), []
+
+    def fake_llava_complete(**kwargs):
+        captured["model"] = kwargs.get("model")
+        return "# Notes\n- summarized"
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", fake_llava_complete)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"])
+    assert captured["model"] == "gemma3:4b"
+
+
+def test_process_summary_model_falls_back_when_job_predates_the_input(client, monkeypatch):
+    """A job queued by an older build has no "summary_model" key in its inputs;
+    the worker must fall back to the configured model rather than KeyError."""
+    import uuid
+    import app.server as server_module
+    from app import jobs
+
+    server_module.OLLAMA_CHAT_MODEL = "gemma3:4b"
+
+    captured = {}
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        txt = Path(kwargs["transcript_prefix"] + "raw.txt")
+        txt.write_text("some transcript", encoding="utf-8")
+        return str(txt), []
+
+    def fake_llava_complete(**kwargs):
+        captured["model"] = kwargs.get("model")
+        return "# Notes\n- summarized"
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", fake_llava_complete)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    session = server_module.STORE / uuid.uuid4().hex
+    session.mkdir(parents=True, exist_ok=True)
+    screen_webm = session / "screen.webm"
+    screen_webm.write_bytes(b"fake video bytes")
+
+    job_id = jobs.create_job(
+        session_id=session.name,
+        inputs={
+            "store": str(server_module.STORE),
+            "screen_webm": str(screen_webm),
+            "system_webm": None,
+            "mic_webm": None,
+            "whisper_model": "tiny.en",
+            # no "summary_model" -- exactly what an older build enqueued
+        },
+    )
+    jobs.enqueue(job_id)
+    wait_for_job(client, job_id)
+    assert captured["model"] == "gemma3:4b"
+
+
 def test_sessions_excludes_trashed_by_default(client: TestClient):
     from app.sessions_store import append_session
 

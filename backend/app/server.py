@@ -782,6 +782,9 @@ def _run_process_job(job_id: str) -> None:
     system_webm = Path(inputs["system_webm"]) if inputs["system_webm"] else None
     mic_webm = Path(inputs["mic_webm"]) if inputs["mic_webm"] else None
     whisper_model = inputs["whisper_model"]
+    # .get, not [...]: a job queued by an older build (or persisted across an
+    # upgrade) has no "summary_model" key, and that must not crash the worker.
+    summary_model = inputs.get("summary_model") or OLLAMA_CHAT_MODEL
 
     try:
         jobs.update_job(job_id, stage="muxing")
@@ -830,6 +833,14 @@ def _run_process_job(job_id: str) -> None:
 
                 notes = llava_complete(
                     raw_txt_path=txt_path,
+                    # Summarization here is text-only (no frame_paths, see the
+                    # comment above), so it runs on the configured chat model
+                    # rather than LLaVA_summarize's vision-model default. That
+                    # default is a SECOND model the user was never told to pull
+                    # -- and when it wasn't installed, Ollama's 404 turned every
+                    # single recording into "AI summarization failed", even
+                    # though the chat model sitting right there could do the job.
+                    model=summary_model,
                     out_path=str(session / "notes.md"),
                     max_chars=12000,
                     stream=False,
@@ -849,6 +860,15 @@ def _run_process_job(job_id: str) -> None:
                         explanation = (
                             "_AI summarization timed out (the local model didn't "
                             "respond in time) -- showing the raw transcript instead._\n\n"
+                        )
+                    elif "not found" in str(e).lower():
+                        # Ollama answers 404 for a model that was never pulled.
+                        # Naming the model and the exact command beats a bare
+                        # "failed", which gives the user nothing to act on.
+                        explanation = (
+                            f"_AI summarization failed: the model `{summary_model}` isn't "
+                            "installed in Ollama -- showing the raw transcript instead. "
+                            f"Run `ollama pull {summary_model}` to enable summaries._\n\n"
                         )
                     else:
                         explanation = (
@@ -963,6 +983,7 @@ def process(
         # video files land from where the session index entry gets appended.
         store = STORE
         whisper_model = WHISPER_MODEL
+        summary_model = OLLAMA_CHAT_MODEL
 
         # Validate the screen upload fully before creating the permanent session
         # directory: staged in a scratch temp dir first (on the same filesystem
@@ -993,6 +1014,7 @@ def process(
                 "system_webm": str(system_webm) if system_webm else None,
                 "mic_webm": str(mic_webm) if mic_webm else None,
                 "whisper_model": whisper_model,
+                "summary_model": summary_model,
             },
         )
         jobs.enqueue(job_id)
