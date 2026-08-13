@@ -473,7 +473,7 @@ def test_process_falls_back_to_stub_notes_without_transcription(client, monkeypa
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             raise RuntimeError("simulated whisper failure")
 
     fake_module = types.ModuleType("faster_whisper")
@@ -560,7 +560,7 @@ def test_process_skips_summarization_when_no_transcript(client, monkeypatch, cap
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -741,7 +741,7 @@ def test_process_survives_stop_recording_and_transcribe_failure(client, monkeypa
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -803,7 +803,7 @@ def test_process_appends_to_sessions_and_get_sessions_returns_it(client, monkeyp
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -861,7 +861,7 @@ def test_sessions_returns_newest_first(client, monkeypatch):
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -1325,7 +1325,7 @@ def test_process_does_not_extract_frames_via_stop_recording_and_transcribe(clien
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -1378,7 +1378,7 @@ def test_jobs_list_contains_created_job_with_expected_keys(client, monkeypatch):
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -1435,7 +1435,7 @@ def test_jobs_list_strips_notes_and_video_path_but_job_detail_keeps_them(client,
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -1529,8 +1529,22 @@ def test_get_settings_returns_current_values_and_choices(client: TestClient):
     assert "whisper_model" in body
     assert "storage_dir" in body
     assert "ollama_chat_model" in body
+    assert "custom_vocabulary" in body
     values = {c["value"] for c in body["whisper_model_choices"]}
     assert values == {"tiny.en", "base.en", "small.en", "medium.en"}
+
+
+def test_patch_settings_updates_custom_vocabulary(client: TestClient):
+    resp = client.patch("/settings", json={"custom_vocabulary": "Kestrel, SSOT"})
+    assert resp.status_code == 200
+    assert resp.json()["custom_vocabulary"] == "Kestrel, SSOT"
+
+    import app.server as server_module
+    assert server_module.CUSTOM_VOCABULARY == "Kestrel, SSOT"
+
+    # Reflected on a subsequent GET too.
+    resp2 = client.get("/settings")
+    assert resp2.json()["custom_vocabulary"] == "Kestrel, SSOT"
 
 
 def test_patch_settings_updates_whisper_model(client: TestClient):
@@ -1982,6 +1996,74 @@ def test_process_uses_configured_whisper_model_via_transcribe_helper(client, mon
     assert captured["model_name"] == "small.en"
 
 
+def test_process_passes_custom_vocabulary_as_initial_prompt(client, monkeypatch):
+    import app.server as server_module
+
+    server_module.CUSTOM_VOCABULARY = "Kestrel, SSOT, Xiomara"
+
+    captured = {}
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        captured["initial_prompt"] = kwargs.get("initial_prompt")
+        return None, []
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"], timeout=30.0)
+    assert captured["initial_prompt"] == "Kestrel, SSOT, Xiomara"
+
+
+def test_process_empty_custom_vocabulary_passes_none_as_initial_prompt(client, monkeypatch):
+    import app.server as server_module
+
+    server_module.CUSTOM_VOCABULARY = ""
+
+    captured = {}
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        captured["initial_prompt"] = kwargs.get("initial_prompt")
+        return None, []
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"], timeout=30.0)
+    assert captured["initial_prompt"] is None
+
+
 def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
     import sys
     import types
@@ -2012,7 +2094,7 @@ def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
         def __init__(self, model_name, device=None, compute_type=None):
             captured["model_name"] = model_name
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -2026,6 +2108,93 @@ def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
     assert resp.status_code == 202
     wait_for_job(client, resp.json()["job_id"])
     assert captured["model_name"] == "medium.en"
+
+
+def test_process_fallback_whisper_passes_custom_vocabulary_as_initial_prompt(client, monkeypatch):
+    import sys
+    import types
+    import app.server as server_module
+
+    server_module.CUSTOM_VOCABULARY = "Kestrel, SSOT, Xiomara"
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    captured = {}
+
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, device=None, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1, **kwargs):
+            captured["initial_prompt"] = kwargs.get("initial_prompt")
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"])
+    assert captured["initial_prompt"] == "Kestrel, SSOT, Xiomara"
+
+
+def test_process_whitespace_only_custom_vocabulary_passes_none_as_initial_prompt(client, monkeypatch):
+    import app.server as server_module
+
+    server_module.CUSTOM_VOCABULARY = "   \n"
+    # Reset WHISPER_MODEL -- a preceding test may have left it set to
+    # "medium.en" (used with a mocked faster_whisper module there), and if
+    # that leaked here it would make the real fallback whisper path (which
+    # this test can hit, since the primary path returns no txt_path) try to
+    # actually download an uncached model instead of using a cached one.
+    server_module.WHISPER_MODEL = "small.en"
+
+    captured = {}
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        captured["initial_prompt"] = kwargs.get("initial_prompt")
+        return None, []
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"], timeout=30.0)
+    assert captured["initial_prompt"] is None
 
 
 def test_sessions_excludes_trashed_by_default(client: TestClient):

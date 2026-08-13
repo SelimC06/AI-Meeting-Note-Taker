@@ -15,6 +15,7 @@ const baseSettings: Settings = {
   whisper_model: "base.en",
   storage_dir: "C:\\Users\\test\\recordings",
   ollama_chat_model: "gemma3:4b",
+  custom_vocabulary: "",
   whisper_model_choices: [
     { value: "tiny.en", label: "Tiny", description: "Fastest, lower accuracy" },
     { value: "base.en", label: "Base", description: "Balanced (default)" },
@@ -270,4 +271,48 @@ it("does not throw or log an error when unmounted mid-request and the pending re
   expect(actWarning).toBe(false);
 
   consoleError.mockRestore();
+});
+
+it("renders the saved custom vocabulary in the textarea", async () => {
+  vi.mocked(getSettings).mockResolvedValue({
+    ...baseSettings,
+    custom_vocabulary: "Kestrel, SSOT",
+  });
+
+  render(<SettingsPage active />);
+
+  const textarea = await screen.findByLabelText(/custom vocabulary/i);
+  expect(textarea).toHaveValue("Kestrel, SSOT");
+});
+
+it("saves an edited custom vocabulary and shows no error on success", async () => {
+  vi.mocked(updateSettings).mockResolvedValue({
+    ...baseSettings,
+    custom_vocabulary: "Kestrel, SSOT, Xiomara",
+  });
+
+  render(<SettingsPage active />);
+
+  const textarea = await screen.findByLabelText(/custom vocabulary/i);
+  fireEvent.change(textarea, { target: { value: "Kestrel, SSOT, Xiomara" } });
+  fireEvent.click(screen.getByRole("button", { name: /save vocabulary/i }));
+
+  await waitFor(() => {
+    expect(updateSettings).toHaveBeenCalledWith({
+      custom_vocabulary: "Kestrel, SSOT, Xiomara",
+    });
+  });
+});
+
+it("shows an error and keeps the draft text when saving the vocabulary fails", async () => {
+  vi.mocked(updateSettings).mockRejectedValue(new Error("network down"));
+
+  render(<SettingsPage active />);
+
+  const textarea = await screen.findByLabelText(/custom vocabulary/i);
+  fireEvent.change(textarea, { target: { value: "Kestrel" } });
+  fireEvent.click(screen.getByRole("button", { name: /save vocabulary/i }));
+
+  expect(await screen.findByText("network down")).toBeInTheDocument();
+  expect(textarea).toHaveValue("Kestrel");
 });

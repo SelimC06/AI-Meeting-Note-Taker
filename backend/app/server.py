@@ -257,6 +257,7 @@ except Exception as e:
 _sweep_stale_export_zips()
 WHISPER_MODEL = _settings["whisper_model"]
 OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
+CUSTOM_VOCABULARY = _settings["custom_vocabulary"]
 
 # Set for the duration of move_storage_dir inside patch_settings below.
 # POST /process checks this and rejects with 503 rather than writing a
@@ -557,6 +558,7 @@ class SettingsUpdate(BaseModel):
     whisper_model: Optional[str] = None
     storage_dir: Optional[str] = None
     ollama_chat_model: Optional[str] = None
+    custom_vocabulary: Optional[str] = None
 
 
 @app.get("/settings")
@@ -571,13 +573,14 @@ def get_settings():
         "whisper_model": WHISPER_MODEL,
         "storage_dir": str(STORE),
         "ollama_chat_model": OLLAMA_CHAT_MODEL,
+        "custom_vocabulary": CUSTOM_VOCABULARY,
         "whisper_model_choices": WHISPER_MODEL_CHOICES,
     }
 
 
 @app.patch("/settings")
 def patch_settings(body: SettingsUpdate):
-    global STORE, WHISPER_MODEL, OLLAMA_CHAT_MODEL, move_in_progress
+    global STORE, WHISPER_MODEL, OLLAMA_CHAT_MODEL, CUSTOM_VOCABULARY, move_in_progress
 
     if body.whisper_model is not None and body.whisper_model not in WHISPER_MODEL_VALUES:
         raise HTTPException(400, f"Invalid whisper_model: {body.whisper_model!r}")
@@ -600,11 +603,14 @@ def patch_settings(body: SettingsUpdate):
             "whisper_model": WHISPER_MODEL,
             "storage_dir": str(STORE),
             "ollama_chat_model": OLLAMA_CHAT_MODEL,
+            "custom_vocabulary": CUSTOM_VOCABULARY,
         }
         if body.whisper_model is not None:
             updates["whisper_model"] = body.whisper_model
         if body.ollama_chat_model is not None:
             updates["ollama_chat_model"] = body.ollama_chat_model
+        if body.custom_vocabulary is not None:
+            updates["custom_vocabulary"] = body.custom_vocabulary
 
         if body.storage_dir is not None:
             new_dir = Path(body.storage_dir)
@@ -660,6 +666,7 @@ def patch_settings(body: SettingsUpdate):
         STORE.mkdir(parents=True, exist_ok=True)
         WHISPER_MODEL = settings["whisper_model"]
         OLLAMA_CHAT_MODEL = settings["ollama_chat_model"]
+        CUSTOM_VOCABULARY = settings["custom_vocabulary"]
 
     return {**settings, "whisper_model_choices": WHISPER_MODEL_CHOICES}
 
@@ -782,6 +789,7 @@ def _run_process_job(job_id: str) -> None:
     system_webm = Path(inputs["system_webm"]) if inputs["system_webm"] else None
     mic_webm = Path(inputs["mic_webm"]) if inputs["mic_webm"] else None
     whisper_model = inputs["whisper_model"]
+    custom_vocabulary = inputs["custom_vocabulary"]
 
     try:
         jobs.update_job(job_id, stage="muxing")
@@ -817,6 +825,7 @@ def _run_process_job(job_id: str) -> None:
                     model_name=whisper_model,
                     separate_tracks=False,
                     extract_frames_after=False,
+                    initial_prompt=custom_vocabulary.strip() or None,
                 )
             except Exception as e:
                 log(f"stop_recording_and_transcribe failed, falling back to raw transcription: {e}")
@@ -873,7 +882,9 @@ def _run_process_job(job_id: str) -> None:
                 # here used to create a second cached model instance (and
                 # double the RAM) for what's otherwise the same model.
                 model = get_whisper_model(WhisperModel, whisper_model, device="cpu", compute_type="int8")
-                segments, info = model.transcribe(str(final_path), beam_size=1)
+                segments, info = model.transcribe(
+                    str(final_path), beam_size=1, initial_prompt=custom_vocabulary.strip() or None
+                )
                 transcript = "\n".join(s.text.strip() for s in segments if s.text)
                 notes = (
                     "# Title: Zoom Meeting\n\n"
@@ -963,6 +974,7 @@ def process(
         # video files land from where the session index entry gets appended.
         store = STORE
         whisper_model = WHISPER_MODEL
+        custom_vocabulary = CUSTOM_VOCABULARY
 
         # Validate the screen upload fully before creating the permanent session
         # directory: staged in a scratch temp dir first (on the same filesystem
@@ -993,6 +1005,7 @@ def process(
                 "system_webm": str(system_webm) if system_webm else None,
                 "mic_webm": str(mic_webm) if mic_webm else None,
                 "whisper_model": whisper_model,
+                "custom_vocabulary": custom_vocabulary,
             },
         )
         jobs.enqueue(job_id)

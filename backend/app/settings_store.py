@@ -23,6 +23,7 @@ def default_settings(default_storage_dir: Path) -> Dict[str, Any]:
         "whisper_model": os.getenv("WHISPER_MODEL", "tiny.en"),
         "storage_dir": str(default_storage_dir),
         "ollama_chat_model": os.getenv("OLLAMA_CHAT_MODEL", "gemma3:4b"),
+        "custom_vocabulary": "",
     }
 
 

@@ -28,6 +28,7 @@ const baseSettings: Settings = {
   whisper_model: "base.en",
   storage_dir: "C:\\recordings",
   ollama_chat_model: "llama3",
+  custom_vocabulary: "",
   whisper_model_choices: [],
 };
 

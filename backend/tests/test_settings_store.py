@@ -29,6 +29,7 @@ def test_default_settings_uses_env_vars(monkeypatch, tmp_path):
         "whisper_model": "small.en",
         "storage_dir": str(storage),
         "ollama_chat_model": "custom-chat:latest",
+        "custom_vocabulary": "",
     }
 
 
@@ -40,6 +41,7 @@ def test_default_settings_falls_back_without_env_vars(monkeypatch, tmp_path):
     assert result["whisper_model"] == "tiny.en"
     assert result["ollama_chat_model"] == "gemma3:4b"
     assert result["storage_dir"] == str(storage)
+    assert result["custom_vocabulary"] == ""
 
 
 def test_load_or_init_seeds_and_persists_when_missing(tmp_path):

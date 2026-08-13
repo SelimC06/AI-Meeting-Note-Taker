@@ -45,6 +45,7 @@ def stop_recording_and_transcribe(
     transcript_prefix="transcript_",
     model_name="base.en",
     separate_tracks=True,
+    initial_prompt: str | None = None,
     # frame extraction options:
     extract_frames_after: bool = False,
     frames_out_dir: str = "frames",
@@ -68,7 +69,7 @@ def stop_recording_and_transcribe(
         ], check=True)
 
     model = get_whisper_model(WhisperModel, model_name, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(str(wav_path))
+    segments, _ = model.transcribe(str(wav_path), initial_prompt=initial_prompt)
 
     full_text = " ".join(seg.text for seg in segments).strip()
     out_txt = Path(transcript_prefix).with_suffix(".txt")

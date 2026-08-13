@@ -832,7 +832,10 @@ function createWindow() {
             if (!mainWindow || mainWindow.isDestroyed()) return;
             const bounds = mainWindow.getBounds();
             const display = screen.getDisplayNearestPoint({ x: bounds.x, y: bounds.y });
-            const snapped = computeCornerSnap(display.workArea, bounds);
+            // allowOffScreen: unlike the rail (which should always be fully
+            // reachable), the dashboard needs to stay draggable half off-
+            // screen on purpose -- see computeCornerSnap's own comment.
+            const snapped = computeCornerSnap(display.workArea, bounds, 24, { allowOffScreen: true });
             if (snapped.x !== bounds.x || snapped.y !== bounds.y) {
                 animateWindowPosition(mainWindow, bounds, snapped);
             }

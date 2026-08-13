@@ -39,6 +39,9 @@ export default function SettingsPage({ active }: { active: boolean }) {
   const [whisperError, setWhisperError] = useState<string | null>(null);
   const [ollamaSaveError, setOllamaSaveError] = useState<string | null>(null);
 
+  const [vocabularyDraft, setVocabularyDraft] = useState("");
+  const [vocabularySaveError, setVocabularySaveError] = useState<string | null>(null);
+
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
   const [emptyingTrash, setEmptyingTrash] = useState(false);
@@ -54,7 +57,10 @@ export default function SettingsPage({ active }: { active: boolean }) {
     let cancelled = false;
     getSettings()
       .then((s) => {
-        if (!cancelled) setSettings(s);
+        if (!cancelled) {
+          setSettings(s);
+          setVocabularyDraft(s.custom_vocabulary);
+        }
       })
       .catch((e) => {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
@@ -145,6 +151,17 @@ export default function SettingsPage({ active }: { active: boolean }) {
     } catch (e) {
       setSettings(prev);
       setOllamaSaveError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleSaveVocabulary = async () => {
+    setVocabularySaveError(null);
+    try {
+      const updated = await updateSettings({ custom_vocabulary: vocabularyDraft });
+      setSettings(updated);
+      setVocabularyDraft(updated.custom_vocabulary);
+    } catch (e) {
+      setVocabularySaveError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -335,6 +352,34 @@ export default function SettingsPage({ active }: { active: boolean }) {
               <p className="text-xs text-red-400">{ollamaSaveError}</p>
             )}
           </>
+        )}
+      </div>
+
+      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
+        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+          custom vocabulary
+        </h2>
+        <p className="text-xs text-dim">
+          Names, project codenames, and acronyms Whisper should recognize (comma-separated).
+        </p>
+        <label htmlFor="custom-vocabulary" className="sr-only">
+          custom vocabulary
+        </label>
+        <textarea
+          id="custom-vocabulary"
+          value={vocabularyDraft}
+          onChange={(e) => setVocabularyDraft(e.target.value)}
+          rows={3}
+          className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal resize-none"
+        />
+        <button
+          onClick={handleSaveVocabulary}
+          className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+        >
+          Save vocabulary
+        </button>
+        {vocabularySaveError && (
+          <p className="text-xs text-red-400">{vocabularySaveError}</p>
         )}
       </div>
 

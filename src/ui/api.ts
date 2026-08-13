@@ -146,6 +146,7 @@ export type Settings = {
   whisper_model: string;
   storage_dir: string;
   ollama_chat_model: string;
+  custom_vocabulary: string;
   whisper_model_choices: WhisperModelChoice[];
 };
 
@@ -158,7 +159,7 @@ export async function getSettings(): Promise<Settings> {
 }
 
 export async function updateSettings(
-  partial: Partial<Pick<Settings, "whisper_model" | "storage_dir" | "ollama_chat_model">>
+  partial: Partial<Pick<Settings, "whisper_model" | "storage_dir" | "ollama_chat_model" | "custom_vocabulary">>
 ): Promise<Settings> {
   const resp = await fetch(`${BACKEND_URL}/settings`, {
     method: "PATCH",
