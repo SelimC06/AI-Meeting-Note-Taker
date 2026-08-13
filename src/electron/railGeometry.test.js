@@ -116,3 +116,23 @@ test('computeCornerSnap respects a non-zero workArea origin', () => {
     const snapped = computeCornerSnap(workArea, bounds, 24);
     assert.equal(snapped.x, 100);
 });
+
+test('computeCornerSnap leaves a window well past an edge alone instead of yanking it back on-screen', () => {
+    const workArea = { x: 0, y: 0, width: 1920, height: 1080 };
+    // Deliberately dragged mostly off the left edge -- x is deeply negative,
+    // which satisfied the old bare "<= threshold" check and would have
+    // snapped flush to x=0 no matter how far off it was.
+    const bounds = { x: -400, y: 500, width: 800, height: 450 };
+    const snapped = computeCornerSnap(workArea, bounds, 24);
+    assert.equal(snapped.x, -400);
+    assert.equal(snapped.y, 500);
+});
+
+test('computeCornerSnap still pulls flush from just barely past an edge', () => {
+    const workArea = { x: 0, y: 0, width: 1920, height: 1080 };
+    // 10px past the left edge -- still within the magnetic zone on the
+    // outside, so this should dock flush same as approaching from inside.
+    const bounds = { x: -10, y: 500, width: 800, height: 450 };
+    const snapped = computeCornerSnap(workArea, bounds, 24);
+    assert.equal(snapped.x, 0);
+});

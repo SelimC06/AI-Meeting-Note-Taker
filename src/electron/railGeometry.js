@@ -45,10 +45,20 @@ export function isPointInRect(point, rect) {
 }
 
 export function computeCornerSnap(workArea, bounds, threshold = 24) {
-    const nearLeft = bounds.x - workArea.x <= threshold;
-    const nearRight = (workArea.x + workArea.width) - (bounds.x + bounds.width) <= threshold;
-    const nearTop = bounds.y - workArea.y <= threshold;
-    const nearBottom = (workArea.y + workArea.height) - (bounds.y + bounds.height) <= threshold;
+    // Math.abs, not a bare "<= threshold", matters here: without it, a
+    // window dragged far past an edge (e.g. deliberately left mostly
+    // off-screen) has a hugely NEGATIVE distance-to-edge, which still
+    // satisfies "<= threshold" and got yanked flush on-screen no matter how
+    // far off it was -- there was never any way to leave a window partially
+    // off-screen. Bounding both directions makes this a small magnetic zone
+    // straddling the edge (close from either side snaps flush), matching how
+    // Windows' own edge docking behaves: it pulls a window in only when
+    // you're right at the edge, and otherwise leaves you free to drag it as
+    // far off-screen as you want.
+    const nearLeft = Math.abs(bounds.x - workArea.x) <= threshold;
+    const nearRight = Math.abs((workArea.x + workArea.width) - (bounds.x + bounds.width)) <= threshold;
+    const nearTop = Math.abs(bounds.y - workArea.y) <= threshold;
+    const nearBottom = Math.abs((workArea.y + workArea.height) - (bounds.y + bounds.height)) <= threshold;
 
     let x = bounds.x;
     let y = bounds.y;

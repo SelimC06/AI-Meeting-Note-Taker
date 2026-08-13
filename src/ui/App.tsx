@@ -1,6 +1,7 @@
 // src/ui/App.tsx
 import { useEffect, useRef, useState } from "react";
 import TitleBar from "./components/TitleBar";
+import ResizeHandles from "./components/ResizeHandles";
 import Sidebar from "./components/Sidebar";
 import Chat from "./components/Chat";
 import StatusLine from "./components/StatusLine";
@@ -113,8 +114,8 @@ function App() {
   }, []);
 
   return (
-    <div className="h-full flex items-center justify-center">
-      <div className="h-[450px] w-[800px] rounded-sm border border-line bg-void overflow-hidden flex flex-col">
+    <div className="h-full relative">
+      <div className="h-full w-full rounded-sm border border-line bg-void overflow-hidden flex flex-col">
         <TitleBar onOpenSettings={() => setSettingsOpen(true)} />
         <main className="flex-1 min-h-0 overflow-hidden [-webkit-app-region:no-drag] relative flex flex-col">
           <BackendStatusBanner />
@@ -175,6 +176,7 @@ function App() {
           )}
         </main>
       </div>
+      <ResizeHandles />
     </div>
   );
 }

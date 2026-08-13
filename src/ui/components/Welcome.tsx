@@ -27,9 +27,9 @@ const Welcome: React.FC<Props> = ({ sessions }) => {
   const relativeTime = latest ? formatRelativeTime(latest.created_at) : "";
 
   return (
-    <div className="flex-1 flex items-center justify-center px-4">
-      <div className="w-full max-w-lg border border-line rounded-sm bg-panel flex flex-col sm:flex-row divide-y sm:divide-y-0 sm:divide-x divide-line text-xs">
-        <div className="flex-1 p-4 flex flex-col gap-3">
+    <div className="flex-1 min-h-0 flex items-center justify-center px-4">
+      <div className="w-full max-w-lg border border-line rounded-sm bg-panel flex flex-col sm:flex-row divide-y sm:divide-y-0 sm:divide-x divide-line text-xs overflow-hidden">
+        <div className="flex-1 min-w-0 p-4 flex flex-col gap-3">
           <pre
             aria-hidden="true"
             className="font-sans text-signal leading-none text-[10px] select-none"
@@ -52,7 +52,7 @@ const Welcome: React.FC<Props> = ({ sessions }) => {
           </div>
         </div>
 
-        <div className="flex-1 p-4 flex flex-col gap-1">
+        <div className="flex-1 min-w-0 p-4 flex flex-col gap-1">
           <p className="text-phosphor mb-1">Recent activity</p>
           {latest ? (
             <>

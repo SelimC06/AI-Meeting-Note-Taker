@@ -133,7 +133,7 @@ const Chat: React.FC<Props> = ({
   const hasMeetings = sessions !== null && sessions.length > 0;
 
   return (
-    <div className="flex-1 min-w-0 h-full p-4 flex flex-col text-phosphor [-webkit-app-region:no-drag]">
+    <div className="flex-1 min-w-0 min-h-0 h-full p-4 flex flex-col text-phosphor [-webkit-app-region:no-drag]">
       {sessions === null && sessionsError != null && (backendUp || backendFailed) && (
         <div className="flex-1 flex items-center justify-center text-xs text-red-400 text-center px-4">
           couldn't load meetings: {sessionsError}

@@ -15,6 +15,10 @@ contextBridge.exposeInMainWorld('windowControls', {
   minimize: () => ipcRenderer.invoke('win:minimize'),
   close: () => ipcRenderer.invoke('app:quit'),
 
+  beginWindowResize: (direction) => ipcRenderer.invoke('window:beginResize', direction),
+  windowResizeMove: () => ipcRenderer.send('window:resizeMove'),
+  endWindowResize: () => ipcRenderer.invoke('window:endResize'),
+
   sendRailCommand: (action) => ipcRenderer.invoke('rail:command', action),
   onRailCommand: (callback) => {
     const listener = (_event, action) => callback(action);
