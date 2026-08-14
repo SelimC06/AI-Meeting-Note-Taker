@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import { streamChatReply, type Session, type ChatTurn } from "../api";
+import type { Session } from "../api";
+import type { useChatSessions } from "../hooks/useChatSessions";
 import Welcome from "./Welcome";
 import AllMeetingsChat from "./AllMeetingsChat";
 
@@ -23,6 +24,11 @@ interface Props {
   // same contract as Sidebar's onSelect. Optional so existing tests/callers
   // that never show the all-meetings view don't need it.
   onSelectSession?: (id: string) => void;
+  // Owns every meeting's chat conversation state one level above Chat, so
+  // it survives Chat re-rendering with a different selectedId instead of
+  // being aborted and reset on every switch. See
+  // docs/superpowers/specs/2026-08-13-persistent-per-session-chat-design.md.
+  chatSessions: ReturnType<typeof useChatSessions>;
 }
 
 // How close to the bottom (in px) counts as "already there" for
@@ -37,12 +43,9 @@ const Chat: React.FC<Props> = ({
   backendUp = true,
   backendFailed = false,
   onSelectSession,
+  chatSessions,
 }) => {
-  const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   // Whether the user is currently pinned to the bottom of the scroll
@@ -53,19 +56,15 @@ const Chat: React.FC<Props> = ({
   const isFollowingRef = useRef(true);
 
   const selected = sessions?.find((s) => s.id === selectedId) ?? null;
+  const { turns, isStreaming, error } = chatSessions.getState(selectedId ?? "");
 
+  // Purely a per-view scroll-position default, NOT conversation state --
+  // unlike turns/isStreaming/error (now owned by chatSessions and
+  // deliberately NOT reset here), it's correct for this to reset on every
+  // selection change.
   useEffect(() => {
-    abortRef.current?.abort();
-    setTurns([]);
-    setError(null);
     isFollowingRef.current = true;
   }, [selectedId]);
-
-  useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
-    };
-  }, []);
 
   const handleScroll = () => {
     const container = messagesContainerRef.current;
@@ -86,47 +85,16 @@ const Chat: React.FC<Props> = ({
     bottomSentinelRef.current?.scrollIntoView({ block: "end" });
   }, [turns]);
 
-  const handleSend = async () => {
+  const handleSend = () => {
     const message = input.trim();
     if (!message || !selectedId || isStreaming) return;
-
-    const history = turns;
-    setTurns((prev) => [
-      ...prev,
-      { role: "user", content: message },
-      { role: "assistant", content: "" },
-    ]);
     setInput("");
-    setError(null);
-    setIsStreaming(true);
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    try {
-      for await (const chunk of streamChatReply(selectedId, message, history, controller.signal)) {
-        setTurns((prev) => {
-          if (prev.length === 0) return prev;
-          const next = [...prev];
-          next[next.length - 1] = {
-            role: "assistant",
-            content: next[next.length - 1].content + chunk,
-          };
-          return next;
-        });
-      }
-    } catch (e) {
-      if ((e as Error)?.name !== "AbortError") {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    } finally {
-      setIsStreaming(false);
-      abortRef.current = null;
-    }
+    void chatSessions.sendMessage(selectedId, message);
   };
 
   const handleStop = () => {
-    abortRef.current?.abort();
+    if (!selectedId) return;
+    chatSessions.stopSession(selectedId);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {

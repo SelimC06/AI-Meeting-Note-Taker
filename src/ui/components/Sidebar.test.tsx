@@ -376,6 +376,38 @@ it("right-click in trash view offers delete forever, which requires confirmation
   await waitFor(() => expect(deleteSessionForever).toHaveBeenCalledWith("a1"));
 });
 
+it("calls onSessionDeleted with the deleted session's id after delete forever succeeds", async () => {
+  vi.mocked(getSessions).mockResolvedValue([
+    { ...sessionA, trashed_at: "2026-08-02T00:00:00Z" },
+  ]);
+  vi.mocked(deleteSessionForever).mockResolvedValue(undefined);
+  const onSessionDeleted = vi.fn();
+  renderSidebar({ view: "trash", onSessionDeleted });
+
+  const row = await screen.findByText("Sprint Planning");
+  fireEvent.contextMenu(row);
+  fireEvent.click(screen.getByText("[delete forever]"));
+  fireEvent.click(screen.getByText("[confirm]"));
+
+  await waitFor(() => expect(deleteSessionForever).toHaveBeenCalledWith("a1"));
+  expect(onSessionDeleted).toHaveBeenCalledWith("a1");
+});
+
+it("does not crash when onSessionDeleted is not provided", async () => {
+  vi.mocked(getSessions).mockResolvedValue([
+    { ...sessionA, trashed_at: "2026-08-02T00:00:00Z" },
+  ]);
+  vi.mocked(deleteSessionForever).mockResolvedValue(undefined);
+  renderSidebar({ view: "trash" }); // no onSessionDeleted override -- must not throw
+
+  const row = await screen.findByText("Sprint Planning");
+  fireEvent.contextMenu(row);
+  fireEvent.click(screen.getByText("[delete forever]"));
+  fireEvent.click(screen.getByText("[confirm]"));
+
+  await waitFor(() => expect(deleteSessionForever).toHaveBeenCalledWith("a1"));
+});
+
 it("shows an all-meetings nav item that deselects the current session", () => {
   const { onSelect } = renderSidebar({ selectedId: "a1" });
   fireEvent.click(screen.getByRole("button", { name: /all meetings/i }));

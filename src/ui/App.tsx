@@ -13,6 +13,7 @@ import OllamaOnboardingGate from "./components/OllamaOnboardingGate";
 import { useSessions } from "./hooks/useSessions";
 import { useBackendHealth } from "./hooks/useBackendHealth";
 import { useBackendLifecycle } from "./hooks/useBackendLifecycle";
+import { useChatSessions } from "./hooks/useChatSessions";
 
 function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -29,6 +30,7 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarView, setSidebarView] = useState<"active" | "trash">("active");
   const { sessions, error: sessionsError, reload: reloadSessions } = useSessions(true, false);
+  const chatSessions = useChatSessions();
   const health = useBackendHealth(true);
   const backendUp = health?.backend ?? false;
   // Sidebar/Chat use this to stop suppressing sessionsError once the backend
@@ -132,6 +134,7 @@ function App() {
                 onSelect={setSelectedId}
                 backendUp={backendUp}
                 backendFailed={backendFailed}
+                onSessionDeleted={chatSessions.discardSession}
               />
             </ErrorBoundary>
             <ErrorBoundary>
@@ -142,6 +145,7 @@ function App() {
                 backendUp={backendUp}
                 backendFailed={backendFailed}
                 onSelectSession={setSelectedId}
+                chatSessions={chatSessions}
               />
             </ErrorBoundary>
             <button
