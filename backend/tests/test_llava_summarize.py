@@ -157,6 +157,29 @@ def test_complete_caps_images_at_max_images(tmp_path, monkeypatch):
     assert len(sent_images) == 2
 
 
+def test_complete_does_not_force_cpu_only_inference(tmp_path, monkeypatch):
+    """Regression test: options used to hardcode num_gpu=0, forcing CPU-only
+    inference regardless of whether the user's hardware could run the model
+    on GPU. Ollama should be left to use its own default GPU behavior.
+    """
+    monkeypatch.setattr(llava_module._health_client, "list", lambda: {"models": []})
+
+    captured = {}
+
+    def fake_chat(model, messages, options, stream):
+        captured["options"] = options
+        return {"message": {"content": "ok"}}
+
+    monkeypatch.setattr(llava_module._client, "chat", fake_chat)
+
+    transcript_path = tmp_path / "transcript.txt"
+    transcript_path.write_text("hello", encoding="utf-8")
+
+    llava_module.complete(raw_txt_path=str(transcript_path), frame_paths=[])
+
+    assert "num_gpu" not in captured["options"]
+
+
 def test_health_client_uses_a_short_fixed_timeout_distinct_from_generation_client():
     health_timeout = llava_module._health_client._client.timeout
     assert health_timeout.connect == 5.0

@@ -650,6 +650,55 @@ def test_process_reuses_existing_transcript_when_summarization_fails(client, mon
     assert "AI summarization failed" in job["notes"]
 
 
+def test_process_summarization_uses_configured_ollama_chat_model(client, monkeypatch, tmp_path):
+    """Regression test: summarization used to always call llava_complete with
+    no model= argument, so it silently fell back to LLaVA_summarize's own
+    hardcoded DEFAULT_MODEL (a vision model configurable only via the
+    OLLAMA_VISION_MODEL env var) -- completely ignoring whatever model the
+    user picked in Settings for chat. The configured OLLAMA_CHAT_MODEL must
+    now be threaded through as the model= argument.
+    """
+    import app.server as server_module
+
+    server_module.OLLAMA_CHAT_MODEL = "llama3.1:8b"
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    transcript_path = tmp_path / "transcript_.txt"
+    transcript_path.write_text("hello from existing transcript", encoding="utf-8")
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        return str(transcript_path), []
+
+    captured = {}
+
+    def fake_llava_complete(**kwargs):
+        captured.update(kwargs)
+        return "# Stub notes\n"
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", fake_llava_complete)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"])
+
+    assert captured["model"] == "llama3.1:8b"
+
+
 def test_process_survives_ollama_read_timeout_during_summarization(client, monkeypatch, tmp_path):
     """Regression test for brief 05: a wedged Ollama used to hang the
     summarize step forever (no client timeout), stalling the serial job

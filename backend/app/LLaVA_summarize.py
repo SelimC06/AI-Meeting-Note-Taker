@@ -6,7 +6,12 @@ from typing import List
 from . import ollama_client
 
 OLLAMA_BASE = ollama_client.resolve_ollama_base()
-DEFAULT_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:7b-v1.5-q4_K_M")
+# Summarization is text-only in practice (server.py never passes
+# frame_paths), so it shares the same configurable chat model by default
+# instead of a hardcoded vision model. OLLAMA_VISION_MODEL is kept as an
+# explicit override for the rare case someone does want frame-based
+# (screenshot) summarization later, but it's no longer the silent default.
+DEFAULT_MODEL = os.getenv("OLLAMA_VISION_MODEL", os.getenv("OLLAMA_CHAT_MODEL", "gemma3:4b"))
 
 # Health checks get a short, fixed timeout; the generation call gets a
 # generous, configurable one (local vision models can take minutes to
@@ -104,7 +109,6 @@ def complete(
         "temperature": float(temperature),
         "num_predict": int(num_predict),
         "num_ctx": int(num_ctx),
-        "num_gpu": 0,
     }
 
     if stream:

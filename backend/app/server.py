@@ -844,6 +844,7 @@ def _run_process_job(job_id: str) -> None:
     mic_webm = Path(inputs["mic_webm"]) if inputs["mic_webm"] else None
     whisper_model = inputs["whisper_model"]
     custom_vocabulary = inputs["custom_vocabulary"]
+    ollama_chat_model = inputs["ollama_chat_model"]
 
     try:
         jobs.update_job(job_id, stage="muxing")
@@ -894,6 +895,7 @@ def _run_process_job(job_id: str) -> None:
                 notes = llava_complete(
                     raw_txt_path=txt_path,
                     out_path=str(session / "notes.md"),
+                    model=ollama_chat_model,
                     max_chars=12000,
                     stream=False,
                     num_ctx=8192,
@@ -1042,6 +1044,7 @@ def process(
         store = STORE
         whisper_model = WHISPER_MODEL
         custom_vocabulary = CUSTOM_VOCABULARY
+        ollama_chat_model = OLLAMA_CHAT_MODEL
 
         # Validate the screen upload fully before creating the permanent session
         # directory: staged in a scratch temp dir first (on the same filesystem
@@ -1073,6 +1076,7 @@ def process(
                 "mic_webm": str(mic_webm) if mic_webm else None,
                 "whisper_model": whisper_model,
                 "custom_vocabulary": custom_vocabulary,
+                "ollama_chat_model": ollama_chat_model,
             },
         )
         jobs.enqueue(job_id)

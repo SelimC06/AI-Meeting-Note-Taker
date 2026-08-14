@@ -316,8 +316,11 @@ export default function SettingsPage({ active }: { active: boolean }) {
 
       <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
         <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
-          chat model (ollama)
+          AI model (ollama)
         </h2>
+        <p className="text-xs text-dim">
+          Used for both chat and meeting summarization.
+        </p>
         {ollamaLoading ? (
           <p className="text-xs text-dim">Loading installed models...</p>
         ) : ollamaError ? (
