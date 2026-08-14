@@ -1666,6 +1666,31 @@ def test_patch_settings_rejects_storage_move_while_a_job_is_busy(client: TestCli
         jobs.update_job(job_id, status="done")
 
 
+def test_patch_settings_rejects_storage_move_while_graph_indexing_is_busy(client: TestClient, tmp_path, monkeypatch):
+    """The graph indexing worker (graph_jobs._loop) writes knowledge_graph.json
+    into the store dir over a 30-90s Ollama call, the same way jobs.py's
+    worker writes session files -- a storage move mid-extraction can write
+    into a dir that's mid-move or already abandoned by the move. Regression
+    test mirroring test_patch_settings_rejects_storage_move_while_a_job_is_busy.
+    """
+    import app.server as server_module
+    from app import graph_jobs
+
+    if server_module.graph_jobs is None:
+        pytest.skip("graph_jobs feature not available in this build")
+
+    monkeypatch.setattr(graph_jobs, "is_busy", lambda: True)
+
+    new_dir = tmp_path.parent / f"{tmp_path.name}-new-storage"
+    original_store = server_module.STORE
+
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+
+    assert resp.status_code == 409
+    assert server_module.STORE == original_store
+    assert not new_dir.exists()
+
+
 def test_patch_settings_allows_storage_move_once_jobs_are_terminal(client: TestClient, tmp_path):
     import app.server as server_module
     from app import jobs
@@ -2765,3 +2790,115 @@ def test_storage_usage_returns_counts_and_bytes(client: TestClient):
     assert body["used_bytes"] >= 100
     assert body["free_bytes"] > 0
     assert body["total_bytes"] > 0
+
+
+# ---------- graph chat ----------
+
+def _seed_session(sid, title, notes="notes", created_at="2026-08-01T10:00:00+00:00"):
+    from app.sessions_store import append_session
+    append_session(server_module.STORE, {
+        "id": sid, "created_at": created_at, "title": title, "notes": notes,
+        "video_path": "", "trashed_at": None, "status": "done",
+    })
+
+
+def test_graph_chat_streams_sources_line_then_tokens(client, monkeypatch):
+    _seed_session("m1", "Kickoff")
+    monkeypatch.setattr(server_module, "find_relevant_sessions", lambda store, q, max_sessions=5: ["m1"])
+    monkeypatch.setattr(server_module, "build_context", lambda store, sids: "CTX")
+
+    captured = {}
+
+    def fake_stream(context, message, history, model=None):
+        captured["context"] = context
+        captured["message"] = message
+        captured["history"] = history
+        yield "Hello "
+        yield "there."
+
+    monkeypatch.setattr(server_module, "stream_graph_chat_reply", fake_stream)
+
+    resp = client.post("/graph/chat", json={
+        "message": "what happened?",
+        "history": [{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"}],
+    })
+    assert resp.status_code == 200
+    lines = [json.loads(line) for line in resp.text.strip().splitlines()]
+    assert lines[0] == {"sources": [{"id": "m1", "title": "Kickoff", "created_at": "2026-08-01T10:00:00+00:00"}]}
+    assert "".join(line.get("token", "") for line in lines[1:]) == "Hello there."
+    assert captured["context"] == "CTX"
+    assert captured["message"] == "what happened?"
+    assert captured["history"] == [{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"}]
+
+
+def test_graph_chat_returns_503_when_ollama_down(client, monkeypatch):
+    def raise_down():
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(server_module, "assert_ollama_up", raise_down)
+    resp = client.post("/graph/chat", json={"message": "hi", "history": []})
+    assert resp.status_code == 503
+    assert "Local model unavailable" in resp.json()["detail"]
+
+
+def test_graph_chat_emits_error_line_on_midstream_failure(client, monkeypatch):
+    monkeypatch.setattr(server_module, "find_relevant_sessions", lambda store, q, max_sessions=5: [])
+    monkeypatch.setattr(server_module, "build_context", lambda store, sids: "")
+
+    def broken_stream(context, message, history, model=None):
+        yield "partial "
+        raise RuntimeError("ollama died mid-stream")
+
+    monkeypatch.setattr(server_module, "stream_graph_chat_reply", broken_stream)
+
+    resp = client.post("/graph/chat", json={"message": "hi", "history": []})
+    assert resp.status_code == 200
+    lines = [json.loads(line) for line in resp.text.strip().splitlines()]
+    assert lines[0] == {"sources": []}
+    assert lines[1] == {"token": "partial "}
+    assert "ollama died mid-stream" in lines[2]["error"]
+
+
+def test_process_job_enqueues_graph_indexing_after_save(client, monkeypatch):
+    # Same mock set as test_process_falls_back_to_stub_notes_without_transcription,
+    # plus a recorder on the graph enqueue hook.
+    import sys
+    import types
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, device=None, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1, **kwargs):
+            raise RuntimeError("simulated whisper failure")
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    enqueued = []
+    monkeypatch.setattr(server_module.graph_jobs, "enqueue_session", lambda sid: enqueued.append(sid))
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert enqueued == [resp.json()["session_id"]]

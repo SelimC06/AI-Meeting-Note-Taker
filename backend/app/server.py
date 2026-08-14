@@ -72,6 +72,18 @@ except Exception:
     OLLAMA_BASE = "http://localhost:11434"
     ollama_health_client = None
 
+try:
+    from . import graph_jobs
+    from .graph_chat import stream_graph_chat_reply
+    from .graph_extract import resolve_graph_model
+    from .graph_retrieve import build_context, find_relevant_sessions
+except Exception:
+    graph_jobs = None
+    stream_graph_chat_reply = None
+    resolve_graph_model = None
+    build_context = None
+    find_relevant_sessions = None
+
 _DAILY_PURGE_INTERVAL_SECONDS = 24 * 3600
 
 
@@ -618,7 +630,7 @@ def patch_settings(body: SettingsUpdate):
             # PermissionError on Windows (open file handles) or split the
             # session index across old/new dirs if the worker appends to a
             # re-created index in the old location after the move.
-            if jobs.is_busy():
+            if jobs.is_busy() or (graph_jobs is not None and graph_jobs.is_busy()):
                 raise HTTPException(409, "Wait for processing to finish before moving the storage folder")
             # jobs.is_busy() only blocks moves while a job is queued/running --
             # it says nothing about a fresh POST /process arriving DURING the
@@ -741,6 +753,48 @@ def chat(session_id: str, body: ChatRequest):
             yield json.dumps({"error": str(e)}) + "\n"
 
     return StreamingResponse(token_stream(), media_type="application/x-ndjson")
+
+
+@app.post("/graph/chat")
+def graph_chat(body: ChatRequest):
+    # Bind the settings-backed globals once so this request sees one
+    # consistent snapshot even if a PATCH /settings lands mid-request.
+    store = STORE
+    chat_model = OLLAMA_CHAT_MODEL
+
+    if stream_graph_chat_reply is None or find_relevant_sessions is None or assert_ollama_up is None:
+        raise HTTPException(503, "Chat is unavailable on this server")
+
+    try:
+        assert_ollama_up()
+    except Exception as e:
+        raise HTTPException(503, f"Local model unavailable: {e}")
+
+    history = [{"role": m.role, "content": m.content} for m in body.history]
+
+    session_ids = find_relevant_sessions(store, body.message)
+    context = build_context(store, session_ids)
+    records_by_id = {r["id"]: r for r in load_sessions(store)}
+    sources = [
+        {"id": sid, "title": records_by_id[sid].get("title", ""), "created_at": records_by_id[sid].get("created_at", "")}
+        for sid in session_ids
+        if sid in records_by_id
+    ]
+
+    def token_stream():
+        # Same NDJSON framing as /chat/{session_id} ({"token"}/{"error"}
+        # lines), plus ONE leading {"sources": [...]} line so the frontend
+        # can render source chips before/while tokens stream.
+        yield json.dumps({"sources": sources}) + "\n"
+        try:
+            for chunk in stream_graph_chat_reply(context, body.message, history, model=chat_model):
+                yield json.dumps({"token": chunk}) + "\n"
+        except Exception as e:
+            log(f"graph chat stream failed: {e}")
+            yield json.dumps({"error": str(e)}) + "\n"
+
+    return StreamingResponse(token_stream(), media_type="application/x-ndjson")
+
 
 def _record_failed_session(session: Path, error: str) -> None:
     """Best-effort: append a status:"failed" session record so a failed
@@ -910,6 +964,8 @@ def _run_process_job(job_id: str) -> None:
             "status": "done",
         }
         append_session(STORE, record)
+        if graph_jobs is not None:
+            graph_jobs.enqueue_session(record["id"])
 
         jobs.update_job(job_id, status="done", notes=notes, video_path=str(final_path))
     except Exception as e:
@@ -928,6 +984,17 @@ def _run_process_job(job_id: str) -> None:
 
 
 jobs.start_worker(_run_process_job)
+
+# Graph indexing: its own worker + a one-time backfill sweep, so meetings
+# recorded before this feature (or whose extraction previously failed) get
+# indexed too. GRAPH_INDEXING_DISABLED=1 (set by the test conftest) keeps
+# test runs from starting real background extraction against a dev store.
+if graph_jobs is not None and os.getenv("GRAPH_INDEXING_DISABLED") != "1":
+    graph_jobs.start_worker(lambda: STORE, lambda: resolve_graph_model(OLLAMA_CHAT_MODEL))
+    try:
+        graph_jobs.backfill_unindexed(STORE)
+    except Exception as e:
+        print(f"[server] graph backfill sweep failed (continuing): {e}", flush=True)
 
 
 @app.post("/process", status_code=202)

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { streamChatReply } from "./api";
+import { streamChatReply, streamGraphChatReply, type GraphChatEvent } from "./api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -143,4 +143,71 @@ it("cancels the stream reader on a mid-stream {error} line too", async () => {
     })()
   ).rejects.toThrow("Chat failed mid-response: ollama died");
   expect(cancelSpy).toHaveBeenCalled();
+});
+
+async function collectEvents(gen: AsyncGenerator<GraphChatEvent>): Promise<GraphChatEvent[]> {
+  const out: GraphChatEvent[] = [];
+  for await (const ev of gen) out.push(ev);
+  return out;
+}
+
+it("graph chat: yields the sources line as a sources event before token events", async () => {
+  const bytes = new TextEncoder().encode(
+    JSON.stringify({ sources: [{ id: "m1", title: "Kickoff", created_at: "2026-08-01T10:00:00Z" }] }) + "\n" +
+      JSON.stringify({ token: "Hello " }) + "\n" +
+      JSON.stringify({ token: "there." }) + "\n"
+  );
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(streamResponseFromChunks([bytes])));
+
+  const events = await collectEvents(streamGraphChatReply("hi", []));
+  expect(events[0]).toEqual({
+    type: "sources",
+    sources: [{ id: "m1", title: "Kickoff", created_at: "2026-08-01T10:00:00Z" }],
+  });
+  expect(events.slice(1)).toEqual([
+    { type: "token", token: "Hello " },
+    { type: "token", token: "there." },
+  ]);
+});
+
+it("graph chat: posts to /graph/chat with message and history", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(streamResponseFromChunks([new TextEncoder().encode("")]));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await collectEvents(streamGraphChatReply("question", [{ role: "user", content: "prior" }]));
+  const [url, init] = fetchMock.mock.calls[0];
+  expect(String(url)).toMatch(/\/graph\/chat$/);
+  expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+    message: "question",
+    history: [{ role: "user", content: "prior" }],
+  });
+});
+
+it("graph chat: throws on a mid-stream error line", async () => {
+  const bytes = new TextEncoder().encode(
+    JSON.stringify({ sources: [] }) + "\n" +
+      JSON.stringify({ token: "chunk one" }) + "\n" +
+      JSON.stringify({ error: "ollama died" }) + "\n"
+  );
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(streamResponseFromChunks([bytes])));
+
+  const received: GraphChatEvent[] = [];
+  await expect(
+    (async () => {
+      for await (const ev of streamGraphChatReply("hi", [])) received.push(ev);
+    })()
+  ).rejects.toThrow("Chat failed mid-response: ollama died");
+  expect(received).toEqual([
+    { type: "sources", sources: [] },
+    { type: "token", token: "chunk one" },
+  ]);
+});
+
+it("graph chat: treats a truncated NDJSON tail as a connection interruption", async () => {
+  const bytes = new TextEncoder().encode(JSON.stringify({ sources: [] }) + "\n" + '{"token": "hal');
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(streamResponseFromChunks([bytes])));
+
+  await expect(collectEvents(streamGraphChatReply("hi", []))).rejects.toThrow(
+    "Chat connection was interrupted before the reply finished."
+  );
 });

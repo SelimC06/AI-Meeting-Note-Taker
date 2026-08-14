@@ -141,6 +141,7 @@ function App() {
                 selectedId={selectedId}
                 backendUp={backendUp}
                 backendFailed={backendFailed}
+                onSelectSession={setSelectedId}
               />
             </ErrorBoundary>
             <button

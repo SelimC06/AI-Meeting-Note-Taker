@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { streamChatReply, type Session, type ChatTurn } from "../api";
 import Welcome from "./Welcome";
+import AllMeetingsChat from "./AllMeetingsChat";
 
 interface Props {
   sessions: Session[] | null;
@@ -18,6 +19,10 @@ interface Props {
   // once the backend is known to never be coming back on its own, instead
   // of showing "loading" forever (re-review-12-13 H1/L1). Defaults false.
   backendFailed?: boolean;
+  // Invoked when the user clicks a source chip in the all-meetings view --
+  // same contract as Sidebar's onSelect. Optional so existing tests/callers
+  // that never show the all-meetings view don't need it.
+  onSelectSession?: (id: string) => void;
 }
 
 // How close to the bottom (in px) counts as "already there" for
@@ -31,6 +36,7 @@ const Chat: React.FC<Props> = ({
   selectedId,
   backendUp = true,
   backendFailed = false,
+  onSelectSession,
 }) => {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
@@ -146,7 +152,22 @@ const Chat: React.FC<Props> = ({
         </div>
       )}
 
-      {sessions !== null && (!hasMeetings || !selected) && <Welcome sessions={sessions} />}
+      {sessions !== null && !hasMeetings && <Welcome sessions={sessions} />}
+
+      {hasMeetings && (
+        // Kept mounted whenever there are meetings (not just while no
+        // session is selected) and toggled via `display` instead of
+        // conditional rendering: unmounting AllMeetingsChat on every source
+        // chip click destroyed its `turns` state, wiping the cross-meeting
+        // conversation each time the user checked a source. `display:
+        // contents` makes this wrapper disappear from the box model when
+        // visible, so it doesn't disrupt the flex column layout
+        // AllMeetingsChat expects as a direct flex child of the container
+        // above.
+        <div style={{ display: selected ? "none" : "contents" }}>
+          <AllMeetingsChat sessions={sessions} onSelectSession={onSelectSession ?? (() => {})} />
+        </div>
+      )}
 
       {hasMeetings && selected && (
         <>

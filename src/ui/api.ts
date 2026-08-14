@@ -136,6 +136,83 @@ export async function* streamChatReply(
   }
 }
 
+export type GraphSource = { id: string; title: string; created_at: string };
+
+export type GraphChatEvent =
+  | { type: "sources"; sources: GraphSource[] }
+  | { type: "token"; token: string };
+
+// Streams POST /graph/chat: same NDJSON framing as streamChatReply
+// ({"token"}/{"error"} lines) plus one leading {"sources": [...]} line,
+// surfaced as a typed event so the UI can render source chips.
+export async function* streamGraphChatReply(
+  message: string,
+  history: ChatTurn[],
+  signal?: AbortSignal
+): AsyncGenerator<GraphChatEvent> {
+  const resp = await fetch(`${BACKEND_URL}/graph/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, history }),
+    signal,
+  });
+
+  if (!resp.ok || !resp.body) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`Chat request failed: ${resp.status}${text ? ` ${text}` : ""}`);
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const parseLine = (line: string): GraphChatEvent | null => {
+    const obj = JSON.parse(line) as { token?: string; error?: string; sources?: GraphSource[] };
+    if (obj.error !== undefined) {
+      throw new Error(`Chat failed mid-response: ${obj.error}`);
+    }
+    if (obj.sources !== undefined) {
+      return { type: "sources", sources: obj.sources };
+    }
+    if (obj.token !== undefined && obj.token !== "") {
+      return { type: "token", token: obj.token };
+    }
+    return null;
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newline;
+      while ((newline = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line) {
+          const event = parseLine(line);
+          if (event) yield event;
+        }
+      }
+    }
+    buffer += decoder.decode();
+    const rest = buffer.trim();
+    if (rest) {
+      try {
+        const event = parseLine(rest);
+        if (event) yield event;
+      } catch (e) {
+        if (e instanceof SyntaxError) {
+          throw new Error("Chat connection was interrupted before the reply finished.");
+        }
+        throw e;
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}
+
 export type WhisperModelChoice = {
   value: string;
   label: string;

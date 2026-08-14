@@ -375,3 +375,19 @@ it("right-click in trash view offers delete forever, which requires confirmation
   fireEvent.click(screen.getByText("[confirm]"));
   await waitFor(() => expect(deleteSessionForever).toHaveBeenCalledWith("a1"));
 });
+
+it("shows an all-meetings nav item that deselects the current session", () => {
+  const { onSelect } = renderSidebar({ selectedId: "a1" });
+  fireEvent.click(screen.getByRole("button", { name: /all meetings/i }));
+  expect(onSelect).toHaveBeenCalledWith(null);
+});
+
+it("hides the all-meetings nav item when there are no sessions", () => {
+  renderSidebar({ sessions: [] });
+  expect(screen.queryByRole("button", { name: /all meetings/i })).not.toBeInTheDocument();
+});
+
+it("hides the all-meetings nav item in the trash view", () => {
+  renderSidebar({ view: "trash" });
+  expect(screen.queryByRole("button", { name: /all meetings/i })).not.toBeInTheDocument();
+});

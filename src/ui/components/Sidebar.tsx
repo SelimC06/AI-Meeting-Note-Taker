@@ -294,6 +294,20 @@ const Sidebar: React.FC<Props> = ({
           )}
 
           <div className="flex-1 min-h-0 overflow-y-auto">
+            {view === "active" && list !== null && list.length > 0 && (
+              <button
+                onClick={() => onSelect(null)}
+                className={
+                  "w-full text-left text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal border-b border-line " +
+                  (selectedId === null
+                    ? "bg-line px-2 py-2 text-phosphor"
+                    : "px-2 py-2 text-dim hover:bg-line")
+                }
+              >
+                <span className="text-signal">✦</span> all meetings
+              </button>
+            )}
+
             {view === "active" && query.trim() === "" && activeJobs.length > 0 && (
               <ul className="divide-y divide-line border-b border-line">
                 {activeJobs.map((j) => (

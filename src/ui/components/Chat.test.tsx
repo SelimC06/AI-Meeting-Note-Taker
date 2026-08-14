@@ -52,10 +52,10 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-it("shows the Welcome panel when nothing is selected", () => {
+it("shows the all-meetings chat when meetings exist and nothing is selected", () => {
   render(<Chat sessions={[sessionA]} sessionsError={null} selectedId={null} />);
-  expect(screen.getByText(/deskrecap/i)).toBeInTheDocument();
-  expect(screen.getByText(/1 meeting recorded/i)).toBeInTheDocument();
+  expect(screen.getByText(/all meetings/i)).toBeInTheDocument();
+  expect(screen.getByPlaceholderText(/ask across all your meetings/i)).toBeInTheDocument();
 });
 
 it("shows the Welcome panel's no-meetings state when there are no meetings", () => {
@@ -64,11 +64,63 @@ it("shows the Welcome panel's no-meetings state when there are no meetings", () 
   expect(screen.getByText(/no meetings recorded yet/i)).toBeInTheDocument();
 });
 
+it("passes source-chip clicks through to onSelectSession", async () => {
+  const { streamGraphChatReply } = await import("../api");
+  async function* stream() {
+    yield { type: "sources" as const, sources: [{ id: "a1", title: "Sprint Planning", created_at: "2026-08-01T00:00:00Z" }] };
+    yield { type: "token" as const, token: "hi" };
+  }
+  vi.mocked(streamGraphChatReply).mockImplementation(() => stream());
+  const onSelect = vi.fn();
+
+  render(<Chat sessions={[sessionA]} sessionsError={null} selectedId={null} onSelectSession={onSelect} />);
+  const input = screen.getByLabelText("Chat message");
+  fireEvent.change(input, { target: { value: "q" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  const chip = await screen.findByRole("button", { name: /Sprint Planning/ });
+  fireEvent.click(chip);
+  expect(onSelect).toHaveBeenCalledWith("a1");
+});
+
+it("keeps the all-meetings conversation alive across selecting and deselecting a session (source-chip regression)", async () => {
+  // Regression test: AllMeetingsChat used to be conditionally rendered only
+  // while nothing was selected, so clicking a source chip (which selects a
+  // session) unmounted it and threw away its `turns` state. The fix keeps
+  // it mounted and toggles visibility instead, so the SAME component
+  // instance must survive a selectedId change -- hence rerender() on the
+  // same render() result rather than a fresh render() call.
+  const { streamGraphChatReply } = await import("../api");
+  async function* stream() {
+    yield { type: "token" as const, token: "Hello world" };
+  }
+  vi.mocked(streamGraphChatReply).mockImplementation(() => stream());
+
+  const { rerender } = render(
+    <Chat sessions={[sessionA, sessionB]} sessionsError={null} selectedId={null} />
+  );
+  const input = screen.getByLabelText("Chat message");
+  fireEvent.change(input, { target: { value: "what changed across meetings?" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  expect(await screen.findByText("Hello world")).toBeInTheDocument();
+
+  rerender(<Chat sessions={[sessionA, sessionB]} sessionsError={null} selectedId="a1" />);
+  expect(screen.getByText(/ask anything about this meeting's recording/i)).toBeInTheDocument();
+
+  rerender(<Chat sessions={[sessionA, sessionB]} sessionsError={null} selectedId={null} />);
+  expect(screen.getByText("Hello world")).toBeInTheDocument();
+});
+
 it("streams chunks and appends them to the last assistant turn", async () => {
   vi.mocked(streamChatReply).mockImplementation(() => twoChunkStream());
 
   render(<Chat sessions={[sessionA]} sessionsError={null} selectedId="a1" />);
-  const input = await screen.findByLabelText("Chat message");
+  // AllMeetingsChat now stays mounted (hidden) alongside the per-session
+  // chat whenever a session is selected (source-chip fix), so "Chat
+  // message" alone matches two inputs -- disambiguate by placeholder,
+  // which differs between the two chat UIs.
+  const input = await screen.findByPlaceholderText(/ask about this meeting/i);
   fireEvent.change(input, { target: { value: "what happened?" } });
   fireEvent.keyDown(input, { key: "Enter" });
 
@@ -91,7 +143,12 @@ it("auto-scrolls to the bottom as chunks stream in while already near the bottom
   vi.mocked(streamChatReply).mockImplementation(() => twoChunkStream());
 
   const { container } = render(<Chat sessions={[sessionA]} sessionsError={null} selectedId="a1" />);
-  const messagesContainer = container.querySelector(".overflow-y-auto");
+  // Two ".overflow-y-auto" containers exist once a session is selected --
+  // AllMeetingsChat's (kept mounted but hidden, source-chip fix) and the
+  // per-session one. The per-session container is the one rendered last in
+  // DOM order.
+  const messagesContainers = container.querySelectorAll(".overflow-y-auto");
+  const messagesContainer = messagesContainers[messagesContainers.length - 1];
   if (!messagesContainer) throw new Error("messages container not found");
   // Already scrolled to (within a few px of) the bottom. A real scroll
   // event is what actually updates the "following" ref (H2) -- setting the
@@ -102,7 +159,11 @@ it("auto-scrolls to the bottom as chunks stream in while already near the bottom
   const scrollIntoView = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
   scrollIntoView.mockClear(); // discard the mount-time call (default 0/0/0 metrics also count as "near bottom")
 
-  const input = await screen.findByLabelText("Chat message");
+  // AllMeetingsChat now stays mounted (hidden) alongside the per-session
+  // chat whenever a session is selected (source-chip fix), so "Chat
+  // message" alone matches two inputs -- disambiguate by placeholder,
+  // which differs between the two chat UIs.
+  const input = await screen.findByPlaceholderText(/ask about this meeting/i);
   fireEvent.change(input, { target: { value: "what happened?" } });
   fireEvent.keyDown(input, { key: "Enter" });
 
@@ -114,7 +175,12 @@ it("does not fight manual scrollback while a reply streams in", async () => {
   vi.mocked(streamChatReply).mockImplementation(() => twoChunkStream());
 
   const { container } = render(<Chat sessions={[sessionA]} sessionsError={null} selectedId="a1" />);
-  const messagesContainer = container.querySelector(".overflow-y-auto");
+  // Two ".overflow-y-auto" containers exist once a session is selected --
+  // AllMeetingsChat's (kept mounted but hidden, source-chip fix) and the
+  // per-session one. The per-session container is the one rendered last in
+  // DOM order.
+  const messagesContainers = container.querySelectorAll(".overflow-y-auto");
+  const messagesContainer = messagesContainers[messagesContainers.length - 1];
   if (!messagesContainer) throw new Error("messages container not found");
   // Scrolled well away from the bottom, reading earlier messages.
   setScrollMetrics(messagesContainer, { scrollTop: 0, scrollHeight: 500, clientHeight: 20 });
@@ -122,7 +188,11 @@ it("does not fight manual scrollback while a reply streams in", async () => {
   const scrollIntoView = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
   scrollIntoView.mockClear();
 
-  const input = await screen.findByLabelText("Chat message");
+  // AllMeetingsChat now stays mounted (hidden) alongside the per-session
+  // chat whenever a session is selected (source-chip fix), so "Chat
+  // message" alone matches two inputs -- disambiguate by placeholder,
+  // which differs between the two chat UIs.
+  const input = await screen.findByPlaceholderText(/ask about this meeting/i);
   fireEvent.change(input, { target: { value: "what happened?" } });
   fireEvent.keyDown(input, { key: "Enter" });
 
@@ -142,7 +212,12 @@ it("keeps following when a single chunk grows scrollHeight past the threshold wh
   vi.mocked(streamChatReply).mockImplementation(() => twoChunkStream());
 
   const { container } = render(<Chat sessions={[sessionA]} sessionsError={null} selectedId="a1" />);
-  const messagesContainer = container.querySelector(".overflow-y-auto");
+  // Two ".overflow-y-auto" containers exist once a session is selected --
+  // AllMeetingsChat's (kept mounted but hidden, source-chip fix) and the
+  // per-session one. The per-session container is the one rendered last in
+  // DOM order.
+  const messagesContainers = container.querySelectorAll(".overflow-y-auto");
+  const messagesContainer = messagesContainers[messagesContainers.length - 1];
   if (!messagesContainer) throw new Error("messages container not found");
   setScrollMetrics(messagesContainer, { scrollTop: 480, scrollHeight: 500, clientHeight: 20 });
   fireEvent.scroll(messagesContainer);
@@ -154,7 +229,11 @@ it("keeps following when a single chunk grows scrollHeight past the threshold wh
   // never fires 'scroll' in a real browser either.
   setScrollMetrics(messagesContainer, { scrollTop: 480, scrollHeight: 550, clientHeight: 20 });
 
-  const input = await screen.findByLabelText("Chat message");
+  // AllMeetingsChat now stays mounted (hidden) alongside the per-session
+  // chat whenever a session is selected (source-chip fix), so "Chat
+  // message" alone matches two inputs -- disambiguate by placeholder,
+  // which differs between the two chat UIs.
+  const input = await screen.findByPlaceholderText(/ask about this meeting/i);
   fireEvent.change(input, { target: { value: "what happened?" } });
   fireEvent.keyDown(input, { key: "Enter" });
 
@@ -168,7 +247,11 @@ it("aborts the stream when Stop is clicked and shows no error", async () => {
   );
 
   render(<Chat sessions={[sessionA]} sessionsError={null} selectedId="a1" />);
-  const input = await screen.findByLabelText("Chat message");
+  // AllMeetingsChat now stays mounted (hidden) alongside the per-session
+  // chat whenever a session is selected (source-chip fix), so "Chat
+  // message" alone matches two inputs -- disambiguate by placeholder,
+  // which differs between the two chat UIs.
+  const input = await screen.findByPlaceholderText(/ask about this meeting/i);
   fireEvent.change(input, { target: { value: "hi" } });
   fireEvent.keyDown(input, { key: "Enter" });
 
@@ -190,7 +273,11 @@ it("aborts the in-flight stream and clears turns when the selected meeting chang
   const { rerender } = render(
     <Chat sessions={[sessionA, sessionB]} sessionsError={null} selectedId="a1" />
   );
-  const input = await screen.findByLabelText("Chat message");
+  // AllMeetingsChat now stays mounted (hidden) alongside the per-session
+  // chat whenever a session is selected (source-chip fix), so "Chat
+  // message" alone matches two inputs -- disambiguate by placeholder,
+  // which differs between the two chat UIs.
+  const input = await screen.findByPlaceholderText(/ask about this meeting/i);
   fireEvent.change(input, { target: { value: "hi" } });
   fireEvent.keyDown(input, { key: "Enter" });
   await screen.findByText("Hello");
@@ -213,7 +300,11 @@ it("shows an error message when the stream throws a non-abort error", async () =
   );
 
   render(<Chat sessions={[sessionA]} sessionsError={null} selectedId="a1" />);
-  const input = await screen.findByLabelText("Chat message");
+  // AllMeetingsChat now stays mounted (hidden) alongside the per-session
+  // chat whenever a session is selected (source-chip fix), so "Chat
+  // message" alone matches two inputs -- disambiguate by placeholder,
+  // which differs between the two chat UIs.
+  const input = await screen.findByPlaceholderText(/ask about this meeting/i);
   fireEvent.change(input, { target: { value: "hi" } });
   fireEvent.keyDown(input, { key: "Enter" });
 
