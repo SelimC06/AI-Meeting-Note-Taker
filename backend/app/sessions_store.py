@@ -522,6 +522,45 @@ def sweep_stale_staging_dirs(store_dir: Path, max_age_seconds: int = 3600) -> Li
     return removed
 
 
+# Per-session structured transcript (Track A's "You" vs. "Others" segments),
+# stored as its own file rather than in sessions_index.json -- keeps the
+# index light per the existing pattern of storing large content (notes.md)
+# outside it.
+TRANSCRIPT_FILENAME = "transcript.json"
+
+
+def write_transcript_segments(session_dir: Path, segments: List[dict]) -> None:
+    """Atomically write a session's transcript segments to transcript.json.
+
+    Same fsync-before-replace pattern as _write_sessions_atomic /
+    settings_store._write_json_dict -- a power loss between write and replace
+    must never leave a truncated/empty transcript.json behind.
+    """
+    session_dir.mkdir(parents=True, exist_ok=True)
+    final_path = session_dir / TRANSCRIPT_FILENAME
+    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(segments, ensure_ascii=False, indent=2))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, final_path)
+
+
+def load_transcript_segments(session_dir: Path) -> List[dict]:
+    """Read a session's transcript.json. Missing or corrupt file -> []
+    (same resilience contract as load_sessions)."""
+    path = session_dir / TRANSCRIPT_FILENAME
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError, UnicodeDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return data
+
+
 def sweep_stale_partial_mux_files(store_dir: Path, max_age_seconds: int = 3600) -> List[str]:
     """Removes leftover .part mux temp files (see mux_video_audio) older than
     max_age_seconds. Meant to run once at backend startup, alongside the

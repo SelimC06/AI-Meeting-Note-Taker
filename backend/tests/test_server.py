@@ -2951,3 +2951,223 @@ def test_process_job_enqueues_graph_indexing_after_save(client, monkeypatch):
     job = wait_for_job(client, resp.json()["job_id"])
     assert job["status"] == "done"
     assert enqueued == [resp.json()["session_id"]]
+
+
+# ---- Track A: mic/system dual-track diarization ("You" vs "Others") --------
+
+def _fake_to_wav_writer():
+    def fake_to_wav(src, dst, ar=16000, ac=1):
+        if src is None:
+            return None
+        dst.write_bytes(b"fake wav")
+        return dst
+    return fake_to_wav
+
+
+def test_process_transcribes_mic_and_system_tracks_independently_when_both_present(client, monkeypatch):
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+        name = Path(wav_path).name
+        if name == "mic.wav":
+            return [{"start": 0.0, "end": 1.0, "text": "yes exactly"}]
+        assert name == "system.wav"
+        return [{"start": 2.0, "end": 3.0, "text": "hello everyone"}]
+
+    monkeypatch.setattr(server_module, "transcribe_wav", fake_transcribe_wav)
+
+    def exploding_stop_recording_and_transcribe(**kwargs):
+        raise AssertionError(
+            "stop_recording_and_transcribe should not run when both mic and "
+            "system tracks are present -- the dual-track path should be used"
+        )
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", exploding_stop_recording_and_transcribe
+    )
+
+    captured = {}
+
+    def fake_llava_complete(**kwargs):
+        captured.update(kwargs)
+        return "# Notes\n"
+
+    monkeypatch.setattr(server_module, "llava_complete", fake_llava_complete)
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    session_id = job["session_id"]
+
+    transcript_resp = client.get(f"/sessions/{session_id}/transcript")
+    assert transcript_resp.status_code == 200
+    assert transcript_resp.json()["segments"] == [
+        {"start": 0.0, "end": 1.0, "speaker": "You", "text": "yes exactly"},
+        {"start": 2.0, "end": 3.0, "speaker": "Others", "text": "hello everyone"},
+    ]
+
+    raw_txt = Path(captured["raw_txt_path"]).read_text(encoding="utf-8")
+    assert raw_txt == "You: yes exactly\nOthers: hello everyone"
+
+
+def test_process_falls_back_to_single_track_transcript_when_only_mic_present(client, monkeypatch):
+    """Only one of mic/system was captured (e.g. system capture failed) --
+    Track A's 2-way split can't run, so this must fall back to today's
+    single-track, unlabeled transcript instead of erroring."""
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+
+    def exploding_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+        raise AssertionError("transcribe_wav should not run without both tracks present")
+
+    monkeypatch.setattr(server_module, "transcribe_wav", exploding_transcribe_wav)
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        transcript_path = Path(kwargs["transcript_prefix"]).with_suffix(".txt")
+        transcript_path.write_text("single track transcript", encoding="utf-8")
+        return str(transcript_path), None
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe
+    )
+
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n\nsingle track transcript")
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert "single track transcript" in job["notes"]
+
+    transcript_resp = client.get(f"/sessions/{job['session_id']}/transcript")
+    assert transcript_resp.status_code == 200
+    assert transcript_resp.json()["segments"] == []
+
+
+def test_process_falls_back_when_dual_track_transcription_raises(client, monkeypatch):
+    """A transcribe_wav failure on either track must fall back to the
+    existing single-track path rather than failing the whole job."""
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+
+    def failing_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+        raise RuntimeError("whisper exploded")
+
+    monkeypatch.setattr(server_module, "transcribe_wav", failing_transcribe_wav)
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        out_txt = Path(kwargs["transcript_prefix"]).with_suffix(".txt")
+        out_txt.write_text("fallback transcript", encoding="utf-8")
+        return str(out_txt), None
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe
+    )
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n\nfallback transcript")
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert "fallback transcript" in job["notes"]
+
+
+def test_get_session_transcript_404_for_unknown_session(client: TestClient):
+    resp = client.get("/sessions/does-not-exist/transcript")
+    assert resp.status_code == 404
+
+
+def test_get_session_transcript_returns_empty_list_when_no_transcript_json(client, monkeypatch):
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    import sys
+    import types
+
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, device=None, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1, **kwargs):
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+
+    transcript_resp = client.get(f"/sessions/{job['session_id']}/transcript")
+    assert transcript_resp.status_code == 200
+    assert transcript_resp.json() == {"segments": []}

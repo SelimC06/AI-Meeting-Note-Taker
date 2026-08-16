@@ -304,6 +304,25 @@ export async function deleteSessionForever(id: string): Promise<void> {
   }
 }
 
+// Speaker is only "You"/"Others" (Track A's mic-vs-system 2-party split) --
+// null when no structured transcript was produced (e.g. only one of the
+// mic/system tracks was captured, so the split couldn't run).
+export type TranscriptSegment = {
+  start: number;
+  end: number;
+  speaker: "You" | "Others" | null;
+  text: string;
+};
+
+export async function getSessionTranscript(id: string): Promise<TranscriptSegment[]> {
+  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/transcript`);
+  if (!resp.ok) {
+    throw new Error(`Failed to load transcript: ${resp.status}`);
+  }
+  const data = (await resp.json()) as { segments: TranscriptSegment[] };
+  return data.segments;
+}
+
 export function exportSessionNotesUrl(id: string): string {
   return `${BACKEND_URL}/sessions/${id}/export/notes`;
 }

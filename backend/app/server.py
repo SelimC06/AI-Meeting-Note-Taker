@@ -39,8 +39,11 @@ from .sessions_store import (
     sweep_stale_staging_dirs,
     sweep_stale_partial_mux_files,
     compute_storage_usage,
+    write_transcript_segments,
+    load_transcript_segments,
     STAGING_DIR_PREFIX,
 )
+from .diarization import merge_track_segments
 from .settings_store import (
     SAVE_LOCK,
     WHISPER_MODEL_CHOICES,
@@ -55,9 +58,10 @@ from .whisper_cache import get_whisper_model
 from . import jobs
 
 try:
-    from .ffmpeg_transcribe import stop_recording_and_transcribe  # type: ignore
+    from .ffmpeg_transcribe import stop_recording_and_transcribe, transcribe_wav  # type: ignore
 except Exception:
     stop_recording_and_transcribe = None  # noqa: N816
+    transcribe_wav = None  # noqa: N816
 
 try:
     from .LLaVA_summarize import complete as llava_complete  # type: ignore
@@ -369,6 +373,20 @@ def mix_audios_wav(system_wav: Optional[Path], mic_wav: Optional[Path], out_wav:
         shutil.copy(mic_wav, out_wav)
         return out_wav
     return None
+
+
+def transcribe_dual_tracks(
+    mic_wav: Path,
+    system_wav: Path,
+    model_name: str,
+    initial_prompt: Optional[str],
+) -> List[dict]:
+    """Independently transcribe the mic and system tracks and merge them into
+    one chronological, speaker-tagged timeline ("You" vs. "Others").
+    """
+    mic_segments = transcribe_wav(str(mic_wav), model_name=model_name, initial_prompt=initial_prompt)
+    system_segments = transcribe_wav(str(system_wav), model_name=model_name, initial_prompt=initial_prompt)
+    return merge_track_segments(mic_segments, system_segments)
 
 
 def ffmpeg_has_encoder(name: str) -> bool:
@@ -868,7 +886,32 @@ def _run_process_job(job_id: str) -> None:
         notes: str = ""
         txt_path: Optional[str] = None
         jobs.update_job(job_id, stage="transcribing")
-        if stop_recording_and_transcribe is not None:
+
+        # Track A: when both the mic and system tracks were captured
+        # separately, transcribe them independently and merge the results
+        # into a "You" vs. "Others" timeline instead of transcribing the
+        # already-mixed-down final video. Only a 2-way split (not true
+        # n-party diarization) -- "Others" is not further split if multiple
+        # remote participants were in the call.
+        if mic_wav is not None and system_wav is not None and transcribe_wav is not None:
+            try:
+                transcript_segments = transcribe_dual_tracks(
+                    mic_wav, system_wav, whisper_model, custom_vocabulary.strip() or None
+                )
+            except Exception as e:
+                log(f"dual-track transcription failed, falling back to mixed audio: {e}")
+                transcript_segments = []
+
+            if transcript_segments:
+                merged_txt = session / "transcript_.txt"
+                merged_txt.write_text(
+                    "\n".join(f"{seg['speaker']}: {seg['text']}" for seg in transcript_segments),
+                    encoding="utf-8",
+                )
+                txt_path = str(merged_txt)
+                write_transcript_segments(session, transcript_segments)
+
+        if txt_path is None and stop_recording_and_transcribe is not None:
             try:
                 # extract_frames_after=False: summarization is text-only --
                 # llava_complete below runs with no frame_paths, so extracting
@@ -1119,6 +1162,14 @@ def _is_valid_session_id(session_id: str) -> bool:
     is a defense-in-depth format check before session_id is used to build a
     filesystem path, independent of the sessions_index.json lookup."""
     return bool(session_id) and "/" not in session_id and "\\" not in session_id and _SESSION_ID_RE.match(session_id) is not None
+
+
+@app.get("/sessions/{session_id}/transcript")
+def get_session_transcript(session_id: str):
+    store = STORE
+    _get_session_or_404(store, session_id)
+    segments = load_transcript_segments(store / session_id)
+    return {"segments": segments}
 
 
 @app.get("/sessions/{session_id}/export/notes")

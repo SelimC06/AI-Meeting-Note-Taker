@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { streamChatReply, streamGraphChatReply, type GraphChatEvent } from "./api";
+import { getSessionTranscript, streamChatReply, streamGraphChatReply, type GraphChatEvent } from "./api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -209,5 +209,27 @@ it("graph chat: treats a truncated NDJSON tail as a connection interruption", as
 
   await expect(collectEvents(streamGraphChatReply("hi", []))).rejects.toThrow(
     "Chat connection was interrupted before the reply finished."
+  );
+});
+
+it("getSessionTranscript returns the parsed segments", async () => {
+  const segments = [
+    { start: 0, end: 1.5, speaker: "You", text: "hello" },
+    { start: 1.5, end: 3, speaker: "Others", text: "hi there" },
+  ];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(new Response(JSON.stringify({ segments }), { status: 200 }))
+  );
+
+  const result = await getSessionTranscript("s1");
+  expect(result).toEqual(segments);
+});
+
+it("getSessionTranscript throws on a failed request", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 404 })));
+
+  await expect(getSessionTranscript("missing")).rejects.toThrow(
+    "Failed to load transcript: 404"
   );
 });

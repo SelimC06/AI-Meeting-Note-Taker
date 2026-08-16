@@ -40,6 +40,25 @@ def extract_frames(
     return frames
 
 
+def transcribe_wav(
+    wav_path: str,
+    model_name: str = "base.en",
+    initial_prompt: str | None = None,
+) -> list[dict]:
+    """Transcribe a single already-extracted wav file, returning segment-level
+    timestamps. Used for the mic/system 2-party split: unlike
+    stop_recording_and_transcribe, this skips the ffmpeg audio-extraction
+    step entirely since the wav is already 16kHz mono.
+    """
+    model = get_whisper_model(WhisperModel, model_name, device="cpu", compute_type="int8")
+    segments, _ = model.transcribe(wav_path, initial_prompt=initial_prompt)
+    return [
+        {"start": seg.start, "end": seg.end, "text": seg.text.strip()}
+        for seg in segments
+        if seg.text and seg.text.strip()
+    ]
+
+
 def stop_recording_and_transcribe(
     video_path="capture.mkv",
     transcript_prefix="transcript_",
