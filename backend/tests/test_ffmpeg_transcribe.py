@@ -281,10 +281,11 @@ def test_transcribe_wav_returns_segment_level_timestamps(tmp_path, monkeypatch):
     import app.ffmpeg_transcribe as ft
 
     class FakeSegment:
-        def __init__(self, start, end, text):
+        def __init__(self, start, end, text, words=None):
             self.start = start
             self.end = end
             self.text = text
+            self.words = words
 
     captured = {}
 
@@ -304,8 +305,8 @@ def test_transcribe_wav_returns_segment_level_timestamps(tmp_path, monkeypatch):
     result = ft.transcribe_wav(wav_path, model_name="tiny.en", initial_prompt="Kestrel")
 
     assert result == [
-        {"start": 0.0, "end": 1.5, "text": "hello there"},
-        {"start": 1.5, "end": 3.0, "text": "how are you"},
+        {"start": 0.0, "end": 1.5, "text": "hello there", "words": []},
+        {"start": 1.5, "end": 3.0, "text": "how are you", "words": []},
     ]
     assert captured["path"] == wav_path
     assert captured["kwargs"]["initial_prompt"] == "Kestrel"
@@ -315,10 +316,11 @@ def test_transcribe_wav_drops_blank_segments(tmp_path, monkeypatch):
     import app.ffmpeg_transcribe as ft
 
     class FakeSegment:
-        def __init__(self, start, end, text):
+        def __init__(self, start, end, text, words=None):
             self.start = start
             self.end = end
             self.text = text
+            self.words = words
 
     class FakeWhisperModel:
         def __init__(self, model_name, device="cpu", compute_type="int8"):
@@ -331,17 +333,18 @@ def test_transcribe_wav_drops_blank_segments(tmp_path, monkeypatch):
 
     result = ft.transcribe_wav(str(tmp_path / "mic.wav"), model_name="tiny.en")
 
-    assert result == [{"start": 1.0, "end": 2.0, "text": "real text"}]
+    assert result == [{"start": 1.0, "end": 2.0, "text": "real text", "words": []}]
 
 
 def test_transcribe_wav_strips_whitespace_from_text(tmp_path, monkeypatch):
     import app.ffmpeg_transcribe as ft
 
     class FakeSegment:
-        def __init__(self, start, end, text):
+        def __init__(self, start, end, text, words=None):
             self.start = start
             self.end = end
             self.text = text
+            self.words = words
 
     class FakeWhisperModel:
         def __init__(self, model_name, device="cpu", compute_type="int8"):
@@ -354,7 +357,91 @@ def test_transcribe_wav_strips_whitespace_from_text(tmp_path, monkeypatch):
 
     result = ft.transcribe_wav(str(tmp_path / "mic.wav"), model_name="tiny.en")
 
-    assert result == [{"start": 0.0, "end": 1.0, "text": "padded text"}]
+    assert result == [{"start": 0.0, "end": 1.0, "text": "padded text", "words": []}]
+
+
+def test_transcribe_wav_includes_word_level_timestamps(tmp_path, monkeypatch):
+    import app.ffmpeg_transcribe as ft
+
+    class FakeWord:
+        def __init__(self, word, start, end, probability):
+            self.word = word
+            self.start = start
+            self.end = end
+            self.probability = probability
+
+    class FakeSegment:
+        def __init__(self, start, end, text, words):
+            self.start = start
+            self.end = end
+            self.text = text
+            self.words = words
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, device="cpu", compute_type="int8"):
+            pass
+
+        def transcribe(self, path, **kwargs):
+            return [
+                FakeSegment(0.0, 1.0, "hi there", [
+                    FakeWord("hi", 0.0, 0.4, 0.9),
+                    FakeWord("there", 0.4, 1.0, 0.8),
+                ])
+            ], None
+
+    monkeypatch.setattr(ft, "WhisperModel", FakeWhisperModel)
+
+    result = ft.transcribe_wav(str(tmp_path / "mic.wav"), model_name="tiny.en")
+
+    assert result == [{
+        "start": 0.0, "end": 1.0, "text": "hi there",
+        "words": [
+            {"word": "hi", "start": 0.0, "end": 0.4, "probability": 0.9},
+            {"word": "there", "start": 0.4, "end": 1.0, "probability": 0.8},
+        ],
+    }]
+
+
+def test_stop_recording_and_transcribe_uses_shared_transcribe_helper_defaults(tmp_path, monkeypatch):
+    import app.ffmpeg_transcribe as ft
+
+    def fake_run(cmd, check=False):
+        class FakeCompletedProcess:
+            returncode = 0
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(ft.subprocess, "run", fake_run)
+
+    class FakeSegment:
+        def __init__(self, text: str):
+            self.text = text
+
+    captured_kwargs = {}
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, device="cpu", compute_type="int8"):
+            pass
+
+        def transcribe(self, path, **kwargs):
+            captured_kwargs.update(kwargs)
+            return [FakeSegment("hello")], None
+
+    monkeypatch.setattr(ft, "WhisperModel", FakeWhisperModel)
+
+    video_path = str(tmp_path / "capture.mkv")
+    transcript_prefix = str(tmp_path / "transcript_")
+
+    ft.stop_recording_and_transcribe(
+        video_path=video_path,
+        transcript_prefix=transcript_prefix,
+        model_name="tiny.en",
+        separate_tracks=False,
+        extract_frames_after=False,
+    )
+
+    assert captured_kwargs["beam_size"] == 1
+    assert captured_kwargs["vad_filter"] is False
+    assert captured_kwargs["word_timestamps"] is True
 
 
 def test_stop_recording_and_transcribe_defaults_initial_prompt_to_none(tmp_path, monkeypatch):

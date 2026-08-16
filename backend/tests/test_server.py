@@ -2184,6 +2184,60 @@ def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
     assert captured["model_name"] == "medium.en"
 
 
+def test_process_fallback_whisper_uses_shared_transcribe_helper_defaults(client, monkeypatch):
+    """
+    Regression test for the beam_size=1 vs beam_size=5 drift between this
+    fallback path and the primary path documented in
+    docs/Core pipeline quality fix/03-transcription-accuracy.md -- both now
+    go through whisper_cache.transcribe_audio() so they can't diverge again.
+    """
+    import sys
+    import types
+    import app.server as server_module
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    captured = {}
+
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, device=None, compute_type=None):
+            pass
+
+        def transcribe(self, path, **kwargs):
+            captured.update(kwargs)
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"])
+
+    assert captured["beam_size"] == 1
+    assert captured["vad_filter"] is False
+    assert captured["word_timestamps"] is True
+
+
 def test_process_fallback_whisper_passes_custom_vocabulary_as_initial_prompt(client, monkeypatch):
     import sys
     import types

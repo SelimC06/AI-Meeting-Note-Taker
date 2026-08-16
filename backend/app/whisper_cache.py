@@ -19,3 +19,42 @@ def get_whisper_model(model_cls, model_name, **kwargs):
             model = model_cls(model_name, **kwargs)
             _cache[key] = model
         return model
+
+
+def transcribe_audio(
+    model,
+    path,
+    initial_prompt=None,
+    beam_size=1,
+    vad_filter=False,
+    word_timestamps=True,
+    condition_on_previous_text=True,
+):
+    """Single call site for WhisperModel.transcribe(), used by every
+    transcription code path (and the WER benchmark) so they can't drift out
+    of sync with each other the way the primary/fallback paths previously did.
+
+    Defaults are backed by benchmarks/results/wer_results.json +
+    speed_results.json on this branch (see
+    docs/Core pipeline quality fix/03-transcription-accuracy.md):
+    word_timestamps=True is kept on unconditionally per that plan (needed for
+    diarization alignment/future UI), but measurement showed it is NOT
+    accuracy-neutral as originally assumed -- it costs a real, repeatable WER
+    regression, and that regression is *larger* at beam_size=5 than at
+    beam_size=1 (0.0706 vs 0.0691 WER with word_timestamps on, vs 0.0665 vs
+    0.0675 with it off) -- so beam_size=1 is the better default once
+    word_timestamps is mandatory, even though beam_size=5 alone measured
+    better in isolation. vad_filter defaults off because it measured no WER
+    or speed benefit on the available benchmark audio (no meaningful dead air
+    in either the LibriSpeech utterances or the synthetic speed clips) --
+    still exposed as a parameter for callers with real meeting audio to test
+    against.
+    """
+    return model.transcribe(
+        path,
+        initial_prompt=initial_prompt,
+        beam_size=beam_size,
+        vad_filter=vad_filter,
+        word_timestamps=word_timestamps,
+        condition_on_previous_text=condition_on_previous_text,
+    )

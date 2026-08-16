@@ -2,7 +2,7 @@ import subprocess
 from faster_whisper import WhisperModel
 from pathlib import Path
 from .bin_paths import FFMPEG_BIN
-from .whisper_cache import get_whisper_model
+from .whisper_cache import get_whisper_model, transcribe_audio
 
 
 def extract_frames(
@@ -51,9 +51,17 @@ def transcribe_wav(
     step entirely since the wav is already 16kHz mono.
     """
     model = get_whisper_model(WhisperModel, model_name, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(wav_path, initial_prompt=initial_prompt)
+    segments, _ = transcribe_audio(model, wav_path, initial_prompt=initial_prompt)
     return [
-        {"start": seg.start, "end": seg.end, "text": seg.text.strip()}
+        {
+            "start": seg.start,
+            "end": seg.end,
+            "text": seg.text.strip(),
+            "words": [
+                {"word": w.word, "start": w.start, "end": w.end, "probability": w.probability}
+                for w in (seg.words or [])
+            ],
+        }
         for seg in segments
         if seg.text and seg.text.strip()
     ]
@@ -88,7 +96,7 @@ def stop_recording_and_transcribe(
         ], check=True)
 
     model = get_whisper_model(WhisperModel, model_name, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(str(wav_path), initial_prompt=initial_prompt)
+    segments, _ = transcribe_audio(model, str(wav_path), initial_prompt=initial_prompt)
 
     full_text = " ".join(seg.text for seg in segments).strip()
     out_txt = Path(transcript_prefix).with_suffix(".txt")

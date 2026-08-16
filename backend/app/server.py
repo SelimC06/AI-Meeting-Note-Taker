@@ -54,7 +54,7 @@ from .settings_store import (
     save as save_settings,
 )
 from .bin_paths import FFMPEG_BIN, FFPROBE_BIN
-from .whisper_cache import get_whisper_model
+from .whisper_cache import get_whisper_model, transcribe_audio
 from . import jobs
 
 try:
@@ -981,8 +981,8 @@ def _run_process_job(job_id: str) -> None:
                 # here used to create a second cached model instance (and
                 # double the RAM) for what's otherwise the same model.
                 model = get_whisper_model(WhisperModel, whisper_model, device="cpu", compute_type="int8")
-                segments, info = model.transcribe(
-                    str(final_path), beam_size=1, initial_prompt=custom_vocabulary.strip() or None
+                segments, info = transcribe_audio(
+                    model, str(final_path), initial_prompt=custom_vocabulary.strip() or None
                 )
                 transcript = "\n".join(s.text.strip() for s in segments if s.text)
                 notes = (
