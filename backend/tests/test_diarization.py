@@ -7,8 +7,8 @@ def test_merge_track_segments_tags_and_orders_by_start_time():
     result = merge_track_segments(mic, system)
 
     assert result == [
-        {"start": 0.0, "end": 2.0, "speaker": "Others", "text": "hello everyone"},
-        {"start": 5.0, "end": 6.0, "speaker": "You", "text": "yes exactly"},
+        {"start": 0.0, "end": 2.0, "speaker": "Others", "text": "hello everyone", "words": []},
+        {"start": 5.0, "end": 6.0, "speaker": "You", "text": "yes exactly", "words": []},
     ]
 
 
@@ -24,9 +24,11 @@ def test_merge_track_segments_preserves_overlapping_segments_from_both_tracks():
     result = merge_track_segments(mic, system)
 
     assert len(result) == 2
-    assert result[0] == {"start": 1.0, "end": 3.0, "speaker": "You", "text": "wait let me"}
+    assert result[0] == {
+        "start": 1.0, "end": 3.0, "speaker": "You", "text": "wait let me", "words": []
+    }
     assert result[1] == {
-        "start": 1.5, "end": 2.5, "speaker": "Others", "text": "so as I was saying"
+        "start": 1.5, "end": 2.5, "speaker": "Others", "text": "so as I was saying", "words": []
     }
 
 
@@ -37,7 +39,7 @@ def test_merge_track_segments_handles_one_track_empty():
 
     result = merge_track_segments([], system)
 
-    assert result == [{"start": 0.0, "end": 1.0, "speaker": "Others", "text": "hi"}]
+    assert result == [{"start": 0.0, "end": 1.0, "speaker": "Others", "text": "hi", "words": []}]
 
 
 def test_merge_track_segments_handles_one_track_missing_entirely():
@@ -47,7 +49,7 @@ def test_merge_track_segments_handles_one_track_missing_entirely():
 
     result = merge_track_segments(mic, None)
 
-    assert result == [{"start": 0.0, "end": 1.0, "speaker": "You", "text": "hi"}]
+    assert result == [{"start": 0.0, "end": 1.0, "speaker": "You", "text": "hi", "words": []}]
 
 
 def test_merge_track_segments_handles_both_tracks_empty():
@@ -55,3 +57,29 @@ def test_merge_track_segments_handles_both_tracks_empty():
 
     assert merge_track_segments([], []) == []
     assert merge_track_segments(None, None) == []
+
+
+def test_merge_track_segments_preserves_word_level_timestamps():
+    # transcribe_wav (ffmpeg_transcribe.py) attaches word-level timestamps to
+    # each segment now that word_timestamps=True is on by default -- the
+    # merge must not silently drop them before they reach transcript.json.
+    from app.diarization import merge_track_segments
+
+    mic = [{
+        "start": 0.0, "end": 1.0, "text": "hi there",
+        "words": [{"word": "hi", "start": 0.0, "end": 0.4, "probability": 0.9}],
+    }]
+
+    result = merge_track_segments(mic, [])
+
+    assert result[0]["words"] == [{"word": "hi", "start": 0.0, "end": 0.4, "probability": 0.9}]
+
+
+def test_merge_track_segments_defaults_words_to_empty_list_when_absent():
+    from app.diarization import merge_track_segments
+
+    mic = [{"start": 0.0, "end": 1.0, "text": "hi there"}]
+
+    result = merge_track_segments(mic, [])
+
+    assert result[0]["words"] == []

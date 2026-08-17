@@ -11,17 +11,28 @@ def merge_track_segments(
     (Track A: "You" vs. "Others" 2-party split).
 
     mic_segments/system_segments are lists of {"start", "end", "text"} dicts
-    (faster-whisper Segment timestamps). Segments are ordered by start time
-    only -- they come from two genuinely simultaneous audio tracks (you can
-    talk over remote participants), so overlapping timestamps between the two
-    speakers are expected, not a bug, and both are kept.
+    (faster-whisper Segment timestamps), each optionally carrying a "words"
+    list (word-level timestamps, present when word_timestamps=True -- see
+    ffmpeg_transcribe.transcribe_wav). Word timestamps are carried through
+    into the merged output (defaulting to [] when absent) rather than
+    dropped -- Track B's pyannote-turn alignment needs them, and they're
+    already computed by the time they reach here. Segments are ordered by
+    start time only -- they come from two genuinely simultaneous audio
+    tracks (you can talk over remote participants), so overlapping
+    timestamps between the two speakers are expected, not a bug, and both
+    are kept.
     """
-    tagged = [
-        {"start": seg["start"], "end": seg["end"], "speaker": "You", "text": seg["text"]}
-        for seg in (mic_segments or [])
-    ] + [
-        {"start": seg["start"], "end": seg["end"], "speaker": "Others", "text": seg["text"]}
-        for seg in (system_segments or [])
+    def _tag(seg: dict, speaker: str) -> Dict:
+        return {
+            "start": seg["start"],
+            "end": seg["end"],
+            "speaker": speaker,
+            "text": seg["text"],
+            "words": seg.get("words", []),
+        }
+
+    tagged = [_tag(seg, "You") for seg in (mic_segments or [])] + [
+        _tag(seg, "Others") for seg in (system_segments or [])
     ]
     tagged.sort(key=lambda seg: seg["start"])
     return tagged
