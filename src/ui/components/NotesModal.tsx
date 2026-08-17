@@ -1,5 +1,11 @@
 import React, { useEffect, useState } from "react";
-import { getSessionTranscript, type Session, type TranscriptSegment } from "../api";
+import {
+  getSessionActionItems,
+  getSessionTranscript,
+  type ActionItem,
+  type Session,
+  type TranscriptSegment,
+} from "../api";
 
 interface Props {
   session: Session;
@@ -68,8 +74,42 @@ const TranscriptView: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   );
 };
 
+// null = structured action items unavailable for this session (old
+// session, or the backend's own malformed-JSON retry chain still failed
+// both attempts) -- render the plain prose notes exactly as before this
+// feature existed, never a broken or empty checklist.
+const ActionItemsChecklist: React.FC<{ items: ActionItem[]; checked: Set<number>; onToggle: (i: number) => void }> = ({
+  items,
+  checked,
+  onToggle,
+}) => (
+  <div className="px-3 py-2 border-b border-line">
+    <div className="text-xs text-dim mb-1">Action Items</div>
+    <ul className="space-y-1">
+      {items.map((item, i) => (
+        <li key={i} className="flex items-start gap-2 text-xs">
+          <input
+            type="checkbox"
+            checked={checked.has(i)}
+            onChange={() => onToggle(i)}
+            aria-label={item.text}
+            className="mt-0.5"
+          />
+          <span className={checked.has(i) ? "line-through text-dim" : "text-phosphor"}>
+            {item.text}
+            {item.owner ? <span className="text-dim"> — {item.owner}</span> : null}
+            {item.due ? <span className="text-dim"> (due {item.due})</span> : null}
+          </span>
+        </li>
+      ))}
+    </ul>
+  </div>
+);
+
 const NotesModal: React.FC<Props> = ({ session, onClose }) => {
   const [view, setView] = useState<ModalView>("notes");
+  const [actionItems, setActionItems] = useState<ActionItem[] | null>(null);
+  const [checkedIndexes, setCheckedIndexes] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -78,6 +118,33 @@ const NotesModal: React.FC<Props> = ({ session, onClose }) => {
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setActionItems(null);
+    setCheckedIndexes(new Set());
+    getSessionActionItems(session.id)
+      .then((result) => {
+        if (!cancelled) setActionItems(result);
+      })
+      .catch(() => {
+        // Network/parse failure fetching the endpoint itself -- same
+        // fallback as the backend returning null: show prose notes.
+        if (!cancelled) setActionItems(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session.id]);
+
+  const toggleChecked = (index: number) => {
+    setCheckedIndexes((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  };
 
   return (
     <div className="absolute inset-0 z-50 bg-void/80 flex items-center justify-center px-6 py-6 [-webkit-app-region:no-drag]">
@@ -104,9 +171,12 @@ const NotesModal: React.FC<Props> = ({ session, onClose }) => {
           </button>
         </div>
         {view === "notes" ? (
-          <pre className="flex-1 overflow-y-auto px-3 py-2 text-xs whitespace-pre-wrap text-phosphor">
-            {session.notes}
-          </pre>
+          <div className="flex-1 overflow-y-auto flex flex-col">
+            {actionItems && actionItems.length > 0 ? (
+              <ActionItemsChecklist items={actionItems} checked={checkedIndexes} onToggle={toggleChecked} />
+            ) : null}
+            <pre className="px-3 py-2 text-xs whitespace-pre-wrap text-phosphor">{session.notes}</pre>
+          </div>
         ) : (
           <TranscriptView sessionId={session.id} />
         )}

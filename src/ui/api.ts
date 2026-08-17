@@ -323,6 +323,27 @@ export async function getSessionTranscript(id: string): Promise<TranscriptSegmen
   return data.segments;
 }
 
+// null action_items means structured extraction is unavailable for this
+// session -- an old session recorded before this feature existed, or one
+// where the local model's JSON output never parsed even after the
+// backend's own retry. Callers must fall back to rendering the session's
+// prose `notes` instead of a checklist; never treat null the same as an
+// empty (but valid) list.
+export type ActionItem = {
+  text: string;
+  owner: string | null;
+  due: string | null;
+};
+
+export async function getSessionActionItems(id: string): Promise<ActionItem[] | null> {
+  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/action-items`);
+  if (!resp.ok) {
+    throw new Error(`Failed to load action items: ${resp.status}`);
+  }
+  const data = (await resp.json()) as { action_items: ActionItem[] | null };
+  return data.action_items;
+}
+
 export function exportSessionNotesUrl(id: string): string {
   return `${BACKEND_URL}/sessions/${id}/export/notes`;
 }

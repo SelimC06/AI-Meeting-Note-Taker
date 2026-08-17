@@ -41,6 +41,8 @@ from .sessions_store import (
     compute_storage_usage,
     write_transcript_segments,
     load_transcript_segments,
+    write_action_items,
+    load_action_items,
     STAGING_DIR_PREFIX,
 )
 from .diarization import merge_track_segments
@@ -65,8 +67,10 @@ except Exception:
 
 try:
     from .LLaVA_summarize import complete as llava_complete  # type: ignore
+    from .LLaVA_summarize import extract_action_items as llava_extract_action_items  # type: ignore
 except Exception:
     llava_complete = None
+    llava_extract_action_items = None
 
 try:
     from .chat import assert_ollama_up, stream_chat_reply, OLLAMA_BASE, _health_client as ollama_health_client
@@ -884,6 +888,7 @@ def _run_process_job(job_id: str) -> None:
             return
 
         notes: str = ""
+        structured_action_items: Optional[list] = None
         txt_path: Optional[str] = None
         jobs.update_job(job_id, stage="transcribing")
 
@@ -945,6 +950,27 @@ def _run_process_job(job_id: str) -> None:
                     num_predict=800,
                     temperature=0.3,
                 )
+
+                # Structured action items are a best-effort add-on to the
+                # prose summary above, not a requirement for the job to
+                # succeed. The small local model WILL sometimes return
+                # malformed JSON even after extract_action_items' own
+                # internal retry -- and it can also fail for the same
+                # reasons llava_complete can (Ollama down, timeout, etc).
+                # Either way, this must never fail the job or replace
+                # `notes`: on any failure structured_action_items simply
+                # stays None, and the frontend falls back to rendering the
+                # prose notes (which already contain an "## Action Items"
+                # section) exactly as it did before this feature existed.
+                if llava_extract_action_items is not None:
+                    try:
+                        structured_action_items = llava_extract_action_items(
+                            raw_txt_path=txt_path,
+                            model=ollama_chat_model,
+                        )
+                    except Exception as e:
+                        log(f"action items extraction failed, falling back to prose notes: {e}")
+                        structured_action_items = None
             except Exception as e:
                 log(f"summarization failed, falling back to raw transcript: {e}")
                 try:
@@ -1009,6 +1035,8 @@ def _run_process_job(job_id: str) -> None:
             "status": "done",
         }
         append_session(STORE, record)
+        if structured_action_items is not None:
+            write_action_items(session, structured_action_items)
         if graph_jobs is not None:
             graph_jobs.enqueue_session(record["id"])
 
@@ -1170,6 +1198,19 @@ def get_session_transcript(session_id: str):
     _get_session_or_404(store, session_id)
     segments = load_transcript_segments(store / session_id)
     return {"segments": segments}
+
+
+@app.get("/sessions/{session_id}/action-items")
+def get_session_action_items(session_id: str):
+    """action_items is None when structured extraction is unavailable for
+    this session (an old session recorded before this feature existed, or
+    one where the model's JSON output never parsed even after the
+    extract_action_items retry) -- the frontend falls back to the prose
+    notes rendering in that case rather than showing a broken checklist."""
+    store = STORE
+    _get_session_or_404(store, session_id)
+    items = load_action_items(store / session_id)
+    return {"action_items": items}
 
 
 @app.get("/sessions/{session_id}/export/notes")

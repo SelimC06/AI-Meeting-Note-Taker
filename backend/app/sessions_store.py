@@ -7,7 +7,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 SESSIONS_INDEX_FILENAME = "sessions_index.json"
 
@@ -559,6 +559,58 @@ def load_transcript_segments(session_dir: Path) -> List[dict]:
     if not isinstance(data, list):
         return []
     return data
+
+
+# Per-session structured action items (see LLaVA_summarize.extract_action_items),
+# stored as its own file rather than in sessions_index.json -- same rationale
+# as TRANSCRIPT_FILENAME above: keeps the index light, and this is only
+# written when structured extraction actually succeeded, so its mere
+# presence already distinguishes "has structured action items" from "fell
+# back to prose notes for this session" without needing a separate flag.
+SUMMARY_FILENAME = "summary.json"
+
+
+def write_action_items(session_dir: Path, action_items: List[dict]) -> None:
+    """Atomically write a session's structured action items to summary.json.
+
+    Same fsync-before-replace pattern as write_transcript_segments /
+    _write_sessions_atomic. Only ever called with a non-None list -- callers
+    that got None back from extract_action_items (both parse attempts
+    failed, or extraction wasn't attempted) must simply not call this, so a
+    missing file unambiguously means "no structured data for this session".
+    """
+    session_dir.mkdir(parents=True, exist_ok=True)
+    final_path = session_dir / SUMMARY_FILENAME
+    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"action_items": action_items}, ensure_ascii=False, indent=2))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, final_path)
+
+
+def load_action_items(session_dir: Path) -> Optional[List[dict]]:
+    """Read a session's summary.json. Missing, corrupt, or malformed-shape
+    file -> None (same resilience contract as load_sessions/
+    load_transcript_segments). Callers (the /action-items endpoint) treat
+    None as "structured action items aren't available for this session" --
+    an old session recorded before this feature existed, or one where both
+    of extract_action_items' parse attempts failed -- and the frontend falls
+    back to showing the prose notes instead of a checklist.
+    """
+    path = session_dir / SUMMARY_FILENAME
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    items = data.get("action_items")
+    if not isinstance(items, list):
+        return None
+    return items
 
 
 def sweep_stale_partial_mux_files(store_dir: Path, max_age_seconds: int = 3600) -> List[str]:

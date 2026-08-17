@@ -40,6 +40,12 @@ def client(tmp_path, monkeypatch):
     # call. Tests that care about a specific outcome monkeypatch
     # assert_ollama_up again themselves, after this fixture runs.
     monkeypatch.setattr(server_module, "assert_ollama_up", lambda: None)
+    # Default action-items extraction to "unavailable" (None) so tests that
+    # only care about llava_complete/notes never make a real network call to
+    # a local Ollama server. Tests exercising the action-items feature
+    # itself monkeypatch llava_extract_action_items again after this fixture
+    # runs.
+    monkeypatch.setattr(server_module, "llava_extract_action_items", lambda **kwargs: None)
     # base_url must be an allowed TrustedHostMiddleware host -- the default
     # "http://testserver" would otherwise get rejected with 400 before
     # reaching any route, since only localhost/127.0.0.1 are allowed.
@@ -3075,8 +3081,8 @@ def test_process_transcribes_mic_and_system_tracks_independently_when_both_prese
     transcript_resp = client.get(f"/sessions/{session_id}/transcript")
     assert transcript_resp.status_code == 200
     assert transcript_resp.json()["segments"] == [
-        {"start": 0.0, "end": 1.0, "speaker": "You", "text": "yes exactly"},
-        {"start": 2.0, "end": 3.0, "speaker": "Others", "text": "hello everyone"},
+        {"start": 0.0, "end": 1.0, "speaker": "You", "text": "yes exactly", "words": []},
+        {"start": 2.0, "end": 3.0, "speaker": "Others", "text": "hello everyone", "words": []},
     ]
 
     raw_txt = Path(captured["raw_txt_path"]).read_text(encoding="utf-8")
@@ -3225,3 +3231,177 @@ def test_get_session_transcript_returns_empty_list_when_no_transcript_json(clien
     transcript_resp = client.get(f"/sessions/{job['session_id']}/transcript")
     assert transcript_resp.status_code == 200
     assert transcript_resp.json() == {"segments": []}
+
+
+def _fake_save_and_mux(monkeypatch):
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        transcript_path = Path(kwargs["transcript_prefix"]).with_suffix(".txt")
+        transcript_path.write_text("someone should follow up", encoding="utf-8")
+        return str(transcript_path), None
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe
+    )
+
+
+def test_get_session_action_items_404_for_unknown_session(client: TestClient):
+    resp = client.get("/sessions/does-not-exist/action-items")
+    assert resp.status_code == 404
+
+
+def test_process_lands_action_items_in_session_and_survives_reload(client, monkeypatch):
+    """The happy path end-to-end: structured extraction succeeds, and the
+    result is retrievable via GET /sessions/{id}/action-items -- including
+    after the index is reloaded from disk (append_session/load_sessions),
+    not just from in-memory state right after the job finishes."""
+    _fake_save_and_mux(monkeypatch)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n\nfollow up")
+
+    def fake_extract_action_items(**kwargs):
+        return [{"text": "Send the follow-up doc", "owner": "Sam", "due": None}]
+
+    monkeypatch.setattr(server_module, "llava_extract_action_items", fake_extract_action_items)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    session_id = job["session_id"]
+
+    # Force a reload from disk, rather than serving a cached in-process copy.
+    from app import sessions_store as sessions_store_module
+
+    sessions_store_module._index_cache.clear()
+
+    action_items_resp = client.get(f"/sessions/{session_id}/action-items")
+    assert action_items_resp.status_code == 200
+    assert action_items_resp.json() == {
+        "action_items": [{"text": "Send the follow-up doc", "owner": "Sam", "due": None}]
+    }
+
+    # notes (the prose fallback content) must be completely unaffected by
+    # the structured extraction succeeding alongside it.
+    sessions_resp = client.get("/sessions")
+    record = next(r for r in sessions_resp.json() if r["id"] == session_id)
+    assert record["notes"] == "# Notes\n\nfollow up"
+
+
+def test_process_falls_back_to_prose_when_action_items_extraction_returns_none(client, monkeypatch):
+    """extract_action_items returning None (both its internal parse
+    attempts failed) must not fail the job or the notes -- the frontend is
+    expected to fall back to the prose notes rendering, signaled here by
+    GET /action-items simply returning null."""
+    _fake_save_and_mux(monkeypatch)
+    monkeypatch.setattr(
+        server_module, "llava_complete", lambda **kwargs: "# Notes\n\n## Action Items\n- someone should follow up"
+    )
+    monkeypatch.setattr(server_module, "llava_extract_action_items", lambda **kwargs: None)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert "Action Items" in job["notes"]
+
+    action_items_resp = client.get(f"/sessions/{job['session_id']}/action-items")
+    assert action_items_resp.status_code == 200
+    assert action_items_resp.json() == {"action_items": None}
+
+
+def test_process_falls_back_to_prose_when_action_items_extraction_raises(client, monkeypatch):
+    """Any exception out of extract_action_items (e.g. Ollama unreachable,
+    a timeout) must be swallowed the same way -- the job still succeeds
+    with its prose notes, and structured data is simply unavailable rather
+    than the whole recording being marked failed."""
+    _fake_save_and_mux(monkeypatch)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n\nfollow up")
+
+    def exploding_extract_action_items(**kwargs):
+        raise httpx.ReadTimeout("timed out waiting for Ollama")
+
+    monkeypatch.setattr(server_module, "llava_extract_action_items", exploding_extract_action_items)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert job["notes"] == "# Notes\n\nfollow up"
+
+    action_items_resp = client.get(f"/sessions/{job['session_id']}/action-items")
+    assert action_items_resp.status_code == 200
+    assert action_items_resp.json() == {"action_items": None}
+
+
+def test_process_stores_empty_action_items_list_when_model_finds_none(client, monkeypatch):
+    """An empty list is a legitimate, successfully-parsed result (the model
+    genuinely found no action items) and must be distinguished from
+    None/unavailable -- both by what's written to disk and what the
+    endpoint returns."""
+    _fake_save_and_mux(monkeypatch)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n\nnothing to do")
+    monkeypatch.setattr(server_module, "llava_extract_action_items", lambda **kwargs: [])
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+
+    action_items_resp = client.get(f"/sessions/{job['session_id']}/action-items")
+    assert action_items_resp.status_code == 200
+    assert action_items_resp.json() == {"action_items": []}
+
+
+def test_process_skips_action_items_extraction_when_summarization_itself_fails(client, monkeypatch):
+    """When llava_complete itself fails, the job already falls back to
+    showing the raw transcript as notes -- action items extraction must not
+    even be attempted against that same (evidently broken) summarization
+    path, and must not be able to turn a "summarization failed" session
+    into one that looks like it has valid structured data."""
+    _fake_save_and_mux(monkeypatch)
+
+    def failing_llava_complete(**kwargs):
+        raise RuntimeError("ollama exploded")
+
+    monkeypatch.setattr(server_module, "llava_complete", failing_llava_complete)
+
+    calls = {"count": 0}
+
+    def counting_extract_action_items(**kwargs):
+        calls["count"] += 1
+        return [{"text": "should never appear", "owner": None, "due": None}]
+
+    monkeypatch.setattr(server_module, "llava_extract_action_items", counting_extract_action_items)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert calls["count"] == 0
+
+    action_items_resp = client.get(f"/sessions/{job['session_id']}/action-items")
+    assert action_items_resp.status_code == 200
+    assert action_items_resp.json() == {"action_items": None}

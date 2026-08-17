@@ -1,7 +1,7 @@
 from pathlib import Path
-import base64, io, os
+import base64, io, json, os, re
 from PIL import Image
-from typing import List
+from typing import List, Optional
 
 from . import ollama_client
 
@@ -128,3 +128,164 @@ def complete(
         Path(out_path).write_text(md, encoding="utf-8")
 
     return md
+
+
+# --- Structured action items -------------------------------------------
+#
+# The chat model used here is a small (~4B-parameter) local model. Unlike
+# `complete()`'s free-form Markdown (where drift just means an odd-looking
+# bullet), a JSON contract can fail outright: the model can return prose
+# wrapped around a JSON object, a code-fenced blob, truncated/invalid JSON,
+# or a shape that's missing the fields we asked for. extract_action_items()
+# below is built around that failure mode explicitly -- see its docstring.
+
+_ACTION_ITEMS_SCHEMA_HINT = (
+    '{"action_items": [{"text": "string, required", '
+    '"owner": "string or null", "due": "string or null"}]}'
+)
+
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def _extract_json_object(text: str) -> Optional[str]:
+    """Best-effort: pull a single {...} JSON object out of `text`, which may
+    have prose or a markdown code fence around it -- a small local model
+    asked for "only JSON" frequently doesn't comply literally."""
+    text = text.strip()
+    fenced = _FENCED_JSON_RE.search(text)
+    if fenced:
+        return fenced.group(1)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start:end + 1]
+    return None
+
+
+def _parse_action_items(raw_content: str) -> Optional[List[dict]]:
+    """Parse the model's action-items response into a list of
+    {"text", "owner", "due"} dicts.
+
+    Returns None (never raises) on ANY shape of failure -- unparseable JSON,
+    JSON that isn't an object, a missing/non-list "action_items" key, or an
+    entry with no usable text -- so the caller can treat "None" uniformly as
+    "this attempt didn't produce usable structured data" regardless of which
+    way the small model's output went wrong.
+    """
+    candidate = _extract_json_object(raw_content)
+    if candidate is None:
+        return None
+    try:
+        data = json.loads(candidate)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    items = data.get("action_items")
+    if not isinstance(items, list):
+        return None
+
+    parsed: List[dict] = []
+    for item in items:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                parsed.append({"text": text, "owner": None, "due": None})
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        owner = item.get("owner")
+        due = item.get("due")
+        parsed.append({
+            "text": text.strip(),
+            "owner": owner.strip() if isinstance(owner, str) and owner.strip() else None,
+            "due": due.strip() if isinstance(due, str) and due.strip() else None,
+        })
+    return parsed
+
+
+def extract_action_items(
+    raw_txt_path,
+    model=DEFAULT_MODEL,
+    max_chars: int = 12000,
+    num_ctx: int = 8192,
+    num_predict: int = 400,
+    temperature: float = 0.2,
+) -> Optional[List[dict]]:
+    """Ask the model for action items as structured JSON.
+
+    A local ~4B model WILL sometimes return malformed JSON, JSON wrapped in
+    prose, or a shape missing the fields asked for -- this is designed
+    around that failure mode explicitly, not just "ask for JSON":
+
+      1. Ask once, using Ollama's JSON mode plus a schema reminder, and try
+         to parse the response.
+      2. On parse failure, retry ONCE with a stricter prompt that calls out
+         the previous failure and demands JSON with no surrounding text.
+      3. If that also fails to parse, return None. The caller (server.py)
+         must treat None as "no structured data for this session" and fall
+         back to the existing prose `notes` rendering -- never surface a
+         broken/empty checklist or an error to the user.
+
+    A transport-level failure (Ollama unreachable, timeout, etc.) is NOT
+    retried here -- it propagates immediately, same as `complete()`, so the
+    caller's single try/except fallback handles it uniformly with every
+    other summarization failure.
+
+    Returns a list of {"text", "owner", "due"} dicts (possibly empty, if the
+    model legitimately found no action items), or None if both attempts
+    failed to produce parseable structured data.
+    """
+    _assert_ollama_up()
+
+    transcript = Path(raw_txt_path).read_text(encoding="utf-8")
+    if max_chars is not None and len(transcript) > max_chars:
+        transcript = transcript[:max_chars] + "\n[transcript truncated]"
+
+    base_system_prompt = (
+        "You are a precise meeting-notes assistant extracting action items "
+        "as JSON.\n"
+        "- Respond with ONLY a single JSON object, no prose before or after, "
+        "no markdown code fences.\n"
+        "- Shape: " + _ACTION_ITEMS_SCHEMA_HINT + "\n"
+        '- If there are no action items, return {"action_items": []}.\n'
+        "- Only set \"owner\" or \"due\" when a name or date is actually "
+        "stated in the transcript -- use null rather than guessing or "
+        "inventing one.\n"
+        "- Do not quote or reproduce the transcript verbatim."
+    )
+    strict_system_prompt = (
+        base_system_prompt + "\n"
+        "- STRICT MODE: your previous response was not valid JSON. Output "
+        "ONLY valid JSON this time -- no markdown code fences, no "
+        "explanation, no leading or trailing text of any kind."
+    )
+
+    user_prompt = (
+        "Extract action items from this transcript as JSON.\n\n"
+        "Transcript (do not quote directly):\n\"\"\"" + transcript + "\"\"\"\n"
+    )
+
+    options = {
+        "temperature": float(temperature),
+        "num_predict": int(num_predict),
+        "num_ctx": int(num_ctx),
+    }
+
+    for system_prompt in (base_system_prompt, strict_system_prompt):
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        resp = _client.chat(
+            model=model, messages=messages, options=options, stream=False, format="json"
+        )
+        content = resp["message"]["content"].strip()
+        parsed = _parse_action_items(content)
+        if parsed is not None:
+            return parsed
+
+    return None
