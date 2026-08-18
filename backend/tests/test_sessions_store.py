@@ -1124,3 +1124,62 @@ def test_write_transcript_segments_creates_session_dir_if_missing(tmp_path: Path
     write_transcript_segments(session_dir, [])
 
     assert (session_dir / "transcript.json").exists()
+
+
+# ---- speaker name overrides (Track B: rename SPEAKER_00 -> a real name) ----
+
+def test_write_and_load_speaker_names_round_trip(tmp_path: Path):
+    from app.sessions_store import write_speaker_names, load_speaker_names
+
+    session_dir = tmp_path / "sess-1"
+    names = {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}
+
+    write_speaker_names(session_dir, names)
+
+    assert load_speaker_names(session_dir) == names
+
+
+def test_load_speaker_names_missing_file_returns_empty_dict(tmp_path: Path):
+    from app.sessions_store import load_speaker_names
+
+    assert load_speaker_names(tmp_path / "sess-1") == {}
+
+
+def test_load_speaker_names_tolerates_corrupt_file(tmp_path: Path):
+    from app.sessions_store import load_speaker_names
+
+    session_dir = tmp_path / "sess-1"
+    session_dir.mkdir()
+    (session_dir / "speaker_names.json").write_text("{not valid json", encoding="utf-8")
+
+    assert load_speaker_names(session_dir) == {}
+
+
+def test_load_speaker_names_tolerates_non_dict_json(tmp_path: Path):
+    from app.sessions_store import load_speaker_names
+
+    session_dir = tmp_path / "sess-1"
+    session_dir.mkdir()
+    (session_dir / "speaker_names.json").write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+
+    assert load_speaker_names(session_dir) == {}
+
+
+def test_write_speaker_names_merges_into_existing_map(tmp_path: Path):
+    from app.sessions_store import write_speaker_names, load_speaker_names
+
+    session_dir = tmp_path / "sess-1"
+    write_speaker_names(session_dir, {"SPEAKER_00": "Alice"})
+    write_speaker_names(session_dir, {"SPEAKER_01": "Bob"})
+
+    assert load_speaker_names(session_dir) == {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}
+
+
+def test_write_speaker_names_no_leftover_tmp_file(tmp_path: Path):
+    from app.sessions_store import write_speaker_names
+
+    session_dir = tmp_path / "sess-1"
+    write_speaker_names(session_dir, {"SPEAKER_00": "Alice"})
+
+    assert not (session_dir / "speaker_names.json.tmp").exists()
+    assert (session_dir / "speaker_names.json").exists()

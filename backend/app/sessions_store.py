@@ -7,7 +7,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 SESSIONS_INDEX_FILENAME = "sessions_index.json"
 
@@ -653,3 +653,46 @@ def sweep_stale_partial_mux_files(store_dir: Path, max_age_seconds: int = 3600) 
         except OSError:
             continue
     return removed
+
+
+# Track B: user-editable overrides mapping a raw pyannote label
+# ("SPEAKER_00") to a real name ("Alice"). Kept as its own small file,
+# resolved against transcript.json at the API boundary
+# (GET /sessions/{id}/transcript) rather than mutating the raw diarization
+# output -- keeps transcript.json immutable/re-mappable if a name is
+# corrected twice.
+SPEAKER_NAMES_FILENAME = "speaker_names.json"
+
+
+def load_speaker_names(session_dir: Path) -> Dict[str, str]:
+    """Read a session's speaker_names.json. Missing, corrupt, or
+    malformed-shape file -> {} (same resilience contract as
+    load_transcript_segments)."""
+    path = session_dir / SPEAKER_NAMES_FILENAME
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError, UnicodeDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def write_speaker_names(session_dir: Path, updates: Dict[str, str]) -> None:
+    """Merge `updates` into a session's speaker name map and atomically
+    write the result -- a partial PATCH (renaming one speaker) must not
+    clobber names already set for other speakers in the same session.
+
+    Same fsync-before-replace pattern as write_transcript_segments.
+    """
+    session_dir.mkdir(parents=True, exist_ok=True)
+    merged = {**load_speaker_names(session_dir), **updates}
+    final_path = session_dir / SPEAKER_NAMES_FILENAME
+    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(merged, ensure_ascii=False, indent=2))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, final_path)

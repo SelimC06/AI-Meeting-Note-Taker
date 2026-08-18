@@ -16,6 +16,8 @@ const baseSettings: Settings = {
   storage_dir: "C:\\Users\\test\\recordings",
   ollama_chat_model: "gemma3:4b",
   custom_vocabulary: "",
+  advanced_diarization_enabled: false,
+  huggingface_token: "",
   whisper_model_choices: [
     { value: "tiny.en", label: "Tiny", description: "Fastest, lower accuracy" },
     { value: "base.en", label: "Base", description: "Balanced (default)" },
@@ -315,4 +317,68 @@ it("shows an error and keeps the draft text when saving the vocabulary fails", a
 
   expect(await screen.findByText("network down")).toBeInTheDocument();
   expect(textarea).toHaveValue("Kestrel");
+});
+
+it("shows advanced diarization off by default with no token warning", async () => {
+  render(<SettingsPage active />);
+
+  expect(await screen.findByRole("button", { name: "Off" })).toHaveClass("bg-signal");
+  expect(screen.queryByText(/HuggingFace access token is required/i)).not.toBeInTheDocument();
+});
+
+it("enabling advanced diarization persists the setting and warns when no token is set", async () => {
+  vi.mocked(updateSettings).mockResolvedValue({
+    ...baseSettings,
+    advanced_diarization_enabled: true,
+  });
+
+  render(<SettingsPage active />);
+  await screen.findByRole("button", { name: "Off" });
+  fireEvent.click(screen.getByRole("button", { name: "On" }));
+
+  await waitFor(() => {
+    expect(updateSettings).toHaveBeenCalledWith({ advanced_diarization_enabled: true });
+  });
+  expect(await screen.findByText(/HuggingFace access token is required/i)).toBeInTheDocument();
+});
+
+it("rolls back the diarization toggle and shows an error when the save fails", async () => {
+  vi.mocked(updateSettings).mockRejectedValue(new Error("network down"));
+
+  render(<SettingsPage active />);
+  await screen.findByRole("button", { name: "Off" });
+  fireEvent.click(screen.getByRole("button", { name: "On" }));
+
+  expect(await screen.findByText("network down")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Off" })).toHaveClass("bg-signal");
+});
+
+it("saves an edited HuggingFace token", async () => {
+  vi.mocked(updateSettings).mockResolvedValue({
+    ...baseSettings,
+    huggingface_token: "hf_abc123",
+  });
+
+  render(<SettingsPage active />);
+
+  const tokenInput = await screen.findByLabelText(/huggingface access token/i);
+  fireEvent.change(tokenInput, { target: { value: "hf_abc123" } });
+  fireEvent.click(screen.getByRole("button", { name: /save token/i }));
+
+  await waitFor(() => {
+    expect(updateSettings).toHaveBeenCalledWith({ huggingface_token: "hf_abc123" });
+  });
+});
+
+it("does not warn about a missing token once diarization is enabled and a token is already saved", async () => {
+  vi.mocked(getSettings).mockResolvedValue({
+    ...baseSettings,
+    advanced_diarization_enabled: true,
+    huggingface_token: "hf_existing",
+  });
+
+  render(<SettingsPage active />);
+
+  await screen.findByRole("button", { name: "On" });
+  expect(screen.queryByText(/HuggingFace access token is required/i)).not.toBeInTheDocument();
 });

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import {
   getSessionActionItems,
   getSessionTranscript,
+  updateSpeakerNames,
   type ActionItem,
   type Session,
   type TranscriptSegment,
@@ -18,14 +19,84 @@ const viewButtonClass = (isSelected: boolean) =>
   "px-1.5 py-0.5 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
   (isSelected ? "bg-signal text-void" : "text-dim hover:text-phosphor");
 
+// Deterministic label -> color, so a speaker keeps the same color across
+// the whole transcript without a fixed palette running out past 2-3
+// speakers. "You" is intentionally not run through this -- it always stays
+// the primary phosphor color for continuity with Track A's original
+// styling. Keyed on raw_speaker (not the resolved display name) so a
+// speaker's color doesn't change just because they were renamed.
+function speakerColor(rawLabel: string): string {
+  let hash = 0;
+  for (let i = 0; i < rawLabel.length; i++) {
+    hash = (hash * 31 + rawLabel.charCodeAt(i)) >>> 0;
+  }
+  const hue = hash % 360;
+  return `hsl(${hue}, 45%, 72%)`;
+}
+
+const SpeakerLabel: React.FC<{
+  displayName: string;
+  rawLabel: string;
+  isYou: boolean;
+  onRename: (rawLabel: string, newName: string) => void;
+}> = ({ displayName, rawLabel, isYou, onRename }) => {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(displayName);
+
+  if (isYou) {
+    return <span className="text-phosphor">{displayName}</span>;
+  }
+
+  if (editing) {
+    const commit = () => {
+      setEditing(false);
+      const trimmed = draft.trim();
+      if (trimmed && trimmed !== displayName) onRename(rawLabel, trimmed);
+    };
+    return (
+      <input
+        aria-label={`New name for ${rawLabel}`}
+        className="bg-void text-phosphor border border-line rounded-sm px-1 text-xs w-24 focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+        value={draft}
+        autoFocus
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit();
+          if (e.key === "Escape") {
+            setDraft(displayName);
+            setEditing(false);
+          }
+        }}
+      />
+    );
+  }
+
+  return (
+    <button
+      aria-label={`Rename ${rawLabel}`}
+      onClick={() => {
+        setDraft(displayName);
+        setEditing(true);
+      }}
+      className="hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-signal rounded-sm"
+      style={{ color: speakerColor(rawLabel) }}
+    >
+      {displayName}
+    </button>
+  );
+};
+
 const TranscriptView: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   const [segments, setSegments] = useState<TranscriptSegment[] | null>(null);
   const [error, setError] = useState(false);
+  const [nameOverrides, setNameOverrides] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let cancelled = false;
     setSegments(null);
     setError(false);
+    setNameOverrides({});
     getSessionTranscript(sessionId)
       .then((result) => {
         if (!cancelled) setSegments(result);
@@ -37,6 +108,17 @@ const TranscriptView: React.FC<{ sessionId: string }> = ({ sessionId }) => {
       cancelled = true;
     };
   }, [sessionId]);
+
+  const handleRename = (rawLabel: string, newName: string) => {
+    // Optimistic: apply immediately so every segment sharing this raw label
+    // updates together, without waiting on the round trip.
+    setNameOverrides((prev) => ({ ...prev, [rawLabel]: newName }));
+    updateSpeakerNames(sessionId, { [rawLabel]: newName }).catch(() => {
+      // Best-effort -- the rename didn't persist, but there's nothing
+      // actionable to show the user beyond leaving the optimistic label as
+      // already applied; a reload will reflect the real saved state.
+    });
+  };
 
   if (error) {
     return (
@@ -61,15 +143,23 @@ const TranscriptView: React.FC<{ sessionId: string }> = ({ sessionId }) => {
 
   return (
     <div className="flex-1 overflow-y-auto px-3 py-2 text-xs space-y-2">
-      {segments.map((seg, i) => (
-        <div key={i} className={seg.speaker === "You" ? "pl-0" : "pl-4"}>
-          <span className={seg.speaker === "You" ? "text-phosphor" : "text-dim"}>
-            {seg.speaker ?? "Unknown"}
-          </span>
-          <span className="text-dim">: </span>
-          <span className="text-phosphor">{seg.text}</span>
-        </div>
-      ))}
+      {segments.map((seg, i) => {
+        const rawLabel = seg.raw_speaker ?? seg.speaker ?? "Unknown";
+        const displayName = nameOverrides[rawLabel] ?? seg.speaker ?? "Unknown";
+        const isYou = rawLabel === "You";
+        return (
+          <div key={i} className={isYou ? "pl-0" : "pl-4"}>
+            <SpeakerLabel
+              displayName={displayName}
+              rawLabel={rawLabel}
+              isYou={isYou}
+              onRename={handleRename}
+            />
+            <span className="text-dim">: </span>
+            <span className="text-phosphor">{seg.text}</span>
+          </div>
+        );
+      })}
     </div>
   );
 };

@@ -42,6 +42,10 @@ export default function SettingsPage({ active }: { active: boolean }) {
   const [vocabularyDraft, setVocabularyDraft] = useState("");
   const [vocabularySaveError, setVocabularySaveError] = useState<string | null>(null);
 
+  const [diarizationError, setDiarizationError] = useState<string | null>(null);
+  const [tokenDraft, setTokenDraft] = useState("");
+  const [tokenSaveError, setTokenSaveError] = useState<string | null>(null);
+
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
   const [emptyingTrash, setEmptyingTrash] = useState(false);
@@ -60,6 +64,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
         if (!cancelled) {
           setSettings(s);
           setVocabularyDraft(s.custom_vocabulary);
+          setTokenDraft(s.huggingface_token);
         }
       })
       .catch((e) => {
@@ -162,6 +167,30 @@ export default function SettingsPage({ active }: { active: boolean }) {
       setVocabularyDraft(updated.custom_vocabulary);
     } catch (e) {
       setVocabularySaveError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleDiarizationToggle = async (value: boolean) => {
+    const prev = settings;
+    setSettings((s) => (s ? { ...s, advanced_diarization_enabled: value } : s));
+    setDiarizationError(null);
+    try {
+      const updated = await updateSettings({ advanced_diarization_enabled: value });
+      setSettings(updated);
+    } catch (e) {
+      setSettings(prev);
+      setDiarizationError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleSaveToken = async () => {
+    setTokenSaveError(null);
+    try {
+      const updated = await updateSettings({ huggingface_token: tokenDraft });
+      setSettings(updated);
+      setTokenDraft(updated.huggingface_token);
+    } catch (e) {
+      setTokenSaveError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -384,6 +413,61 @@ export default function SettingsPage({ active }: { active: boolean }) {
         {vocabularySaveError && (
           <p className="text-xs text-red-400">{vocabularySaveError}</p>
         )}
+      </div>
+
+      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
+        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+          advanced diarization
+        </h2>
+        <p className="text-xs text-dim">
+          Split multiple remote participants into individually labeled speakers instead of one
+          generic "Others" bucket. Optional -- downloads a larger model on first use and requires
+          a free HuggingFace account.
+        </p>
+        <div className="flex gap-1">
+          {[
+            { value: false, label: "Off" },
+            { value: true, label: "On" },
+          ].map((opt) => (
+            <button
+              key={opt.label}
+              onClick={() => handleDiarizationToggle(opt.value)}
+              className={
+                "px-2 py-1 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
+                (settings.advanced_diarization_enabled === opt.value
+                  ? "bg-signal text-void"
+                  : "text-dim hover:text-phosphor border border-line")
+              }
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        {diarizationError && <p className="text-xs text-red-400">{diarizationError}</p>}
+        {settings.advanced_diarization_enabled && !settings.huggingface_token && (
+          <p className="text-xs text-red-400">
+            A HuggingFace access token is required for diarization to actually run -- add one
+            below.
+          </p>
+        )}
+        <label htmlFor="huggingface-token" className="text-xs text-dim">
+          HuggingFace access token
+        </label>
+        <input
+          id="huggingface-token"
+          type="password"
+          value={tokenDraft}
+          onChange={(e) => setTokenDraft(e.target.value)}
+          placeholder="hf_..."
+          className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+        />
+        <button
+          onClick={handleSaveToken}
+          className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+        >
+          Save token
+        </button>
+        {tokenSaveError && <p className="text-xs text-red-400">{tokenSaveError}</p>}
       </div>
 
       <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">

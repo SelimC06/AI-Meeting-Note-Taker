@@ -83,3 +83,117 @@ def test_merge_track_segments_defaults_words_to_empty_list_when_absent():
     result = merge_track_segments(mic, [])
 
     assert result[0]["words"] == []
+
+
+# ---- align_speaker_turns (Track B: n-party pyannote alignment) -------------
+
+def test_align_speaker_turns_assigns_whole_segment_to_single_overlapping_turn():
+    from app.diarization import align_speaker_turns
+
+    segments = [{"start": 0.0, "end": 2.0, "text": "hello everyone", "words": []}]
+    turns = [("SPEAKER_00", 0.0, 2.0)]
+
+    result = align_speaker_turns(segments, turns)
+
+    assert result == [
+        {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "text": "hello everyone", "words": []}
+    ]
+
+
+def test_align_speaker_turns_picks_the_turn_with_greatest_overlap():
+    from app.diarization import align_speaker_turns
+
+    # Segment mostly overlaps SPEAKER_01's turn (1.8s) vs SPEAKER_00's (0.2s).
+    segments = [{"start": 0.8, "end": 3.0, "text": "so anyway", "words": []}]
+    turns = [("SPEAKER_00", 0.0, 1.0), ("SPEAKER_01", 1.0, 3.0)]
+
+    result = align_speaker_turns(segments, turns)
+
+    assert result[0]["speaker"] == "SPEAKER_01"
+
+
+def test_align_speaker_turns_falls_back_to_none_when_no_turn_overlaps():
+    from app.diarization import align_speaker_turns
+
+    segments = [{"start": 10.0, "end": 11.0, "text": "silence gap", "words": []}]
+    turns = [("SPEAKER_00", 0.0, 1.0)]
+
+    result = align_speaker_turns(segments, turns)
+
+    assert result == [
+        {"start": 10.0, "end": 11.0, "speaker": None, "text": "silence gap", "words": []}
+    ]
+
+
+def test_align_speaker_turns_handles_no_turns_at_all():
+    from app.diarization import align_speaker_turns
+
+    segments = [{"start": 0.0, "end": 1.0, "text": "hi", "words": []}]
+
+    assert align_speaker_turns(segments, []) == [
+        {"start": 0.0, "end": 1.0, "speaker": None, "text": "hi", "words": []}
+    ]
+    assert align_speaker_turns([], [("SPEAKER_00", 0.0, 1.0)]) == []
+
+
+def test_align_speaker_turns_splits_a_segment_that_straddles_a_speaker_change():
+    # A single Whisper segment spanning a mid-sentence speaker handoff must
+    # split at the word boundary closest to the turn change, not get
+    # assigned wholesale to one speaker -- this is why word_timestamps are
+    # carried through merge_track_segments at all.
+    from app.diarization import align_speaker_turns
+
+    segments = [{
+        "start": 0.0, "end": 2.0, "text": "go ahead no you go",
+        "words": [
+            {"word": "go", "start": 0.0, "end": 0.4, "probability": 0.9},
+            {"word": "ahead", "start": 0.4, "end": 0.9, "probability": 0.9},
+            {"word": "no", "start": 1.0, "end": 1.3, "probability": 0.9},
+            {"word": "you", "start": 1.3, "end": 1.6, "probability": 0.9},
+            {"word": "go", "start": 1.6, "end": 2.0, "probability": 0.9},
+        ],
+    }]
+    turns = [("SPEAKER_00", 0.0, 1.0), ("SPEAKER_01", 1.0, 2.0)]
+
+    result = align_speaker_turns(segments, turns)
+
+    assert result == [
+        {
+            "start": 0.0, "end": 0.9, "speaker": "SPEAKER_00", "text": "go ahead",
+            "words": segments[0]["words"][:2],
+        },
+        {
+            "start": 1.0, "end": 2.0, "speaker": "SPEAKER_01", "text": "no you go",
+            "words": segments[0]["words"][2:],
+        },
+    ]
+
+
+def test_align_speaker_turns_falls_back_to_majority_overlap_without_word_timestamps():
+    # A segment straddling two turns but with no word-level timestamps
+    # (words == []) can't be split -- must fall back to majority-overlap
+    # over the whole segment instead of crashing or losing text.
+    from app.diarization import align_speaker_turns
+
+    segments = [{"start": 0.0, "end": 2.0, "text": "go ahead no you go", "words": []}]
+    turns = [("SPEAKER_00", 0.0, 0.5), ("SPEAKER_01", 0.5, 2.0)]
+
+    result = align_speaker_turns(segments, turns)
+
+    assert result == [
+        {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_01", "text": "go ahead no you go", "words": []}
+    ]
+
+
+def test_align_speaker_turns_orders_multiple_segments_by_start_time():
+    from app.diarization import align_speaker_turns
+
+    segments = [
+        {"start": 5.0, "end": 6.0, "text": "second", "words": []},
+        {"start": 0.0, "end": 1.0, "text": "first", "words": []},
+    ]
+    turns = [("SPEAKER_00", 0.0, 1.0), ("SPEAKER_01", 5.0, 6.0)]
+
+    result = align_speaker_turns(segments, turns)
+
+    assert [r["text"] for r in result] == ["first", "second"]

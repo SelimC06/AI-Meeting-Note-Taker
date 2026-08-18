@@ -1,0 +1,13 @@
+# Optional: Track B advanced diarization (true n-party speaker splitting).
+# Not part of the base install (requirements.txt) -- pulls in torch, which
+# meaningfully increases install size and first-run footprint. Only install
+# this if you plan to enable "Advanced diarization" in Settings.
+#
+#   pip install -r requirements-diarization.txt
+#
+# Downloading pyannote/speaker-diarization-community-1's model weights also
+# requires a free HuggingFace account and access token (see Settings ->
+# Advanced diarization for the one-time setup step); see
+# docs/Core pipeline quality fix/06-speaker-diarization-track-b.md for why.
+torch
+pyannote.audio

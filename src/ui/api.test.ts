@@ -1,5 +1,11 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { getSessionTranscript, streamChatReply, streamGraphChatReply, type GraphChatEvent } from "./api";
+import {
+  getSessionTranscript,
+  updateSpeakerNames,
+  streamChatReply,
+  streamGraphChatReply,
+  type GraphChatEvent,
+} from "./api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -231,5 +237,36 @@ it("getSessionTranscript throws on a failed request", async () => {
 
   await expect(getSessionTranscript("missing")).rejects.toThrow(
     "Failed to load transcript: 404"
+  );
+});
+
+it("getSessionTranscript passes through arbitrary speaker labels (Track B: SPEAKER_N)", async () => {
+  const segments = [{ start: 0, end: 1, speaker: "SPEAKER_00", text: "hi" }];
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ segments }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const result = await getSessionTranscript("s1");
+  expect(result).toEqual(segments);
+});
+
+it("updateSpeakerNames PATCHes the rename endpoint and returns the merged map", async () => {
+  const speaker_names = { SPEAKER_00: "Alice" };
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ speaker_names }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const result = await updateSpeakerNames("s1", { SPEAKER_00: "Alice" });
+
+  expect(result).toEqual(speaker_names);
+  const [url, options] = fetchMock.mock.calls[0];
+  expect(url).toContain("/sessions/s1/speaker-names");
+  expect(options.method).toBe("PATCH");
+  expect(JSON.parse(options.body)).toEqual({ names: { SPEAKER_00: "Alice" } });
+});
+
+it("updateSpeakerNames throws on a failed request", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 404 })));
+
+  await expect(updateSpeakerNames("missing", { SPEAKER_00: "Alice" })).rejects.toThrow(
+    "Failed to update speaker names: 404"
   );
 });

@@ -69,6 +69,49 @@ it("fetches and renders speaker-tagged segments when switching to the Transcript
   expect(screen.getAllByText("Others")).not.toHaveLength(0);
 });
 
+it("renders three or more distinct speakers (Track B n-party)", async () => {
+  vi.spyOn(api, "getSessionTranscript").mockResolvedValue([
+    { start: 0, end: 1, speaker: "You", text: "welcome everyone", raw_speaker: "You" },
+    { start: 1, end: 2, speaker: "SPEAKER_00", text: "thanks for having us", raw_speaker: "SPEAKER_00" },
+    { start: 2, end: 3, speaker: "SPEAKER_01", text: "glad to be here", raw_speaker: "SPEAKER_01" },
+  ]);
+
+  render(<NotesModal session={session} onClose={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: "Transcript" }));
+
+  await waitFor(() => {
+    expect(screen.getByText("welcome everyone")).toBeInTheDocument();
+  });
+  expect(screen.getByText("thanks for having us")).toBeInTheDocument();
+  expect(screen.getByText("glad to be here")).toBeInTheDocument();
+  expect(screen.getByText("SPEAKER_00")).toBeInTheDocument();
+  expect(screen.getByText("SPEAKER_01")).toBeInTheDocument();
+});
+
+it("renames a speaker label and applies the new name to every matching segment", async () => {
+  vi.spyOn(api, "getSessionTranscript").mockResolvedValue([
+    { start: 0, end: 1, speaker: "SPEAKER_00", text: "hello", raw_speaker: "SPEAKER_00" },
+    { start: 2, end: 3, speaker: "SPEAKER_00", text: "how are you", raw_speaker: "SPEAKER_00" },
+  ]);
+  const updateSpy = vi.spyOn(api, "updateSpeakerNames").mockResolvedValue({ SPEAKER_00: "Alice" });
+
+  render(<NotesModal session={session} onClose={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: "Transcript" }));
+
+  await waitFor(() => expect(screen.getByText("hello")).toBeInTheDocument());
+
+  fireEvent.click(screen.getAllByRole("button", { name: "Rename SPEAKER_00" })[0]);
+  const input = screen.getByRole("textbox", { name: "New name for SPEAKER_00" });
+  fireEvent.change(input, { target: { value: "Alice" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  await waitFor(() => {
+    expect(updateSpy).toHaveBeenCalledWith(session.id, { SPEAKER_00: "Alice" });
+  });
+  expect(screen.getAllByText("Alice")).toHaveLength(2);
+  expect(screen.queryByText("SPEAKER_00")).not.toBeInTheDocument();
+});
+
 it("shows a fallback message when no structured transcript is available", async () => {
   vi.spyOn(api, "getSessionTranscript").mockResolvedValue([]);
 

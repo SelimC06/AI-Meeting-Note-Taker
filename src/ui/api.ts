@@ -224,6 +224,11 @@ export type Settings = {
   storage_dir: string;
   ollama_chat_model: string;
   custom_vocabulary: string;
+  // Track B: true n-party diarization via pyannote. Off by default -- an
+  // optional, heavier feature that requires a HuggingFace access token to
+  // download the (gated) model weights.
+  advanced_diarization_enabled: boolean;
+  huggingface_token: string;
   whisper_model_choices: WhisperModelChoice[];
 };
 
@@ -236,7 +241,17 @@ export async function getSettings(): Promise<Settings> {
 }
 
 export async function updateSettings(
-  partial: Partial<Pick<Settings, "whisper_model" | "storage_dir" | "ollama_chat_model" | "custom_vocabulary">>
+  partial: Partial<
+    Pick<
+      Settings,
+      | "whisper_model"
+      | "storage_dir"
+      | "ollama_chat_model"
+      | "custom_vocabulary"
+      | "advanced_diarization_enabled"
+      | "huggingface_token"
+    >
+  >
 ): Promise<Settings> {
   const resp = await fetch(`${BACKEND_URL}/settings`, {
     method: "PATCH",
@@ -304,14 +319,21 @@ export async function deleteSessionForever(id: string): Promise<void> {
   }
 }
 
-// Speaker is only "You"/"Others" (Track A's mic-vs-system 2-party split) --
-// null when no structured transcript was produced (e.g. only one of the
-// mic/system tracks was captured, so the split couldn't run).
+// Speaker is "You"/"Others" (Track A's mic-vs-system 2-party split) by
+// default, a raw pyannote label like "SPEAKER_00" (or a user-renamed value,
+// already resolved server-side) once Track B diarization is enabled, or
+// null when no structured transcript was produced at all (e.g. only one of
+// the mic/system tracks was captured and diarization wasn't enabled, so
+// nothing could label it).
 export type TranscriptSegment = {
   start: number;
   end: number;
-  speaker: "You" | "Others" | null;
+  speaker: string | null;
   text: string;
+  // The original, stable label (e.g. "SPEAKER_00") before any user rename
+  // was resolved into `speaker` -- needed to target a second rename at the
+  // right key, since `speaker` alone can't be reversed back to it.
+  raw_speaker?: string | null;
 };
 
 export async function getSessionTranscript(id: string): Promise<TranscriptSegment[]> {
@@ -321,6 +343,26 @@ export async function getSessionTranscript(id: string): Promise<TranscriptSegmen
   }
   const data = (await resp.json()) as { segments: TranscriptSegment[] };
   return data.segments;
+}
+
+// Maps a raw speaker label (e.g. "SPEAKER_00") to a user-chosen display
+// name. Partial: only the labels included in `names` are touched, existing
+// mappings for other labels in the same session are preserved (the backend
+// merges rather than replaces).
+export async function updateSpeakerNames(
+  id: string,
+  names: Record<string, string>
+): Promise<Record<string, string>> {
+  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/speaker-names`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ names }),
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to update speaker names: ${resp.status}`);
+  }
+  const data = (await resp.json()) as { speaker_names: Record<string, string> };
+  return data.speaker_names;
 }
 
 // null action_items means structured extraction is unavailable for this

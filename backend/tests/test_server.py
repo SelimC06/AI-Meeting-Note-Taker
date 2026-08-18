@@ -1620,6 +1620,37 @@ def test_patch_settings_rejects_invalid_whisper_model(client: TestClient):
     assert resp.status_code == 400
 
 
+def test_get_settings_includes_advanced_diarization_fields(client: TestClient):
+    resp = client.get("/settings")
+    body = resp.json()
+    assert body["advanced_diarization_enabled"] is False
+    assert body["huggingface_token"] == ""
+
+
+def test_patch_settings_updates_advanced_diarization_enabled(client: TestClient):
+    resp = client.patch("/settings", json={"advanced_diarization_enabled": True})
+    assert resp.status_code == 200
+    assert resp.json()["advanced_diarization_enabled"] is True
+
+    import app.server as server_module
+    assert server_module.ADVANCED_DIARIZATION_ENABLED is True
+
+    resp2 = client.get("/settings")
+    assert resp2.json()["advanced_diarization_enabled"] is True
+
+
+def test_patch_settings_updates_huggingface_token(client: TestClient):
+    resp = client.patch("/settings", json={"huggingface_token": "hf_abc123"})
+    assert resp.status_code == 200
+    assert resp.json()["huggingface_token"] == "hf_abc123"
+
+    import app.server as server_module
+    assert server_module.HUGGINGFACE_TOKEN == "hf_abc123"
+
+    resp2 = client.get("/settings")
+    assert resp2.json()["huggingface_token"] == "hf_abc123"
+
+
 def test_patch_settings_updates_ollama_chat_model(client: TestClient):
     resp = client.patch("/settings", json={"ollama_chat_model": "llama3.1:8b"})
     assert resp.status_code == 200
@@ -3081,12 +3112,172 @@ def test_process_transcribes_mic_and_system_tracks_independently_when_both_prese
     transcript_resp = client.get(f"/sessions/{session_id}/transcript")
     assert transcript_resp.status_code == 200
     assert transcript_resp.json()["segments"] == [
-        {"start": 0.0, "end": 1.0, "speaker": "You", "text": "yes exactly", "words": []},
-        {"start": 2.0, "end": 3.0, "speaker": "Others", "text": "hello everyone", "words": []},
+        {"start": 0.0, "end": 1.0, "speaker": "You", "text": "yes exactly", "words": [], "raw_speaker": "You"},
+        {"start": 2.0, "end": 3.0, "speaker": "Others", "text": "hello everyone", "words": [], "raw_speaker": "Others"},
     ]
 
     raw_txt = Path(captured["raw_txt_path"]).read_text(encoding="utf-8")
     assert raw_txt == "You: yes exactly\nOthers: hello everyone"
+
+
+# ---- Track B: pyannote n-party diarization refinement ----------------------
+
+def _fake_save_upload(dst_dir, uf, name):
+    out = dst_dir / name
+    out.write_bytes(b"fake bytes")
+    return out
+
+
+def _fake_mux(video, audio, out_path):
+    out_path.write_bytes(b"fake final video")
+    return out_path
+
+
+def _post_dual_track(client, monkeypatch, fake_transcribe_wav):
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", _fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+    monkeypatch.setattr(server_module, "transcribe_wav", fake_transcribe_wav)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    assert resp.status_code == 202
+    return wait_for_job(client, resp.json()["job_id"])
+
+
+def _two_speaker_system_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+    name = Path(wav_path).name
+    if name == "mic.wav":
+        return [{"start": 0.0, "end": 1.0, "text": "yes exactly"}]
+    return [
+        {"start": 2.0, "end": 3.0, "text": "hello everyone"},
+        {"start": 4.0, "end": 5.0, "text": "hi there"},
+    ]
+
+
+def test_process_refines_others_with_pyannote_when_diarization_enabled(client, monkeypatch):
+    client.patch("/settings", json={"advanced_diarization_enabled": True, "huggingface_token": "tok"})
+
+    calls = []
+
+    def fake_diarize(wav_path, token):
+        calls.append((wav_path, token))
+        return [("SPEAKER_00", 2.0, 3.0), ("SPEAKER_01", 4.0, 5.0)]
+
+    monkeypatch.setattr(server_module, "pyannote_diarize", fake_diarize)
+
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    assert job["status"] == "done"
+
+    assert len(calls) == 1
+    assert Path(calls[0][0]).name == "system.wav"
+    assert calls[0][1] == "tok"
+
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    speakers = {s["speaker"] for s in segments}
+    assert speakers == {"You", "SPEAKER_00", "SPEAKER_01"}
+
+
+def test_process_skips_pyannote_diarization_when_disabled_by_default(client, monkeypatch):
+    def exploding_diarize(wav_path, token):
+        raise AssertionError("pyannote_diarize should not run when the setting is off")
+
+    monkeypatch.setattr(server_module, "pyannote_diarize", exploding_diarize)
+
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    assert job["status"] == "done"
+
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    assert {s["speaker"] for s in segments} == {"You", "Others"}
+
+
+def test_process_falls_back_to_track_a_output_when_pyannote_diarization_raises(client, monkeypatch):
+    client.patch("/settings", json={"advanced_diarization_enabled": True, "huggingface_token": "tok"})
+
+    def failing_diarize(wav_path, token):
+        raise RuntimeError("pyannote exploded")
+
+    monkeypatch.setattr(server_module, "pyannote_diarize", failing_diarize)
+
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    assert job["status"] == "done"
+
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    assert {s["speaker"] for s in segments} == {"You", "Others"}
+
+
+def test_process_does_not_call_pyannote_without_a_configured_token(client, monkeypatch):
+    client.patch("/settings", json={"advanced_diarization_enabled": True})
+
+    def exploding_diarize(wav_path, token):
+        raise AssertionError("pyannote_diarize should not run without a token configured")
+
+    monkeypatch.setattr(server_module, "pyannote_diarize", exploding_diarize)
+
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    assert job["status"] == "done"
+
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    assert {s["speaker"] for s in segments} == {"You", "Others"}
+
+
+def test_process_diarizes_single_track_fallback_when_enabled(client, monkeypatch):
+    """Only one of mic/system was captured -- Track A's dual-track split
+    can't run, but Track B can still diarize the single available track
+    directly when the setting is on."""
+    client.patch("/settings", json={"advanced_diarization_enabled": True, "huggingface_token": "tok"})
+
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", _fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+
+    def fake_llava_complete(**kwargs):
+        return Path(kwargs["raw_txt_path"]).read_text(encoding="utf-8")
+
+    monkeypatch.setattr(server_module, "llava_complete", fake_llava_complete)
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        out_txt = Path(kwargs["transcript_prefix"]).with_suffix(".txt")
+        out_txt.write_text("solo track transcript", encoding="utf-8")
+        return str(out_txt), None
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe
+    )
+
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+        return [
+            {"start": 0.0, "end": 1.0, "text": "hello"},
+            {"start": 2.0, "end": 3.0, "text": "hi back"},
+        ]
+
+    monkeypatch.setattr(server_module, "transcribe_wav", fake_transcribe_wav)
+
+    def fake_diarize(wav_path, token):
+        return [("SPEAKER_00", 0.0, 1.0), ("SPEAKER_01", 2.0, 3.0)]
+
+    monkeypatch.setattr(server_module, "pyannote_diarize", fake_diarize)
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert "solo track transcript" in job["notes"]
+
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    assert {s["speaker"] for s in segments} == {"SPEAKER_00", "SPEAKER_01"}
 
 
 def test_process_falls_back_to_single_track_transcript_when_only_mic_present(client, monkeypatch):
@@ -3231,6 +3422,74 @@ def test_get_session_transcript_returns_empty_list_when_no_transcript_json(clien
     transcript_resp = client.get(f"/sessions/{job['session_id']}/transcript")
     assert transcript_resp.status_code == 200
     assert transcript_resp.json() == {"segments": []}
+
+
+def test_get_session_transcript_resolves_speaker_names(client, monkeypatch):
+    _fake_save_and_mux(monkeypatch)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
+
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+        name = Path(wav_path).name
+        if name == "mic.wav":
+            return [{"start": 0.0, "end": 1.0, "text": "hi"}]
+        return [{"start": 2.0, "end": 3.0, "text": "hello"}]
+
+    monkeypatch.setattr(server_module, "transcribe_wav", fake_transcribe_wav)
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    session_id = job["session_id"]
+
+    # "Others" here stands in for a raw pyannote label in the Track B case --
+    # the resolution logic itself doesn't care what the raw label looks like.
+    rename_resp = client.patch(
+        f"/sessions/{session_id}/speaker-names", json={"names": {"Others": "Alice"}}
+    )
+    assert rename_resp.status_code == 200
+
+    transcript_resp = client.get(f"/sessions/{session_id}/transcript")
+    segments = transcript_resp.json()["segments"]
+    speakers = {s["speaker"] for s in segments}
+    assert speakers == {"You", "Alice"}
+
+    # raw_speaker must stay the original, stable label even after a rename --
+    # the frontend needs it to target a SECOND rename (e.g. "Alice" -> a
+    # corrected spelling) at the right key, since it can't reconstruct the
+    # raw label from an already-resolved display name.
+    others_segment = next(s for s in segments if s["speaker"] == "Alice")
+    assert others_segment["raw_speaker"] == "Others"
+    you_segment = next(s for s in segments if s["speaker"] == "You")
+    assert you_segment["raw_speaker"] == "You"
+
+
+def test_patch_speaker_names_404_for_unknown_session(client: TestClient):
+    resp = client.patch("/sessions/does-not-exist/speaker-names", json={"names": {"SPEAKER_00": "Alice"}})
+    assert resp.status_code == 404
+
+
+def test_patch_speaker_names_merges_across_calls(client, monkeypatch):
+    _fake_save_and_mux(monkeypatch)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
+    monkeypatch.setattr(server_module, "transcribe_wav", lambda *a, **k: [])
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    session_id = job["session_id"]
+
+    client.patch(f"/sessions/{session_id}/speaker-names", json={"names": {"SPEAKER_00": "Alice"}})
+    resp2 = client.patch(f"/sessions/{session_id}/speaker-names", json={"names": {"SPEAKER_01": "Bob"}})
+
+    assert resp2.json()["speaker_names"] == {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}
 
 
 def _fake_save_and_mux(monkeypatch):

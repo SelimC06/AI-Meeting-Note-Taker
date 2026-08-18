@@ -43,9 +43,11 @@ from .sessions_store import (
     load_transcript_segments,
     write_action_items,
     load_action_items,
+    write_speaker_names,
+    load_speaker_names,
     STAGING_DIR_PREFIX,
 )
-from .diarization import merge_track_segments
+from .diarization import merge_track_segments, align_speaker_turns
 from .settings_store import (
     SAVE_LOCK,
     WHISPER_MODEL_CHOICES,
@@ -64,6 +66,11 @@ try:
 except Exception:
     stop_recording_and_transcribe = None  # noqa: N816
     transcribe_wav = None  # noqa: N816
+
+try:
+    from .diarization_pipeline import diarize as pyannote_diarize  # type: ignore
+except Exception:
+    pyannote_diarize = None  # noqa: N816
 
 try:
     from .LLaVA_summarize import complete as llava_complete  # type: ignore
@@ -278,6 +285,8 @@ _sweep_stale_export_zips()
 WHISPER_MODEL = _settings["whisper_model"]
 OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
 CUSTOM_VOCABULARY = _settings["custom_vocabulary"]
+ADVANCED_DIARIZATION_ENABLED = _settings["advanced_diarization_enabled"]
+HUGGINGFACE_TOKEN = _settings["huggingface_token"]
 
 # Set for the duration of move_storage_dir inside patch_settings below.
 # POST /process checks this and rejects with 503 rather than writing a
@@ -593,6 +602,8 @@ class SettingsUpdate(BaseModel):
     storage_dir: Optional[str] = None
     ollama_chat_model: Optional[str] = None
     custom_vocabulary: Optional[str] = None
+    advanced_diarization_enabled: Optional[bool] = None
+    huggingface_token: Optional[str] = None
 
 
 @app.get("/settings")
@@ -608,6 +619,8 @@ def get_settings():
         "storage_dir": str(STORE),
         "ollama_chat_model": OLLAMA_CHAT_MODEL,
         "custom_vocabulary": CUSTOM_VOCABULARY,
+        "advanced_diarization_enabled": ADVANCED_DIARIZATION_ENABLED,
+        "huggingface_token": HUGGINGFACE_TOKEN,
         "whisper_model_choices": WHISPER_MODEL_CHOICES,
     }
 
@@ -615,6 +628,7 @@ def get_settings():
 @app.patch("/settings")
 def patch_settings(body: SettingsUpdate):
     global STORE, WHISPER_MODEL, OLLAMA_CHAT_MODEL, CUSTOM_VOCABULARY, move_in_progress
+    global ADVANCED_DIARIZATION_ENABLED, HUGGINGFACE_TOKEN
 
     if body.whisper_model is not None and body.whisper_model not in WHISPER_MODEL_VALUES:
         raise HTTPException(400, f"Invalid whisper_model: {body.whisper_model!r}")
@@ -638,6 +652,8 @@ def patch_settings(body: SettingsUpdate):
             "storage_dir": str(STORE),
             "ollama_chat_model": OLLAMA_CHAT_MODEL,
             "custom_vocabulary": CUSTOM_VOCABULARY,
+            "advanced_diarization_enabled": ADVANCED_DIARIZATION_ENABLED,
+            "huggingface_token": HUGGINGFACE_TOKEN,
         }
         if body.whisper_model is not None:
             updates["whisper_model"] = body.whisper_model
@@ -645,6 +661,10 @@ def patch_settings(body: SettingsUpdate):
             updates["ollama_chat_model"] = body.ollama_chat_model
         if body.custom_vocabulary is not None:
             updates["custom_vocabulary"] = body.custom_vocabulary
+        if body.advanced_diarization_enabled is not None:
+            updates["advanced_diarization_enabled"] = body.advanced_diarization_enabled
+        if body.huggingface_token is not None:
+            updates["huggingface_token"] = body.huggingface_token
 
         if body.storage_dir is not None:
             new_dir = Path(body.storage_dir)
@@ -701,6 +721,8 @@ def patch_settings(body: SettingsUpdate):
         WHISPER_MODEL = settings["whisper_model"]
         OLLAMA_CHAT_MODEL = settings["ollama_chat_model"]
         CUSTOM_VOCABULARY = settings["custom_vocabulary"]
+        ADVANCED_DIARIZATION_ENABLED = settings["advanced_diarization_enabled"]
+        HUGGINGFACE_TOKEN = settings["huggingface_token"]
 
     return {**settings, "whisper_model_choices": WHISPER_MODEL_CHOICES}
 
@@ -867,6 +889,11 @@ def _run_process_job(job_id: str) -> None:
     whisper_model = inputs["whisper_model"]
     custom_vocabulary = inputs["custom_vocabulary"]
     ollama_chat_model = inputs["ollama_chat_model"]
+    # .get(...) with defaults: inputs dicts created by an older backend
+    # build (before Track B) won't have these keys if a job was somehow
+    # still in flight across an upgrade -- treat that the same as "disabled".
+    advanced_diarization_enabled = inputs.get("advanced_diarization_enabled", False)
+    huggingface_token = inputs.get("huggingface_token", "")
 
     try:
         jobs.update_job(job_id, stage="muxing")
@@ -908,6 +935,31 @@ def _run_process_job(job_id: str) -> None:
                 transcript_segments = []
 
             if transcript_segments:
+                # Track B: refine the generic "Others" bucket into individual
+                # remote speakers via pyannote, diarizing system.wav alone
+                # (not the mixed audio) -- Track A already isolated the
+                # user's own voice onto mic.wav, so there's no need to
+                # diarize it out again, and "You" segments are left as-is.
+                # Best-effort: any failure here (pyannote unavailable, a bad
+                # token, a transcription-vs-diarization mismatch) must fall
+                # back to Track A's plain "You"/"Others" output, never fail
+                # the job over an optional enhancement.
+                if (
+                    advanced_diarization_enabled
+                    and huggingface_token
+                    and pyannote_diarize is not None
+                ):
+                    try:
+                        turns = pyannote_diarize(str(system_wav), token=huggingface_token)
+                        others = [s for s in transcript_segments if s["speaker"] == "Others"]
+                        you = [s for s in transcript_segments if s["speaker"] != "Others"]
+                        refined_others = align_speaker_turns(others, turns)
+                        transcript_segments = sorted(
+                            you + refined_others, key=lambda s: s["start"]
+                        )
+                    except Exception as e:
+                        log(f"pyannote diarization failed, keeping You/Others split: {e}")
+
                 merged_txt = session / "transcript_.txt"
                 merged_txt.write_text(
                     "\n".join(f"{seg['speaker']}: {seg['text']}" for seg in transcript_segments),
@@ -915,6 +967,33 @@ def _run_process_job(job_id: str) -> None:
                 )
                 txt_path = str(merged_txt)
                 write_transcript_segments(session, transcript_segments)
+
+        # Track B, single-track case: no mic/system split to lean on (one
+        # track missing, or neither captured separately), but the single
+        # available track can still be diarized directly. Purely additive --
+        # runs alongside (not instead of) the existing stop_recording_and_
+        # transcribe call below, which still owns notes/txt_path generation.
+        # Any failure here is non-fatal and simply leaves no structured
+        # transcript for this session, same as today's fallback behavior.
+        elif (
+            advanced_diarization_enabled
+            and huggingface_token
+            and pyannote_diarize is not None
+            and transcribe_wav is not None
+        ):
+            single_wav = mic_wav or system_wav
+            if single_wav is not None:
+                try:
+                    solo_segments = transcribe_wav(
+                        str(single_wav), model_name=whisper_model,
+                        initial_prompt=custom_vocabulary.strip() or None,
+                    )
+                    turns = pyannote_diarize(str(single_wav), token=huggingface_token)
+                    diarized = align_speaker_turns(solo_segments, turns)
+                    if diarized:
+                        write_transcript_segments(session, diarized)
+                except Exception as e:
+                    log(f"single-track pyannote diarization failed, skipping: {e}")
 
         if txt_path is None and stop_recording_and_transcribe is not None:
             try:
@@ -1116,6 +1195,8 @@ def process(
         whisper_model = WHISPER_MODEL
         custom_vocabulary = CUSTOM_VOCABULARY
         ollama_chat_model = OLLAMA_CHAT_MODEL
+        advanced_diarization_enabled = ADVANCED_DIARIZATION_ENABLED
+        huggingface_token = HUGGINGFACE_TOKEN
 
         # Validate the screen upload fully before creating the permanent session
         # directory: staged in a scratch temp dir first (on the same filesystem
@@ -1148,6 +1229,8 @@ def process(
                 "whisper_model": whisper_model,
                 "custom_vocabulary": custom_vocabulary,
                 "ollama_chat_model": ollama_chat_model,
+                "advanced_diarization_enabled": advanced_diarization_enabled,
+                "huggingface_token": huggingface_token,
             },
         )
         jobs.enqueue(job_id)
@@ -1196,8 +1279,39 @@ def _is_valid_session_id(session_id: str) -> bool:
 def get_session_transcript(session_id: str):
     store = STORE
     _get_session_or_404(store, session_id)
-    segments = load_transcript_segments(store / session_id)
-    return {"segments": segments}
+    session_dir = store / session_id
+    segments = load_transcript_segments(session_dir)
+    # Resolve raw speaker labels ("You"/"Others", or a pyannote SPEAKER_N
+    # label once Track B lands) against any user-set names -- done here, at
+    # the API boundary, rather than mutating transcript.json, so the raw
+    # diarization output stays immutable and a rename is always reversible.
+    names = load_speaker_names(session_dir)
+    # raw_speaker is kept alongside the resolved display name so a second
+    # rename can still target the original stable label -- the frontend
+    # only ever sees the resolved value in `speaker`, and can't reconstruct
+    # "SPEAKER_00" from having previously displayed "Alice".
+    resolved = [
+        {
+            **seg,
+            "speaker": names.get(seg.get("speaker"), seg.get("speaker")),
+            "raw_speaker": seg.get("speaker"),
+        }
+        for seg in segments
+    ]
+    return {"segments": resolved}
+
+
+class SpeakerNamesUpdate(BaseModel):
+    names: dict[str, str]
+
+
+@app.patch("/sessions/{session_id}/speaker-names")
+def update_speaker_names(session_id: str, body: SpeakerNamesUpdate):
+    store = STORE
+    _get_session_or_404(store, session_id)
+    session_dir = store / session_id
+    write_speaker_names(session_dir, body.names)
+    return {"speaker_names": load_speaker_names(session_dir)}
 
 
 @app.get("/sessions/{session_id}/action-items")
