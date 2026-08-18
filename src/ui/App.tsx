@@ -162,6 +162,11 @@ function App() {
             >
               {sidebarCollapsed ? "›" : "‹"}
             </button>
+
+            {/* Settings opens as its own rectangle over just this row --
+                the status line below stays visible and un-dimmed, same as
+                the title bar above it. */}
+            {settingsOpen && <SettingsModal active onClose={() => setSettingsOpen(false)} />}
           </div>
 
           <StatusLine
@@ -172,7 +177,6 @@ function App() {
           />
           <OllamaOnboardingGate active={backendUp} />
 
-          {settingsOpen && <SettingsModal active onClose={() => setSettingsOpen(false)} />}
           {showRecordingConsent && (
             <RecordingConsentModal
               onCancel={() => respondToRecordingConsent(false)}

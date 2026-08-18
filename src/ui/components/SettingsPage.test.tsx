@@ -26,6 +26,13 @@ const baseSettings: Settings = {
   ],
 };
 
+// Section content is only mounted while its nav item is selected
+// (Transcription is the default), so tests for any other section select it
+// first via the sidebar.
+const openSection = (name: string) => {
+  fireEvent.click(screen.getByRole("button", { name }));
+};
+
 beforeEach(() => {
   vi.mocked(getSettings).mockResolvedValue(baseSettings);
   vi.mocked(getStorageUsage).mockResolvedValue({
@@ -62,11 +69,13 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-it("renders whisper model choices and current storage dir after load", async () => {
+it("renders whisper model choices on the default Transcription section, and the storage dir under Storage", async () => {
   render(<SettingsPage active />);
 
   expect(await screen.findByText(/\[base\.en\]/)).toBeInTheDocument();
-  expect(screen.getByText(baseSettings.storage_dir)).toBeInTheDocument();
+
+  openSection("Storage");
+  expect(await screen.findByText(baseSettings.storage_dir)).toBeInTheDocument();
 });
 
 it("selecting a whisper model persists it and updates the UI", async () => {
@@ -98,6 +107,9 @@ it("moves the storage directory on browse success", async () => {
   vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, storage_dir: "D:\\new-recordings" });
 
   render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("Storage");
+
   const browseButton = await screen.findByRole("button", { name: /browse/i });
   fireEvent.click(browseButton);
 
@@ -112,6 +124,9 @@ it("shows a storage error and keeps the old path when the move fails", async () 
   vi.mocked(updateSettings).mockRejectedValue(new Error("Destination not empty"));
 
   render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("Storage");
+
   const browseButton = await screen.findByRole("button", { name: /browse/i });
   fireEvent.click(browseButton);
 
@@ -127,6 +142,9 @@ it("shows the not-installed marker when the configured model isn't in the instal
   });
 
   render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("AI Model");
+
   expect(await screen.findByText(/gemma3:4b \(not installed\)/)).toBeInTheDocument();
 });
 
@@ -134,6 +152,9 @@ it("shows unreachable message and retries on button click", async () => {
   vi.mocked(getOllamaModels).mockResolvedValueOnce({ ok: false, models: [], error: "connection refused" });
 
   render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("AI Model");
+
   expect(await screen.findByText(/ollama unreachable/i)).toBeInTheDocument();
 
   vi.mocked(getOllamaModels).mockResolvedValueOnce({ ok: true, models: ["gemma3:4b"], error: null });
@@ -146,9 +167,10 @@ it("shows unreachable message and retries on button click", async () => {
 
 it("shows the local-first privacy statement", async () => {
   render(<SettingsPage active />);
-  expect(
-    await screen.findByText(/never uploaded anywhere/i)
-  ).toBeInTheDocument();
+  await screen.findByText(/\[base\.en\]/);
+  openSection("Privacy");
+
+  expect(await screen.findByText(/never uploaded anywhere/i)).toBeInTheDocument();
   expect(screen.getByText(/permanently deleted after 30 days/i)).toBeInTheDocument();
 });
 
@@ -158,6 +180,9 @@ it("shows the current app version and a not-checked-yet message before any check
   // since "idle" doubled as both the not-yet-checked default AND the
   // completed-check-found-nothing result.
   render(<SettingsPage active={true} />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("About");
+
   await waitFor(() => {
     expect(screen.getByText(/1\.0\.0/)).toBeInTheDocument();
   });
@@ -180,6 +205,9 @@ it("shows 'You're on the latest version' once a completed check reports idle", a
   });
 
   render(<SettingsPage active={true} />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("About");
+
   await waitFor(() => expect(screen.getByText(/1\.0\.0/)).toBeInTheDocument());
   expect(screen.getByText("Not checked yet")).toBeInTheDocument();
 
@@ -206,6 +234,9 @@ it("shows a downloading message with percent when an update is downloading", asy
   });
 
   render(<SettingsPage active={true} />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("About");
+
   await waitFor(() => expect(screen.getByText(/1\.0\.0/)).toBeInTheDocument());
 
   act(() => {
@@ -231,6 +262,9 @@ it("shows a restart button when an update is ready and calls install on click", 
   });
 
   render(<SettingsPage active={true} />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("About");
+
   await waitFor(() => expect(screen.getByText(/1\.0\.0/)).toBeInTheDocument());
 
   act(() => {
@@ -261,6 +295,8 @@ it("does not throw or log an error when unmounted mid-request and the pending re
   const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 
   const { unmount } = render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("AI Model");
   await screen.findByText(/loading installed models/i);
 
   unmount();
@@ -321,6 +357,8 @@ it("shows an error and keeps the draft text when saving the vocabulary fails", a
 
 it("shows advanced diarization off by default with no token warning", async () => {
   render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("Diarization");
 
   expect(await screen.findByRole("button", { name: "Off" })).toHaveClass("bg-signal");
   expect(screen.queryByText(/HuggingFace access token is required/i)).not.toBeInTheDocument();
@@ -333,6 +371,9 @@ it("enabling advanced diarization persists the setting and warns when no token i
   });
 
   render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("Diarization");
+
   await screen.findByRole("button", { name: "Off" });
   fireEvent.click(screen.getByRole("button", { name: "On" }));
 
@@ -346,6 +387,9 @@ it("rolls back the diarization toggle and shows an error when the save fails", a
   vi.mocked(updateSettings).mockRejectedValue(new Error("network down"));
 
   render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("Diarization");
+
   await screen.findByRole("button", { name: "Off" });
   fireEvent.click(screen.getByRole("button", { name: "On" }));
 
@@ -360,6 +404,8 @@ it("saves an edited HuggingFace token", async () => {
   });
 
   render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("Diarization");
 
   const tokenInput = await screen.findByLabelText(/huggingface access token/i);
   fireEvent.change(tokenInput, { target: { value: "hf_abc123" } });
@@ -378,6 +424,8 @@ it("does not warn about a missing token once diarization is enabled and a token 
   });
 
   render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("Diarization");
 
   await screen.findByRole("button", { name: "On" });
   expect(screen.queryByText(/HuggingFace access token is required/i)).not.toBeInTheDocument();
