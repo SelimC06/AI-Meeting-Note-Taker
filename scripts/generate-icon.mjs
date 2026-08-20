@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, '..');
@@ -9,73 +9,12 @@ const buildDir = path.join(projectRoot, 'build');
 fs.mkdirSync(buildDir, { recursive: true });
 
 const SIZE = 256;
-const BG = [0x1a, 0x1a, 0x1f]; // dark slate, matches app's dark theme
-const FG = [0x7c, 0xa8, 0xff]; // light blue inset square (placeholder monogram)
 
-function buildPixels() {
-    const pixels = Buffer.alloc(SIZE * SIZE * 4);
-    const inset = Math.round(SIZE * 0.28);
-    for (let y = 0; y < SIZE; y++) {
-        for (let x = 0; x < SIZE; x++) {
-            const isInset = x >= inset && x < SIZE - inset && y >= inset && y < SIZE - inset;
-            const [r, g, b] = isInset ? FG : BG;
-            const i = (y * SIZE + x) * 4;
-            pixels[i] = r; pixels[i + 1] = g; pixels[i + 2] = b; pixels[i + 3] = 255;
-        }
-    }
-    return pixels;
-}
-
-function crc32(buf) {
-    let c;
-    const table = crc32.table || (crc32.table = (() => {
-        const t = new Uint32Array(256);
-        for (let n = 0; n < 256; n++) {
-            c = n;
-            for (let k = 0; k < 8; k++) c = c & 1 ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
-            t[n] = c >>> 0;
-        }
-        return t;
-    })());
-    let crc = 0xffffffff;
-    for (let i = 0; i < buf.length; i++) crc = table[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
-    return (crc ^ 0xffffffff) >>> 0;
-}
-
-function chunk(type, data) {
-    const typeBuf = Buffer.from(type, 'ascii');
-    const lenBuf = Buffer.alloc(4);
-    lenBuf.writeUInt32BE(data.length, 0);
-    const crcBuf = Buffer.alloc(4);
-    crcBuf.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
-    return Buffer.concat([lenBuf, typeBuf, data, crcBuf]);
-}
-
-function encodePng(pixels, width, height) {
-    const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-
-    const ihdrData = Buffer.alloc(13);
-    ihdrData.writeUInt32BE(width, 0);
-    ihdrData.writeUInt32BE(height, 4);
-    ihdrData[8] = 8;  // bit depth
-    ihdrData[9] = 6;  // color type: RGBA
-    ihdrData[10] = 0; // compression
-    ihdrData[11] = 0; // filter
-    ihdrData[12] = 0; // interlace
-    const ihdr = chunk('IHDR', ihdrData);
-
-    const rowBytes = width * 4;
-    const raw = Buffer.alloc((rowBytes + 1) * height);
-    for (let y = 0; y < height; y++) {
-        raw[y * (rowBytes + 1)] = 0; // filter type: none
-        pixels.copy(raw, y * (rowBytes + 1) + 1, y * rowBytes, (y + 1) * rowBytes);
-    }
-    const idat = chunk('IDAT', zlib.deflateSync(raw));
-
-    const iend = chunk('IEND', Buffer.alloc(0));
-
-    return Buffer.concat([signature, ihdr, idat, iend]);
-}
+// Same '>' glyph as Website/scripts/generate-favicon.mjs (and
+// Website/index.html's inline SVG favicon), scaled up -- keeps the desktop
+// app icon and the site favicon as the same mark.
+const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='#1A1A19'/><text x='16' y='22' font-family='monospace' font-size='20' fill='#EDE6D6' text-anchor='middle'>&gt;</text></svg>`;
+const html = `<!doctype html><html><body style="margin:0">${svg}</body></html>`;
 
 function encodeIco(pngBuffer, size) {
     const header = Buffer.alloc(6);
@@ -96,11 +35,18 @@ function encodeIco(pngBuffer, size) {
     return Buffer.concat([header, entry, pngBuffer]);
 }
 
-const pixels = buildPixels();
-const png = encodePng(pixels, SIZE, SIZE);
-const ico = encodeIco(png, SIZE);
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: SIZE, height: SIZE } });
+await page.setContent(html);
+await page.evaluate((size) => {
+    const el = document.querySelector('svg');
+    el.setAttribute('width', String(size));
+    el.setAttribute('height', String(size));
+}, SIZE);
+const png = await page.screenshot({ omitBackground: false });
+await browser.close();
 
 fs.writeFileSync(path.join(buildDir, 'icon.png'), png);
-fs.writeFileSync(path.join(buildDir, 'icon.ico'), ico);
+fs.writeFileSync(path.join(buildDir, 'icon.ico'), encodeIco(png, SIZE));
 
 console.log(`Wrote ${path.join(buildDir, 'icon.png')} and ${path.join(buildDir, 'icon.ico')}`);
