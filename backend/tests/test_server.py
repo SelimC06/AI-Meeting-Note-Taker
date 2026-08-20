@@ -3664,3 +3664,84 @@ def test_process_skips_action_items_extraction_when_summarization_itself_fails(c
     action_items_resp = client.get(f"/sessions/{job['session_id']}/action-items")
     assert action_items_resp.status_code == 200
     assert action_items_resp.json() == {"action_items": None}
+
+
+def test_search_sessions_empty_query_returns_empty_list(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "s1", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Weekly Sync", "notes": "We discussed the Q3 budget.",
+        "video_path": "", "trashed_at": None,
+    })
+
+    resp = client.get("/sessions/search", params={"q": "   "})
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_search_sessions_no_query_param_returns_empty_list(client: TestClient):
+    resp = client.get("/sessions/search")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_search_sessions_returns_matching_session_with_snippet(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "s1", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Weekly Sync", "notes": "We discussed the Q3 budget in detail.",
+        "video_path": "", "trashed_at": None,
+    })
+
+    resp = client.get("/sessions/search", params={"q": "budget"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["session_id"] == "s1"
+    assert body[0]["title"] == "Weekly Sync"
+    assert any(s["source"] == "notes" for s in body[0]["snippets"])
+
+
+def test_search_sessions_no_matches_returns_200_empty_list(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "s1", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Weekly Sync", "notes": "We discussed the Q3 budget.",
+        "video_path": "", "trashed_at": None,
+    })
+
+    resp = client.get("/sessions/search", params={"q": "spaceship"})
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_search_sessions_respects_limit_param(client: TestClient):
+    from app.sessions_store import append_session
+
+    for i in range(1, 6):
+        append_session(server_module.STORE, {
+            "id": f"s{i}", "created_at": f"2026-08-{i:02d}T00:00:00+00:00",
+            "title": f"Budget Meeting {i}", "notes": "budget budget",
+            "video_path": "", "trashed_at": None,
+        })
+
+    resp = client.get("/sessions/search", params={"q": "budget", "limit": 2})
+    assert resp.status_code == 200
+    assert len(resp.json()) == 2
+
+
+def test_search_sessions_excludes_trashed(client: TestClient):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "s1", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "Trashed Sync", "notes": "budget budget budget",
+        "video_path": "", "trashed_at": "2026-08-02T00:00:00+00:00",
+    })
+
+    resp = client.get("/sessions/search", params={"q": "budget"})
+    assert resp.status_code == 200
+    assert resp.json() == []

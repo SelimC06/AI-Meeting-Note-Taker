@@ -87,3 +87,17 @@ it("surfaces a stream error without crashing", async () => {
 
   expect(await screen.findByText(/ollama died/)).toBeInTheDocument();
 });
+
+it("seeds the input from a seed prop, e.g. handed off from a sidebar search", () => {
+  const { rerender } = render(
+    <AllMeetingsChat sessions={[sessionA]} onSelectSession={() => {}} seed={{ query: "budget", nonce: 1 }} />
+  );
+  expect(screen.getByLabelText("Chat message")).toHaveValue("budget");
+
+  // A second hand-off with a bumped nonce overwrites the input again, even
+  // if the query text itself is unchanged from what's already typed there --
+  // the nonce, not the query string, is what should trigger a reseed.
+  fireEvent.change(screen.getByLabelText("Chat message"), { target: { value: "something else" } });
+  rerender(<AllMeetingsChat sessions={[sessionA]} onSelectSession={() => {}} seed={{ query: "budget", nonce: 2 }} />);
+  expect(screen.getByLabelText("Chat message")).toHaveValue("budget");
+});

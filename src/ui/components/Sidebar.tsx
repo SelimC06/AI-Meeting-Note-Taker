@@ -5,7 +5,9 @@ import {
   restoreSession,
   deleteSessionForever,
   renameSession,
+  searchSessions,
   type Session,
+  type SearchResult,
 } from "../api";
 import { useSessions } from "../hooks/useSessions";
 import { useProcessingJobs } from "../hooks/useProcessingJobs";
@@ -45,7 +47,19 @@ interface Props {
   // instead of ever surfacing the real error (re-review-12-13 H1/L1).
   // Defaults false.
   backendFailed?: boolean;
+  // Invoked with the current search query when the user clicks the
+  // "ask about this across meetings" affordance shown alongside content
+  // search results -- hands off to the graph chat's synthesis-oriented
+  // retrieval instead of trying to make literal search itself smarter.
+  // Optional so existing tests/callers that don't wire up graph chat don't
+  // need it.
+  onAskAcrossMeetings?: (query: string) => void;
 }
+
+// How long to wait after the last keystroke before firing a content search
+// request -- short enough to feel responsive, long enough that a fast typist
+// doesn't fire one request per character.
+const SEARCH_DEBOUNCE_MS = 200;
 
 // Distinguishes "the fetch itself never landed" (offline/backend down --
 // browsers throw a bare TypeError for that, e.g. Chromium's "Failed to
@@ -73,8 +87,13 @@ const Sidebar: React.FC<Props> = ({
   onSessionDeleted,
   backendUp = true,
   backendFailed = false,
+  onAskAcrossMeetings,
 }) => {
   const [query, setQuery] = useState("");
+  // null: no debounced search has resolved yet for the current query
+  // (either nothing typed, or the 200ms debounce hasn't fired/landed) --
+  // the instant title-only `filtered` list below is shown in the meantime.
+  const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [undoToast, setUndoToast] = useState<{ id: string; title: string } | null>(null);
@@ -127,6 +146,30 @@ const Sidebar: React.FC<Props> = ({
       undoTimeoutRef.current = null;
     }
   }, [view]);
+
+  // Content search (notes/transcript/action items, not just title) --
+  // debounced so a fast typist doesn't fire one request per keystroke.
+  // Only runs for the active view; trash rows have nothing worth
+  // full-text-searching and the view-switch effect above always clears
+  // `query` anyway. Query changes clear any previously-scheduled request
+  // (real or in-flight-through-the-clock, fake-timer-wise) before scheduling
+  // the next one, so only the latest query's search ever lands.
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (view !== "active" || trimmed === "") {
+      setSearchResults(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      searchSessions(trimmed)
+        .then((results) => setSearchResults(results))
+        .catch((e) => {
+          console.error("[Sidebar] search failed:", e);
+          setSearchResults([]);
+        });
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [query, view]);
 
   const list = view === "trash" ? trashList.sessions : sessions;
   // Suppressed while the backend isn't known healthy yet -- an error from
@@ -220,6 +263,22 @@ const Sidebar: React.FC<Props> = ({
   };
 
   const hasList = list !== null && list.length > 0;
+  // A resolved content search takes over the list area entirely, replacing
+  // the instant title-only `filtered` list once it lands -- the instant
+  // list stays visible while the debounced request is still in flight (or
+  // hasn't been scheduled at all, e.g. right after the first keystroke) so
+  // typing never feels like it produced no feedback.
+  const showingSearch = view === "active" && query.trim() !== "" && searchResults !== null;
+
+  const renderSnippet = (snippet: SearchResult["snippets"][number]) => (
+    <>
+      {snippet.text.slice(0, snippet.match_start)}
+      <mark className="bg-signal/40 text-phosphor">
+        {snippet.text.slice(snippet.match_start, snippet.match_end)}
+      </mark>
+      {snippet.text.slice(snippet.match_end)}
+    </>
+  );
 
   // "done" (or a pre-status-field record, where status is undefined) needs
   // no badge -- only the degraded cases (job failed but the recording was
@@ -342,11 +401,45 @@ const Sidebar: React.FC<Props> = ({
               </div>
             )}
 
-            {!listError && hasList && filtered !== null && filtered.length === 0 && (
+            {!listError && showingSearch && searchResults!.length === 0 && (
+              <div className="p-3 text-xs text-dim">{`no results for "${query.trim()}"`}</div>
+            )}
+
+            {!listError && showingSearch && searchResults!.length > 0 && (
+              <>
+                {onAskAcrossMeetings && (
+                  <button
+                    onClick={() => onAskAcrossMeetings(query.trim())}
+                    className="w-full text-left px-2 py-1.5 text-xs text-signal border-b border-line hover:bg-line focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                  >
+                    ask about this across meetings →
+                  </button>
+                )}
+                <ul className="divide-y divide-line">
+                  {searchResults!.map((r) => (
+                    <li key={r.session_id}>
+                      <button
+                        onClick={() => onSelect(r.session_id)}
+                        title={r.title}
+                        className="w-full text-left px-2 py-2 text-xs hover:bg-line focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                      >
+                        <div className="truncate">{r.title}</div>
+                        <div className="text-dim">{formatRelativeTime(r.created_at)}</div>
+                        {r.snippets[0] && (
+                          <div className="text-dim truncate mt-0.5">{renderSnippet(r.snippets[0])}</div>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+
+            {!listError && !showingSearch && hasList && filtered !== null && filtered.length === 0 && (
               <div className="p-3 text-xs text-dim">{`no matches for "${query}"`}</div>
             )}
 
-            {!listError && filtered !== null && filtered.length > 0 && (
+            {!listError && !showingSearch && filtered !== null && filtered.length > 0 && (
               <ul className="divide-y divide-line">
                 {filtered.map((s) => (
                   <li key={s.id}>

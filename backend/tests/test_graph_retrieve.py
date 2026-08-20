@@ -159,3 +159,106 @@ def test_build_context_formats_labeled_blocks_and_skips_trashed(tmp_path):
 def test_build_context_empty_ids_returns_empty_string(tmp_path):
     _write_index(tmp_path, RECORDS)
     assert graph_retrieve.build_context(tmp_path, []) == ""
+
+
+def _write_transcript(tmp_path, session_id, segments):
+    session_dir = tmp_path / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "transcript.json").write_text(json.dumps(segments), encoding="utf-8")
+
+
+def _write_summary(tmp_path, session_id, action_items):
+    session_dir = tmp_path / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "summary.json").write_text(json.dumps({"action_items": action_items}), encoding="utf-8")
+
+
+def test_search_sessions_matches_notes(tmp_path):
+    records = [_record("s1", "Weekly Sync", "We discussed the Q3 budget in detail.", "2026-08-01T10:00:00+00:00")]
+    _write_index(tmp_path, records)
+
+    results = graph_retrieve.search_sessions(tmp_path, "budget")
+    assert len(results) == 1
+    assert results[0]["session_id"] == "s1"
+    assert results[0]["title"] == "Weekly Sync"
+    snippet_sources = {s["source"] for s in results[0]["snippets"]}
+    assert "notes" in snippet_sources
+    notes_snippet = next(s for s in results[0]["snippets"] if s["source"] == "notes")
+    matched = notes_snippet["text"][notes_snippet["match_start"]:notes_snippet["match_end"]]
+    assert matched.lower() == "budget"
+
+
+def test_search_sessions_matches_transcript_only(tmp_path):
+    records = [_record("s1", "Weekly Sync", "Generic notes with nothing special.", "2026-08-01T10:00:00+00:00")]
+    _write_index(tmp_path, records)
+    _write_transcript(tmp_path, "s1", [
+        {"start": 0.0, "end": 1.0, "speaker": "You", "text": "let's talk about the invoice"},
+    ])
+
+    results = graph_retrieve.search_sessions(tmp_path, "invoice")
+    assert len(results) == 1
+    assert results[0]["session_id"] == "s1"
+    snippet_sources = {s["source"] for s in results[0]["snippets"]}
+    assert "transcript" in snippet_sources
+    transcript_snippet = next(s for s in results[0]["snippets"] if s["source"] == "transcript")
+    matched = transcript_snippet["text"][transcript_snippet["match_start"]:transcript_snippet["match_end"]]
+    assert matched.lower() == "invoice"
+
+
+def test_search_sessions_matches_action_items_only(tmp_path):
+    records = [_record("s1", "Weekly Sync", "Generic notes with nothing special.", "2026-08-01T10:00:00+00:00")]
+    _write_index(tmp_path, records)
+    _write_summary(tmp_path, "s1", [{"text": "email the invoice to finance", "owner": None, "due": None}])
+
+    results = graph_retrieve.search_sessions(tmp_path, "invoice")
+    assert len(results) == 1
+    snippet_sources = {s["source"] for s in results[0]["snippets"]}
+    assert "action_items" in snippet_sources
+
+
+def test_search_sessions_no_match_returns_empty_list(tmp_path):
+    records = [_record("s1", "Weekly Sync", "We discussed the Q3 budget.", "2026-08-01T10:00:00+00:00")]
+    _write_index(tmp_path, records)
+
+    assert graph_retrieve.search_sessions(tmp_path, "spaceship") == []
+
+
+def test_search_sessions_stopwords_only_returns_empty_list(tmp_path):
+    records = [_record("s1", "Weekly Sync", "We discussed the Q3 budget.", "2026-08-01T10:00:00+00:00")]
+    _write_index(tmp_path, records)
+
+    assert graph_retrieve.search_sessions(tmp_path, "what is the") == []
+
+
+def test_search_sessions_excludes_trashed(tmp_path):
+    records = [
+        _record("s1", "Weekly Sync", "We discussed the Q3 budget.", "2026-08-01T10:00:00+00:00"),
+        _record("s2", "Trashed Sync", "budget budget budget", "2026-08-02T10:00:00+00:00", trashed_at="2026-08-03T10:00:00+00:00"),
+    ]
+    _write_index(tmp_path, records)
+
+    results = graph_retrieve.search_sessions(tmp_path, "budget")
+    ids = {r["session_id"] for r in results}
+    assert ids == {"s1"}
+
+
+def test_search_sessions_ranks_title_matches_higher(tmp_path):
+    records = [
+        _record("s1", "Budget Review", "Nothing notable here.", "2026-08-01T10:00:00+00:00"),
+        _record("s2", "Weekly Sync", "We briefly touched on budget once.", "2026-08-02T10:00:00+00:00"),
+    ]
+    _write_index(tmp_path, records)
+
+    results = graph_retrieve.search_sessions(tmp_path, "budget")
+    assert [r["session_id"] for r in results] == ["s1", "s2"]
+
+
+def test_search_sessions_respects_max_results(tmp_path):
+    records = [
+        _record(f"s{i}", f"Budget Meeting {i}", "budget budget", f"2026-08-{i:02d}T10:00:00+00:00")
+        for i in range(1, 6)
+    ]
+    _write_index(tmp_path, records)
+
+    results = graph_retrieve.search_sessions(tmp_path, "budget", max_results=2)
+    assert len(results) == 2

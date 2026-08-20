@@ -14,11 +14,12 @@ method swamps the other by raw scale. Both empty -> recency fallback.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from .knowledge_graph import load_graph, normalize_name
-from .sessions_store import load_sessions
+from .sessions_store import load_action_items, load_sessions, load_transcript_segments
 
 STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
@@ -141,6 +142,107 @@ def find_relevant_sessions(store_dir: Path, question: str, max_sessions: int = 5
     }
     ranked = sorted(combined.items(), key=lambda kv: (-kv[1], recency.index(kv[0])))
     return [sid for sid, _ in ranked[:max_sessions]]
+
+
+# Chars of surrounding context kept on each side of a snippet's matched
+# substring -- enough to show what the meeting was about without dumping the
+# whole notes/segment/action-item text into the sidebar.
+SNIPPET_CONTEXT_CHARS = 40
+
+
+def _first_token_match(text: str, q_tokens: List[str]) -> Optional["re.Match[str]"]:
+    """Earliest whole-word (case-insensitive) match of any query token in
+    text, or None. Whole-word, not substring, so a query for "cat" doesn't
+    highlight the middle of "concatenate" -- consistent with tokenize()
+    never producing "cat" as its own token from that word either.
+    """
+    best: Optional["re.Match[str]"] = None
+    for t in q_tokens:
+        m = re.search(r"\b" + re.escape(t) + r"\b", text, re.IGNORECASE)
+        if m and (best is None or m.start() < best.start()):
+            best = m
+    return best
+
+
+def _make_snippet(text: str, match: "re.Match[str]", source: str) -> dict:
+    start = max(0, match.start() - SNIPPET_CONTEXT_CHARS)
+    end = min(len(text), match.end() + SNIPPET_CONTEXT_CHARS)
+    return {
+        "source": source,
+        "text": text[start:end],
+        "match_start": match.start() - start,
+        "match_end": match.end() - start,
+    }
+
+
+def search_sessions(store_dir: Path, query: str, max_results: int = 20) -> List[dict]:
+    """Literal keyword search over each non-trashed session's title, notes,
+    transcript, and action items -- for finding the meeting where something
+    specific was said, not for synthesizing an answer (that's
+    find_relevant_sessions/build_context, used by chat). A plain synchronous
+    scan: no index, since a single user's archive is realistically hundreds
+    of sessions at most (see docs/Individual Workflow Features
+    fix/01-fulltext-search.md).
+    """
+    q_tokens = _question_tokens(query)
+    if not q_tokens:
+        return []
+
+    scored: List[tuple] = []
+    for record in load_sessions(store_dir):
+        if record.get("trashed_at"):
+            continue
+        session_id = record["id"]
+        session_dir = store_dir / session_id
+        title = record.get("title") or "Untitled meeting"
+        notes = record.get("notes") or ""
+        segments = load_transcript_segments(session_dir)
+        action_items = load_action_items(session_dir) or []
+
+        title_tokens = tokenize(title)
+        notes_tokens = tokenize(notes)
+        transcript_text = " ".join(seg.get("text") or "" for seg in segments)
+        transcript_tokens = tokenize(transcript_text)
+        action_text = " ".join(item.get("text") or "" for item in action_items)
+        action_tokens = tokenize(action_text)
+
+        score = 0
+        for t in q_tokens:
+            score += (
+                TITLE_WEIGHT * title_tokens.count(t)
+                + notes_tokens.count(t)
+                + transcript_tokens.count(t)
+                + action_tokens.count(t)
+            )
+        if score <= 0:
+            continue
+
+        snippets: List[dict] = []
+        notes_match = _first_token_match(notes, q_tokens)
+        if notes_match:
+            snippets.append(_make_snippet(notes, notes_match, "notes"))
+        for seg in segments:
+            seg_text = seg.get("text") or ""
+            seg_match = _first_token_match(seg_text, q_tokens)
+            if seg_match:
+                snippets.append(_make_snippet(seg_text, seg_match, "transcript"))
+                break
+        for item in action_items:
+            item_text = item.get("text") or ""
+            item_match = _first_token_match(item_text, q_tokens)
+            if item_match:
+                snippets.append(_make_snippet(item_text, item_match, "action_items"))
+                break
+
+        scored.append((score, {
+            "session_id": session_id,
+            "title": title,
+            "created_at": record.get("created_at") or "",
+            "snippets": snippets[:2],
+        }))
+
+    scored.sort(key=lambda pair: -pair[0])
+    return [result for _, result in scored[:max_results]]
 
 
 def build_context(store_dir: Path, session_ids: List[str]) -> str:

@@ -17,6 +17,19 @@ import { useChatSessions } from "./hooks/useChatSessions";
 
 function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Sidebar's "ask about this across meetings" handoff (see its
+  // onAskAcrossMeetings prop) -- bumping `nonce` on every handoff, rather
+  // than relying on `query` alone, lets AllMeetingsChat re-seed its input
+  // even when the same query is handed off twice in a row (it stays
+  // mounted for the app's whole lifetime, so a plain query-string dep
+  // wouldn't fire again the second time).
+  const [allMeetingsSeed, setAllMeetingsSeed] = useState<{ query: string; nonce: number } | null>(null);
+  const allMeetingsSeedNonceRef = useRef(0);
+  const handleAskAcrossMeetings = (query: string) => {
+    setSelectedId(null);
+    allMeetingsSeedNonceRef.current += 1;
+    setAllMeetingsSeed({ query, nonce: allMeetingsSeedNonceRef.current });
+  };
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showRecordingConsent, setShowRecordingConsent] = useState(false);
   useEffect(() => {
@@ -135,6 +148,7 @@ function App() {
                 backendUp={backendUp}
                 backendFailed={backendFailed}
                 onSessionDeleted={chatSessions.discardSession}
+                onAskAcrossMeetings={handleAskAcrossMeetings}
               />
             </ErrorBoundary>
             <ErrorBoundary>
@@ -146,6 +160,7 @@ function App() {
                 backendFailed={backendFailed}
                 onSelectSession={setSelectedId}
                 chatSessions={chatSessions}
+                allMeetingsSeed={allMeetingsSeed}
               />
             </ErrorBoundary>
             <button

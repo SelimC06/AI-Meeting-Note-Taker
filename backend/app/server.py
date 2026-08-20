@@ -91,12 +91,13 @@ try:
     from . import graph_jobs
     from .graph_chat import stream_graph_chat_reply
     from .graph_extract import resolve_graph_model
-    from .graph_retrieve import build_context, find_relevant_sessions
+    from .graph_retrieve import build_context, find_relevant_sessions, search_sessions
 except Exception:
     graph_jobs = None
     stream_graph_chat_reply = None
     resolve_graph_model = None
     build_context = None
+    search_sessions = None
     find_relevant_sessions = None
 
 _DAILY_PURGE_INTERVAL_SECONDS = 24 * 3600
@@ -543,6 +544,17 @@ def sessions(include_trashed: bool = False):
     if not include_trashed:
         all_sessions = [s for s in all_sessions if not s.get("trashed_at")]
     return sorted(all_sessions, key=lambda r: r.get("created_at", ""), reverse=True)
+
+
+@app.get("/sessions/search")
+def search_sessions_endpoint(q: str = "", limit: int = 20):
+    # Empty/whitespace query returns [] immediately rather than the full
+    # session list -- unlike GET /sessions, "no query" here isn't "show
+    # everything", it's "nothing to search for yet".
+    query = q.strip()
+    if not query or search_sessions is None:
+        return []
+    return search_sessions(STORE, query, max_results=limit)
 
 
 class SessionRename(BaseModel):

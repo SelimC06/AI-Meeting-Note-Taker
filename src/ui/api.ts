@@ -386,6 +386,29 @@ export async function getSessionActionItems(id: string): Promise<ActionItem[] | 
   return data.action_items;
 }
 
+export type SearchSnippet = {
+  source: "notes" | "transcript" | "action_items";
+  text: string;
+  match_start: number;
+  match_end: number;
+};
+
+export type SearchResult = {
+  session_id: string;
+  title: string;
+  created_at: string;
+  snippets: SearchSnippet[];
+};
+
+export async function searchSessions(query: string, limit = 20): Promise<SearchResult[]> {
+  const url = `${BACKEND_URL}/sessions/search?${new URLSearchParams({ q: query, limit: String(limit) })}`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(`Failed to search sessions: ${resp.status}`);
+  }
+  return (await resp.json()) as SearchResult[];
+}
+
 export function exportSessionNotesUrl(id: string): string {
   return `${BACKEND_URL}/sessions/${id}/export/notes`;
 }

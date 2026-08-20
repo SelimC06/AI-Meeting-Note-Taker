@@ -24,6 +24,10 @@ interface Props {
   // same contract as Sidebar's onSelect. Optional so existing tests/callers
   // that never show the all-meetings view don't need it.
   onSelectSession?: (id: string) => void;
+  // Passed straight through to AllMeetingsChat -- see its identically-named
+  // prop. Optional so existing tests/callers that never trigger a
+  // content-search handoff don't need it.
+  allMeetingsSeed?: { query: string; nonce: number } | null;
   // Owns every meeting's chat conversation state one level above Chat, so
   // it survives Chat re-rendering with a different selectedId instead of
   // being aborted and reset on every switch. See
@@ -44,6 +48,7 @@ const Chat: React.FC<Props> = ({
   backendFailed = false,
   onSelectSession,
   chatSessions,
+  allMeetingsSeed,
 }) => {
   const [input, setInput] = useState("");
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
@@ -133,7 +138,11 @@ const Chat: React.FC<Props> = ({
         // AllMeetingsChat expects as a direct flex child of the container
         // above.
         <div style={{ display: selected ? "none" : "contents" }}>
-          <AllMeetingsChat sessions={sessions} onSelectSession={onSelectSession ?? (() => {})} />
+          <AllMeetingsChat
+            sessions={sessions}
+            onSelectSession={onSelectSession ?? (() => {})}
+            seed={allMeetingsSeed}
+          />
         </div>
       )}
 

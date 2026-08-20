@@ -4,6 +4,13 @@ import { streamGraphChatReply, type ChatTurn, type GraphSource, type Session } f
 interface Props {
   sessions: Session[];
   onSelectSession: (id: string) => void;
+  // Pre-seeds the chat input, e.g. from Sidebar's "ask about this across
+  // meetings" content-search handoff. Keyed by `nonce` (bumped by the
+  // caller on every hand-off) rather than `query` alone, since this
+  // component stays mounted for the app's whole lifetime (see Chat.tsx) --
+  // a second hand-off of the identical query string still needs to
+  // re-seed the input even if the user already typed over the first one.
+  seed?: { query: string; nonce: number } | null;
 }
 
 // A chat turn plus the retrieval sources the backend cited for it --
@@ -13,9 +20,14 @@ type GraphTurn = ChatTurn & { sources?: GraphSource[] };
 // Same threshold/meaning as Chat.tsx's constant.
 const NEAR_BOTTOM_THRESHOLD_PX = 24;
 
-const AllMeetingsChat: React.FC<Props> = ({ sessions, onSelectSession }) => {
+const AllMeetingsChat: React.FC<Props> = ({ sessions, onSelectSession, seed }) => {
   const [turns, setTurns] = useState<GraphTurn[]>([]);
   const [input, setInput] = useState("");
+
+  useEffect(() => {
+    if (seed) setInput(seed.query);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed?.nonce]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);

@@ -11,6 +11,7 @@ import {
   renameSession,
   listJobs,
   getJobStatus,
+  searchSessions,
   type Session,
 } from "../api";
 
@@ -21,6 +22,7 @@ vi.mock("./DockedRail", () => ({
 
 beforeEach(() => {
   vi.mocked(listJobs).mockResolvedValue([]);
+  vi.mocked(searchSessions).mockResolvedValue([]);
 });
 
 const sessionA: Session = {
@@ -422,4 +424,81 @@ it("hides the all-meetings nav item when there are no sessions", () => {
 it("hides the all-meetings nav item in the trash view", () => {
   renderSidebar({ view: "trash" });
   expect(screen.queryByRole("button", { name: /all meetings/i })).not.toBeInTheDocument();
+});
+
+it("debounces a content search and renders snippet results with the match highlighted", async () => {
+  vi.useFakeTimers();
+  vi.mocked(searchSessions).mockResolvedValue([
+    {
+      session_id: "a1",
+      title: "Sprint Planning",
+      created_at: "2026-08-01T00:00:00Z",
+      snippets: [
+        { source: "notes", text: "we reviewed the Q3 budget together", match_start: 19, match_end: 25 },
+      ],
+    },
+  ]);
+  const props = renderSidebar();
+
+  fireEvent.change(screen.getByLabelText("Search meetings"), { target: { value: "budget" } });
+  expect(searchSessions).not.toHaveBeenCalled();
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(200);
+  });
+
+  expect(searchSessions).toHaveBeenCalledWith("budget");
+  const mark = screen.getByText("budget", { selector: "mark" });
+  expect(mark).toBeInTheDocument();
+
+  fireEvent.click(screen.getByText("Sprint Planning"));
+  expect(props.onSelect).toHaveBeenCalledWith("a1");
+});
+
+it("does not search on an empty query", async () => {
+  vi.useFakeTimers();
+  renderSidebar();
+
+  fireEvent.change(screen.getByLabelText("Search meetings"), { target: { value: "" } });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(500);
+  });
+
+  expect(searchSessions).not.toHaveBeenCalled();
+});
+
+it("shows a no-results message once a debounced search comes back empty", async () => {
+  vi.useFakeTimers();
+  vi.mocked(searchSessions).mockResolvedValue([]);
+  renderSidebar();
+
+  fireEvent.change(screen.getByLabelText("Search meetings"), { target: { value: "zzz" } });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(200);
+  });
+
+  expect(screen.getByText(/no results for "zzz"/i)).toBeInTheDocument();
+});
+
+it("offers an 'ask about this across meetings' affordance once search results are showing", async () => {
+  vi.useFakeTimers();
+  vi.mocked(searchSessions).mockResolvedValue([
+    {
+      session_id: "a1",
+      title: "Sprint Planning",
+      created_at: "2026-08-01T00:00:00Z",
+      snippets: [{ source: "notes", text: "the budget line item", match_start: 4, match_end: 10 }],
+    },
+  ]);
+  const onAskAcrossMeetings = vi.fn();
+  renderSidebar({ onAskAcrossMeetings });
+
+  fireEvent.change(screen.getByLabelText("Search meetings"), { target: { value: "budget" } });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(200);
+  });
+
+  const button = screen.getByRole("button", { name: /ask about this across meetings/i });
+  fireEvent.click(button);
+  expect(onAskAcrossMeetings).toHaveBeenCalledWith("budget");
 });
