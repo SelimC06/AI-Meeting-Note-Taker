@@ -18,6 +18,7 @@ import {
     RAIL_GAP,
     RAIL_ERROR_PANEL_HEIGHT,
 } from './railGeometry.js';
+import { computeResizedBounds } from './resizeGeometry.js';
 import { sanitizeCaptureSourceTypes } from './captureSources.js';
 import { distReactPath } from './paths.js';
 import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence } from './closeGuard.js';
@@ -30,6 +31,52 @@ let isRailFloatDragging = false;
 let lastDockSlotClientRect = null;
 let railMoveSettleTimer = null;
 let railPopOutTimer = null;
+let mainMoveSettleTimer = null;
+let mainSnapAnimationTimer = null;
+// { direction, startBounds, startCursor } while a dashboard resize-handle
+// drag is in progress; null otherwise. Module-level rather than per-call
+// because 'window:resizeMove' ticks (see below) need the drag's original
+// bounds/cursor position to compute a delta from, not just the latest tick.
+let dashboardResizeState = null;
+
+// Aero Snap's own edge-dock slides the window into place rather than
+// teleporting it there; interpolating setBounds calls over a few frames
+// gets the dashboard's corner-snap the same feel. x/y-only (width/height
+// come along unchanged from `bounds`) since this only ever runs right after
+// computeCornerSnap, which never touches size.
+function animateWindowPosition(window, fromBounds, toXY, durationMs = 140, steps = 8) {
+    if (mainSnapAnimationTimer) {
+        clearInterval(mainSnapAnimationTimer);
+        mainSnapAnimationTimer = null;
+    }
+    const { x: fromX, y: fromY, width, height } = fromBounds;
+    const deltaX = toXY.x - fromX;
+    const deltaY = toXY.y - fromY;
+    let step = 0;
+    mainSnapAnimationTimer = setInterval(() => {
+        step += 1;
+        if (!window || window.isDestroyed()) {
+            clearInterval(mainSnapAnimationTimer);
+            mainSnapAnimationTimer = null;
+            return;
+        }
+        const t = Math.min(step / steps, 1);
+        const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+        window.setBounds({
+            x: Math.round(fromX + deltaX * eased),
+            y: Math.round(fromY + deltaY * eased),
+            width,
+            height,
+        });
+        if (t >= 1) {
+            clearInterval(mainSnapAnimationTimer);
+            mainSnapAnimationTimer = null;
+        }
+    }, durationMs / steps);
+}
+
+const MAIN_WINDOW_MIN_WIDTH = 640;
+const MAIN_WINDOW_MIN_HEIGHT = 420;
 let isQuitting = false;
 
 // Last status the rail renderer reported via rail:pushStatus -- lets the
@@ -717,6 +764,8 @@ function createWindow() {
     mainWindow = new BrowserWindow({
         width: 800,
         height: 450,
+        minWidth: MAIN_WINDOW_MIN_WIDTH,
+        minHeight: MAIN_WINDOW_MIN_HEIGHT,
         frame: false,
         transparent: true,
         resizable: true,
@@ -739,11 +788,21 @@ function createWindow() {
     // listener's corner-snap and drag-release-to-dock logic for the rest of
     // the app session. Also fires once on the very first load, which is a
     // harmless no-op since both are already at their initial values then.
+    // dashboardResizeState is the exact same failure mode, one level up: a
+    // reload mid-resize leaves ResizeHandles.tsx's own pointer state gone
+    // too, with nothing left to ever call window:endResize -- left stuck
+    // set, the 'moved' guard above would then permanently disable corner-
+    // snap the same way a stuck isRailFloatDragging would.
     mainWindow.webContents.on('did-finish-load', () => {
         isRailFloatDragging = false;
         if (railMoveSettleTimer) {
             clearTimeout(railMoveSettleTimer);
             railMoveSettleTimer = null;
+        }
+        dashboardResizeState = null;
+        if (mainMoveSettleTimer) {
+            clearTimeout(mainMoveSettleTimer);
+            mainMoveSettleTimer = null;
         }
         // Belt-and-braces alongside backend:getStatus (called on mount by
         // useBackendLifecycle): a fresh load/reload's listener can still
@@ -763,6 +822,41 @@ function createWindow() {
             mainWindow.webContents.openDevTools({ mode: "detach" });
         }
         mainWindow.focus();
+    });
+
+    // A native -webkit-app-region:drag move is a genuine OS modal move loop
+    // on Windows (the same one a real title bar uses) -- Windows itself owns
+    // the mouse for its whole duration, which means the button-up that ends
+    // it is consumed by Windows and never reaches the page as a DOM 'mouseup'
+    // event. There's no distinct "drag ended" event to listen for at all, so
+    // -- same as the rail's own further-dragging just above -- debounce to
+    // the trailing edge of 'moved': while actively dragging, Windows fires
+    // 'moved' continuously (comfortably faster than this 120ms window), so
+    // the timer only ever actually elapses once the drag has genuinely
+    // stopped (paused or released). A drag that merely passes near an edge
+    // without pausing there is unaffected.
+    mainWindow.on('moved', () => {
+        // A 'w'/'n'/'nw'/'ne'/'sw' resize handle shifts x/y to keep the
+        // opposite edge anchored (see computeResizedBounds), which fires
+        // this same 'moved' event -- without this guard, resizing a window
+        // that ends up near a screen edge could get its position yanked to
+        // that edge out from under the still-in-progress resize, the same
+        // failure mode isRailFloatDragging guards against just above.
+        if (dashboardResizeState) return;
+        if (mainMoveSettleTimer) clearTimeout(mainMoveSettleTimer);
+        mainMoveSettleTimer = setTimeout(() => {
+            mainMoveSettleTimer = null;
+            if (!mainWindow || mainWindow.isDestroyed()) return;
+            const bounds = mainWindow.getBounds();
+            const display = screen.getDisplayNearestPoint({ x: bounds.x, y: bounds.y });
+            // allowOffScreen: unlike the rail (which should always be fully
+            // reachable), the dashboard needs to stay draggable half off-
+            // screen on purpose -- see computeCornerSnap's own comment.
+            const snapped = computeCornerSnap(display.workArea, bounds, 24, { allowOffScreen: true });
+            if (snapped.x !== bounds.x || snapped.y !== bounds.y) {
+                animateWindowPosition(mainWindow, bounds, snapped);
+            }
+        }, 120);
     });
 
     // Cancellable, unlike 'closed' below -- lets us intercept a close
@@ -799,6 +893,15 @@ function createWindow() {
         if (railWindow && !railWindow.isDestroyed()) {
             railWindow.destroy();
         }
+        if (mainMoveSettleTimer) {
+            clearTimeout(mainMoveSettleTimer);
+            mainMoveSettleTimer = null;
+        }
+        if (mainSnapAnimationTimer) {
+            clearInterval(mainSnapAnimationTimer);
+            mainSnapAnimationTimer = null;
+        }
+        dashboardResizeState = null;
         pendingConsentResolve?.(true);
         pendingConsentResolve = null;
         mainWindow = null;
@@ -831,6 +934,53 @@ ipcMain.handle('system:getStats', async () => {
 });
 
 ipcMain.handle('win:minimize', () => mainWindow && mainWindow.minimize());
+
+// Manual resize for the dashboard: Chromium/Windows drop the native
+// resize-by-dragging-the-frame-edge behavior entirely once a BrowserWindow is
+// `transparent: true`, regardless of `resizable: true` (there's no OS-level
+// hit-test border to grab). ResizeHandles.tsx renders invisible edge/corner
+// strips instead and drives these three the same way DockedRail's detach-
+// drag drives rail:beginFloatDrag/dragMove/endFloatDrag -- main pulls the
+// live cursor position itself rather than trusting renderer-supplied
+// coordinates, matching that existing pattern.
+ipcMain.handle('window:beginResize', (_event, direction) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    // Clears out a settle check left over from some earlier drag that just
+    // happens to still be pending -- without this, it could fire mid-resize
+    // (the 'moved' guard above stops anything NEW from being scheduled once
+    // dashboardResizeState is set, but doesn't touch a timer already queued
+    // before this call) and snap the window while the user is still resizing.
+    if (mainMoveSettleTimer) {
+        clearTimeout(mainMoveSettleTimer);
+        mainMoveSettleTimer = null;
+    }
+    dashboardResizeState = {
+        direction,
+        startBounds: mainWindow.getBounds(),
+        startCursor: screen.getCursorScreenPoint(),
+    };
+});
+
+ipcMain.on('window:resizeMove', () => {
+    if (!dashboardResizeState || !mainWindow || mainWindow.isDestroyed()) return;
+    const cursor = screen.getCursorScreenPoint();
+    const dx = cursor.x - dashboardResizeState.startCursor.x;
+    const dy = cursor.y - dashboardResizeState.startCursor.y;
+    const bounds = computeResizedBounds(
+        dashboardResizeState.startBounds,
+        dashboardResizeState.direction,
+        dx,
+        dy,
+        MAIN_WINDOW_MIN_WIDTH,
+        MAIN_WINDOW_MIN_HEIGHT,
+    );
+    mainWindow.setBounds(bounds);
+});
+
+ipcMain.handle('window:endResize', () => {
+    dashboardResizeState = null;
+});
+
 ipcMain.handle('app:quit', async () => {
     // Guards against a second app:quit invocation (a rapid double-click on
     // the close button, or the native 'close' handler above already

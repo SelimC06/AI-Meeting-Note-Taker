@@ -24,6 +24,13 @@ interface Props {
   reloadSessions: () => void;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
+  // Invoked with a session's id right after it's permanently deleted (not
+  // trashed -- trashing is reversible via the undo toast, so it must NOT
+  // fire this). Lets a caller above (App.tsx) discard any chat state kept
+  // for that session instead of leaking a dead session id in memory.
+  // Optional so existing tests/callers that don't track chat state don't
+  // need it.
+  onSessionDeleted?: (id: string) => void;
   // False only during the brief window before the backend lifecycle first
   // reports healthy (cold start, or a restart in progress) -- useSessions'
   // very first fetch lands as connection-refused in that window, and
@@ -63,6 +70,7 @@ const Sidebar: React.FC<Props> = ({
   reloadSessions,
   selectedId,
   onSelect,
+  onSessionDeleted,
   backendUp = true,
   backendFailed = false,
 }) => {
@@ -184,6 +192,7 @@ const Sidebar: React.FC<Props> = ({
     try {
       await deleteSessionForever(s.id);
       trashList.reload();
+      onSessionDeleted?.(s.id);
     } catch (e) {
       console.error("[Sidebar] delete forever failed:", e);
       if (wasSelected) onSelect(s.id);
@@ -294,6 +303,20 @@ const Sidebar: React.FC<Props> = ({
           )}
 
           <div className="flex-1 min-h-0 overflow-y-auto">
+            {view === "active" && list !== null && list.length > 0 && (
+              <button
+                onClick={() => onSelect(null)}
+                className={
+                  "w-full text-left text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal border-b border-line " +
+                  (selectedId === null
+                    ? "bg-line px-2 py-2 text-phosphor"
+                    : "px-2 py-2 text-dim hover:bg-line")
+                }
+              >
+                <span className="text-signal">✦</span> all meetings
+              </button>
+            )}
+
             {view === "active" && query.trim() === "" && activeJobs.length > 0 && (
               <ul className="divide-y divide-line border-b border-line">
                 {activeJobs.map((j) => (

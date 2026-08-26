@@ -39,8 +39,15 @@ from .sessions_store import (
     sweep_stale_staging_dirs,
     sweep_stale_partial_mux_files,
     compute_storage_usage,
+    write_transcript_segments,
+    load_transcript_segments,
+    write_action_items,
+    load_action_items,
+    write_speaker_names,
+    load_speaker_names,
     STAGING_DIR_PREFIX,
 )
+from .diarization import merge_track_segments, align_speaker_turns
 from .settings_store import (
     SAVE_LOCK,
     WHISPER_MODEL_CHOICES,
@@ -51,18 +58,26 @@ from .settings_store import (
     save as save_settings,
 )
 from .bin_paths import FFMPEG_BIN, FFPROBE_BIN
-from .whisper_cache import get_whisper_model
+from .whisper_cache import get_whisper_model, transcribe_audio
 from . import jobs
 
 try:
-    from .ffmpeg_transcribe import stop_recording_and_transcribe  # type: ignore
+    from .ffmpeg_transcribe import stop_recording_and_transcribe, transcribe_wav  # type: ignore
 except Exception:
     stop_recording_and_transcribe = None  # noqa: N816
+    transcribe_wav = None  # noqa: N816
+
+try:
+    from .diarization_pipeline import diarize as pyannote_diarize  # type: ignore
+except Exception:
+    pyannote_diarize = None  # noqa: N816
 
 try:
     from .LLaVA_summarize import complete as llava_complete  # type: ignore
+    from .LLaVA_summarize import extract_action_items as llava_extract_action_items  # type: ignore
 except Exception:
     llava_complete = None
+    llava_extract_action_items = None
 
 try:
     from .chat import assert_ollama_up, stream_chat_reply, OLLAMA_BASE, _health_client as ollama_health_client
@@ -71,6 +86,18 @@ except Exception:
     stream_chat_reply = None
     OLLAMA_BASE = "http://localhost:11434"
     ollama_health_client = None
+
+try:
+    from . import graph_jobs
+    from .graph_chat import stream_graph_chat_reply
+    from .graph_extract import resolve_graph_model
+    from .graph_retrieve import build_context, find_relevant_sessions
+except Exception:
+    graph_jobs = None
+    stream_graph_chat_reply = None
+    resolve_graph_model = None
+    build_context = None
+    find_relevant_sessions = None
 
 _DAILY_PURGE_INTERVAL_SECONDS = 24 * 3600
 
@@ -257,6 +284,9 @@ except Exception as e:
 _sweep_stale_export_zips()
 WHISPER_MODEL = _settings["whisper_model"]
 OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
+CUSTOM_VOCABULARY = _settings["custom_vocabulary"]
+ADVANCED_DIARIZATION_ENABLED = _settings["advanced_diarization_enabled"]
+HUGGINGFACE_TOKEN = _settings["huggingface_token"]
 
 # Set for the duration of move_storage_dir inside patch_settings below.
 # POST /process checks this and rejects with 503 rather than writing a
@@ -356,6 +386,20 @@ def mix_audios_wav(system_wav: Optional[Path], mic_wav: Optional[Path], out_wav:
         shutil.copy(mic_wav, out_wav)
         return out_wav
     return None
+
+
+def transcribe_dual_tracks(
+    mic_wav: Path,
+    system_wav: Path,
+    model_name: str,
+    initial_prompt: Optional[str],
+) -> List[dict]:
+    """Independently transcribe the mic and system tracks and merge them into
+    one chronological, speaker-tagged timeline ("You" vs. "Others").
+    """
+    mic_segments = transcribe_wav(str(mic_wav), model_name=model_name, initial_prompt=initial_prompt)
+    system_segments = transcribe_wav(str(system_wav), model_name=model_name, initial_prompt=initial_prompt)
+    return merge_track_segments(mic_segments, system_segments)
 
 
 def ffmpeg_has_encoder(name: str) -> bool:
@@ -557,6 +601,9 @@ class SettingsUpdate(BaseModel):
     whisper_model: Optional[str] = None
     storage_dir: Optional[str] = None
     ollama_chat_model: Optional[str] = None
+    custom_vocabulary: Optional[str] = None
+    advanced_diarization_enabled: Optional[bool] = None
+    huggingface_token: Optional[str] = None
 
 
 @app.get("/settings")
@@ -571,13 +618,17 @@ def get_settings():
         "whisper_model": WHISPER_MODEL,
         "storage_dir": str(STORE),
         "ollama_chat_model": OLLAMA_CHAT_MODEL,
+        "custom_vocabulary": CUSTOM_VOCABULARY,
+        "advanced_diarization_enabled": ADVANCED_DIARIZATION_ENABLED,
+        "huggingface_token": HUGGINGFACE_TOKEN,
         "whisper_model_choices": WHISPER_MODEL_CHOICES,
     }
 
 
 @app.patch("/settings")
 def patch_settings(body: SettingsUpdate):
-    global STORE, WHISPER_MODEL, OLLAMA_CHAT_MODEL, move_in_progress
+    global STORE, WHISPER_MODEL, OLLAMA_CHAT_MODEL, CUSTOM_VOCABULARY, move_in_progress
+    global ADVANCED_DIARIZATION_ENABLED, HUGGINGFACE_TOKEN
 
     if body.whisper_model is not None and body.whisper_model not in WHISPER_MODEL_VALUES:
         raise HTTPException(400, f"Invalid whisper_model: {body.whisper_model!r}")
@@ -600,11 +651,20 @@ def patch_settings(body: SettingsUpdate):
             "whisper_model": WHISPER_MODEL,
             "storage_dir": str(STORE),
             "ollama_chat_model": OLLAMA_CHAT_MODEL,
+            "custom_vocabulary": CUSTOM_VOCABULARY,
+            "advanced_diarization_enabled": ADVANCED_DIARIZATION_ENABLED,
+            "huggingface_token": HUGGINGFACE_TOKEN,
         }
         if body.whisper_model is not None:
             updates["whisper_model"] = body.whisper_model
         if body.ollama_chat_model is not None:
             updates["ollama_chat_model"] = body.ollama_chat_model
+        if body.custom_vocabulary is not None:
+            updates["custom_vocabulary"] = body.custom_vocabulary
+        if body.advanced_diarization_enabled is not None:
+            updates["advanced_diarization_enabled"] = body.advanced_diarization_enabled
+        if body.huggingface_token is not None:
+            updates["huggingface_token"] = body.huggingface_token
 
         if body.storage_dir is not None:
             new_dir = Path(body.storage_dir)
@@ -612,7 +672,7 @@ def patch_settings(body: SettingsUpdate):
             # PermissionError on Windows (open file handles) or split the
             # session index across old/new dirs if the worker appends to a
             # re-created index in the old location after the move.
-            if jobs.is_busy():
+            if jobs.is_busy() or (graph_jobs is not None and graph_jobs.is_busy()):
                 raise HTTPException(409, "Wait for processing to finish before moving the storage folder")
             # jobs.is_busy() only blocks moves while a job is queued/running --
             # it says nothing about a fresh POST /process arriving DURING the
@@ -660,6 +720,9 @@ def patch_settings(body: SettingsUpdate):
         STORE.mkdir(parents=True, exist_ok=True)
         WHISPER_MODEL = settings["whisper_model"]
         OLLAMA_CHAT_MODEL = settings["ollama_chat_model"]
+        CUSTOM_VOCABULARY = settings["custom_vocabulary"]
+        ADVANCED_DIARIZATION_ENABLED = settings["advanced_diarization_enabled"]
+        HUGGINGFACE_TOKEN = settings["huggingface_token"]
 
     return {**settings, "whisper_model_choices": WHISPER_MODEL_CHOICES}
 
@@ -735,6 +798,48 @@ def chat(session_id: str, body: ChatRequest):
 
     return StreamingResponse(token_stream(), media_type="application/x-ndjson")
 
+
+@app.post("/graph/chat")
+def graph_chat(body: ChatRequest):
+    # Bind the settings-backed globals once so this request sees one
+    # consistent snapshot even if a PATCH /settings lands mid-request.
+    store = STORE
+    chat_model = OLLAMA_CHAT_MODEL
+
+    if stream_graph_chat_reply is None or find_relevant_sessions is None or assert_ollama_up is None:
+        raise HTTPException(503, "Chat is unavailable on this server")
+
+    try:
+        assert_ollama_up()
+    except Exception as e:
+        raise HTTPException(503, f"Local model unavailable: {e}")
+
+    history = [{"role": m.role, "content": m.content} for m in body.history]
+
+    session_ids = find_relevant_sessions(store, body.message)
+    context = build_context(store, session_ids)
+    records_by_id = {r["id"]: r for r in load_sessions(store)}
+    sources = [
+        {"id": sid, "title": records_by_id[sid].get("title", ""), "created_at": records_by_id[sid].get("created_at", "")}
+        for sid in session_ids
+        if sid in records_by_id
+    ]
+
+    def token_stream():
+        # Same NDJSON framing as /chat/{session_id} ({"token"}/{"error"}
+        # lines), plus ONE leading {"sources": [...]} line so the frontend
+        # can render source chips before/while tokens stream.
+        yield json.dumps({"sources": sources}) + "\n"
+        try:
+            for chunk in stream_graph_chat_reply(context, body.message, history, model=chat_model):
+                yield json.dumps({"token": chunk}) + "\n"
+        except Exception as e:
+            log(f"graph chat stream failed: {e}")
+            yield json.dumps({"error": str(e)}) + "\n"
+
+    return StreamingResponse(token_stream(), media_type="application/x-ndjson")
+
+
 def _record_failed_session(session: Path, error: str) -> None:
     """Best-effort: append a status:"failed" session record so a failed
     job's already-saved recording data (screen/system/mic webm, whatever got
@@ -783,8 +888,14 @@ def _run_process_job(job_id: str) -> None:
     mic_webm = Path(inputs["mic_webm"]) if inputs["mic_webm"] else None
     whisper_model = inputs["whisper_model"]
     # .get, not [...]: a job queued by an older build (or persisted across an
-    # upgrade) has no "summary_model" key, and that must not crash the worker.
-    summary_model = inputs.get("summary_model") or OLLAMA_CHAT_MODEL
+    # upgrade) has none of these keys, and that must not crash the worker.
+    custom_vocabulary = inputs.get("custom_vocabulary", "")
+    ollama_chat_model = inputs.get("ollama_chat_model") or OLLAMA_CHAT_MODEL
+    # .get(...) with defaults: inputs dicts created by an older backend
+    # build (before Track B) won't have these keys if a job was somehow
+    # still in flight across an upgrade -- treat that the same as "disabled".
+    advanced_diarization_enabled = inputs.get("advanced_diarization_enabled", False)
+    huggingface_token = inputs.get("huggingface_token", "")
 
     try:
         jobs.update_job(job_id, stage="muxing")
@@ -806,9 +917,87 @@ def _run_process_job(job_id: str) -> None:
             return
 
         notes: str = ""
+        structured_action_items: Optional[list] = None
         txt_path: Optional[str] = None
         jobs.update_job(job_id, stage="transcribing")
-        if stop_recording_and_transcribe is not None:
+
+        # Track A: when both the mic and system tracks were captured
+        # separately, transcribe them independently and merge the results
+        # into a "You" vs. "Others" timeline instead of transcribing the
+        # already-mixed-down final video. Only a 2-way split (not true
+        # n-party diarization) -- "Others" is not further split if multiple
+        # remote participants were in the call.
+        if mic_wav is not None and system_wav is not None and transcribe_wav is not None:
+            try:
+                transcript_segments = transcribe_dual_tracks(
+                    mic_wav, system_wav, whisper_model, custom_vocabulary.strip() or None
+                )
+            except Exception as e:
+                log(f"dual-track transcription failed, falling back to mixed audio: {e}")
+                transcript_segments = []
+
+            if transcript_segments:
+                # Track B: refine the generic "Others" bucket into individual
+                # remote speakers via pyannote, diarizing system.wav alone
+                # (not the mixed audio) -- Track A already isolated the
+                # user's own voice onto mic.wav, so there's no need to
+                # diarize it out again, and "You" segments are left as-is.
+                # Best-effort: any failure here (pyannote unavailable, a bad
+                # token, a transcription-vs-diarization mismatch) must fall
+                # back to Track A's plain "You"/"Others" output, never fail
+                # the job over an optional enhancement.
+                if (
+                    advanced_diarization_enabled
+                    and huggingface_token
+                    and pyannote_diarize is not None
+                ):
+                    try:
+                        turns = pyannote_diarize(str(system_wav), token=huggingface_token)
+                        others = [s for s in transcript_segments if s["speaker"] == "Others"]
+                        you = [s for s in transcript_segments if s["speaker"] != "Others"]
+                        refined_others = align_speaker_turns(others, turns)
+                        transcript_segments = sorted(
+                            you + refined_others, key=lambda s: s["start"]
+                        )
+                    except Exception as e:
+                        log(f"pyannote diarization failed, keeping You/Others split: {e}")
+
+                merged_txt = session / "transcript_.txt"
+                merged_txt.write_text(
+                    "\n".join(f"{seg['speaker']}: {seg['text']}" for seg in transcript_segments),
+                    encoding="utf-8",
+                )
+                txt_path = str(merged_txt)
+                write_transcript_segments(session, transcript_segments)
+
+        # Track B, single-track case: no mic/system split to lean on (one
+        # track missing, or neither captured separately), but the single
+        # available track can still be diarized directly. Purely additive --
+        # runs alongside (not instead of) the existing stop_recording_and_
+        # transcribe call below, which still owns notes/txt_path generation.
+        # Any failure here is non-fatal and simply leaves no structured
+        # transcript for this session, same as today's fallback behavior.
+        elif (
+            advanced_diarization_enabled
+            and huggingface_token
+            and pyannote_diarize is not None
+            and transcribe_wav is not None
+        ):
+            single_wav = mic_wav or system_wav
+            if single_wav is not None:
+                try:
+                    solo_segments = transcribe_wav(
+                        str(single_wav), model_name=whisper_model,
+                        initial_prompt=custom_vocabulary.strip() or None,
+                    )
+                    turns = pyannote_diarize(str(single_wav), token=huggingface_token)
+                    diarized = align_speaker_turns(solo_segments, turns)
+                    if diarized:
+                        write_transcript_segments(session, diarized)
+                except Exception as e:
+                    log(f"single-track pyannote diarization failed, skipping: {e}")
+
+        if txt_path is None and stop_recording_and_transcribe is not None:
             try:
                 # extract_frames_after=False: summarization is text-only --
                 # llava_complete below runs with no frame_paths, so extracting
@@ -820,6 +1009,7 @@ def _run_process_job(job_id: str) -> None:
                     model_name=whisper_model,
                     separate_tracks=False,
                     extract_frames_after=False,
+                    initial_prompt=custom_vocabulary.strip() or None,
                 )
             except Exception as e:
                 log(f"stop_recording_and_transcribe failed, falling back to raw transcription: {e}")
@@ -840,7 +1030,7 @@ def _run_process_job(job_id: str) -> None:
                     # -- and when it wasn't installed, Ollama's 404 turned every
                     # single recording into "AI summarization failed", even
                     # though the chat model sitting right there could do the job.
-                    model=summary_model,
+                    model=ollama_chat_model,
                     out_path=str(session / "notes.md"),
                     max_chars=12000,
                     stream=False,
@@ -848,6 +1038,27 @@ def _run_process_job(job_id: str) -> None:
                     num_predict=800,
                     temperature=0.3,
                 )
+
+                # Structured action items are a best-effort add-on to the
+                # prose summary above, not a requirement for the job to
+                # succeed. The small local model WILL sometimes return
+                # malformed JSON even after extract_action_items' own
+                # internal retry -- and it can also fail for the same
+                # reasons llava_complete can (Ollama down, timeout, etc).
+                # Either way, this must never fail the job or replace
+                # `notes`: on any failure structured_action_items simply
+                # stays None, and the frontend falls back to rendering the
+                # prose notes (which already contain an "## Action Items"
+                # section) exactly as it did before this feature existed.
+                if llava_extract_action_items is not None:
+                    try:
+                        structured_action_items = llava_extract_action_items(
+                            raw_txt_path=txt_path,
+                            model=ollama_chat_model,
+                        )
+                    except Exception as e:
+                        log(f"action items extraction failed, falling back to prose notes: {e}")
+                        structured_action_items = None
             except Exception as e:
                 log(f"summarization failed, falling back to raw transcript: {e}")
                 try:
@@ -866,9 +1077,9 @@ def _run_process_job(job_id: str) -> None:
                         # Naming the model and the exact command beats a bare
                         # "failed", which gives the user nothing to act on.
                         explanation = (
-                            f"_AI summarization failed: the model `{summary_model}` isn't "
+                            f"_AI summarization failed: the model `{ollama_chat_model}` isn't "
                             "installed in Ollama -- showing the raw transcript instead. "
-                            f"Run `ollama pull {summary_model}` to enable summaries._\n\n"
+                            f"Run `ollama pull {ollama_chat_model}` to enable summaries._\n\n"
                         )
                     else:
                         explanation = (
@@ -893,7 +1104,9 @@ def _run_process_job(job_id: str) -> None:
                 # here used to create a second cached model instance (and
                 # double the RAM) for what's otherwise the same model.
                 model = get_whisper_model(WhisperModel, whisper_model, device="cpu", compute_type="int8")
-                segments, info = model.transcribe(str(final_path), beam_size=1)
+                segments, info = transcribe_audio(
+                    model, str(final_path), initial_prompt=custom_vocabulary.strip() or None
+                )
                 transcript = "\n".join(s.text.strip() for s in segments if s.text)
                 notes = (
                     "# Title: Zoom Meeting\n\n"
@@ -919,6 +1132,10 @@ def _run_process_job(job_id: str) -> None:
             "status": "done",
         }
         append_session(STORE, record)
+        if structured_action_items is not None:
+            write_action_items(session, structured_action_items)
+        if graph_jobs is not None:
+            graph_jobs.enqueue_session(record["id"])
 
         jobs.update_job(job_id, status="done", notes=notes, video_path=str(final_path))
     except Exception as e:
@@ -937,6 +1154,17 @@ def _run_process_job(job_id: str) -> None:
 
 
 jobs.start_worker(_run_process_job)
+
+# Graph indexing: its own worker + a one-time backfill sweep, so meetings
+# recorded before this feature (or whose extraction previously failed) get
+# indexed too. GRAPH_INDEXING_DISABLED=1 (set by the test conftest) keeps
+# test runs from starting real background extraction against a dev store.
+if graph_jobs is not None and os.getenv("GRAPH_INDEXING_DISABLED") != "1":
+    graph_jobs.start_worker(lambda: STORE, lambda: resolve_graph_model(OLLAMA_CHAT_MODEL))
+    try:
+        graph_jobs.backfill_unindexed(STORE)
+    except Exception as e:
+        print(f"[server] graph backfill sweep failed (continuing): {e}", flush=True)
 
 
 @app.post("/process", status_code=202)
@@ -983,7 +1211,10 @@ def process(
         # video files land from where the session index entry gets appended.
         store = STORE
         whisper_model = WHISPER_MODEL
-        summary_model = OLLAMA_CHAT_MODEL
+        custom_vocabulary = CUSTOM_VOCABULARY
+        ollama_chat_model = OLLAMA_CHAT_MODEL
+        advanced_diarization_enabled = ADVANCED_DIARIZATION_ENABLED
+        huggingface_token = HUGGINGFACE_TOKEN
 
         # Validate the screen upload fully before creating the permanent session
         # directory: staged in a scratch temp dir first (on the same filesystem
@@ -1014,7 +1245,10 @@ def process(
                 "system_webm": str(system_webm) if system_webm else None,
                 "mic_webm": str(mic_webm) if mic_webm else None,
                 "whisper_model": whisper_model,
-                "summary_model": summary_model,
+                "custom_vocabulary": custom_vocabulary,
+                "ollama_chat_model": ollama_chat_model,
+                "advanced_diarization_enabled": advanced_diarization_enabled,
+                "huggingface_token": huggingface_token,
             },
         )
         jobs.enqueue(job_id)
@@ -1057,6 +1291,58 @@ def _is_valid_session_id(session_id: str) -> bool:
     is a defense-in-depth format check before session_id is used to build a
     filesystem path, independent of the sessions_index.json lookup."""
     return bool(session_id) and "/" not in session_id and "\\" not in session_id and _SESSION_ID_RE.match(session_id) is not None
+
+
+@app.get("/sessions/{session_id}/transcript")
+def get_session_transcript(session_id: str):
+    store = STORE
+    _get_session_or_404(store, session_id)
+    session_dir = store / session_id
+    segments = load_transcript_segments(session_dir)
+    # Resolve raw speaker labels ("You"/"Others", or a pyannote SPEAKER_N
+    # label once Track B lands) against any user-set names -- done here, at
+    # the API boundary, rather than mutating transcript.json, so the raw
+    # diarization output stays immutable and a rename is always reversible.
+    names = load_speaker_names(session_dir)
+    # raw_speaker is kept alongside the resolved display name so a second
+    # rename can still target the original stable label -- the frontend
+    # only ever sees the resolved value in `speaker`, and can't reconstruct
+    # "SPEAKER_00" from having previously displayed "Alice".
+    resolved = [
+        {
+            **seg,
+            "speaker": names.get(seg.get("speaker"), seg.get("speaker")),
+            "raw_speaker": seg.get("speaker"),
+        }
+        for seg in segments
+    ]
+    return {"segments": resolved}
+
+
+class SpeakerNamesUpdate(BaseModel):
+    names: dict[str, str]
+
+
+@app.patch("/sessions/{session_id}/speaker-names")
+def update_speaker_names(session_id: str, body: SpeakerNamesUpdate):
+    store = STORE
+    _get_session_or_404(store, session_id)
+    session_dir = store / session_id
+    write_speaker_names(session_dir, body.names)
+    return {"speaker_names": load_speaker_names(session_dir)}
+
+
+@app.get("/sessions/{session_id}/action-items")
+def get_session_action_items(session_id: str):
+    """action_items is None when structured extraction is unavailable for
+    this session (an old session recorded before this feature existed, or
+    one where the model's JSON output never parsed even after the
+    extract_action_items retry) -- the frontend falls back to the prose
+    notes rendering in that case rather than showing a broken checklist."""
+    store = STORE
+    _get_session_or_404(store, session_id)
+    items = load_action_items(store / session_id)
+    return {"action_items": items}
 
 
 @app.get("/sessions/{session_id}/export/notes")

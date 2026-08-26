@@ -23,6 +23,13 @@ def default_settings(default_storage_dir: Path) -> Dict[str, Any]:
         "whisper_model": os.getenv("WHISPER_MODEL", "tiny.en"),
         "storage_dir": str(default_storage_dir),
         "ollama_chat_model": os.getenv("OLLAMA_CHAT_MODEL", "gemma3:4b"),
+        "custom_vocabulary": "",
+        # Track B: true n-party diarization via pyannote. Off by default --
+        # it's an optional, heavier dependency (torch/pyannote.audio) and
+        # requires a HuggingFace access token (gated model weights), so it
+        # must never turn on without the user explicitly opting in.
+        "advanced_diarization_enabled": False,
+        "huggingface_token": "",
     }
 
 

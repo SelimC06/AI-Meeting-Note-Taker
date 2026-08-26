@@ -136,6 +136,83 @@ export async function* streamChatReply(
   }
 }
 
+export type GraphSource = { id: string; title: string; created_at: string };
+
+export type GraphChatEvent =
+  | { type: "sources"; sources: GraphSource[] }
+  | { type: "token"; token: string };
+
+// Streams POST /graph/chat: same NDJSON framing as streamChatReply
+// ({"token"}/{"error"} lines) plus one leading {"sources": [...]} line,
+// surfaced as a typed event so the UI can render source chips.
+export async function* streamGraphChatReply(
+  message: string,
+  history: ChatTurn[],
+  signal?: AbortSignal
+): AsyncGenerator<GraphChatEvent> {
+  const resp = await fetch(`${BACKEND_URL}/graph/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, history }),
+    signal,
+  });
+
+  if (!resp.ok || !resp.body) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`Chat request failed: ${resp.status}${text ? ` ${text}` : ""}`);
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const parseLine = (line: string): GraphChatEvent | null => {
+    const obj = JSON.parse(line) as { token?: string; error?: string; sources?: GraphSource[] };
+    if (obj.error !== undefined) {
+      throw new Error(`Chat failed mid-response: ${obj.error}`);
+    }
+    if (obj.sources !== undefined) {
+      return { type: "sources", sources: obj.sources };
+    }
+    if (obj.token !== undefined && obj.token !== "") {
+      return { type: "token", token: obj.token };
+    }
+    return null;
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newline;
+      while ((newline = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line) {
+          const event = parseLine(line);
+          if (event) yield event;
+        }
+      }
+    }
+    buffer += decoder.decode();
+    const rest = buffer.trim();
+    if (rest) {
+      try {
+        const event = parseLine(rest);
+        if (event) yield event;
+      } catch (e) {
+        if (e instanceof SyntaxError) {
+          throw new Error("Chat connection was interrupted before the reply finished.");
+        }
+        throw e;
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}
+
 export type WhisperModelChoice = {
   value: string;
   label: string;
@@ -146,6 +223,12 @@ export type Settings = {
   whisper_model: string;
   storage_dir: string;
   ollama_chat_model: string;
+  custom_vocabulary: string;
+  // Track B: true n-party diarization via pyannote. Off by default -- an
+  // optional, heavier feature that requires a HuggingFace access token to
+  // download the (gated) model weights.
+  advanced_diarization_enabled: boolean;
+  huggingface_token: string;
   whisper_model_choices: WhisperModelChoice[];
 };
 
@@ -158,7 +241,17 @@ export async function getSettings(): Promise<Settings> {
 }
 
 export async function updateSettings(
-  partial: Partial<Pick<Settings, "whisper_model" | "storage_dir" | "ollama_chat_model">>
+  partial: Partial<
+    Pick<
+      Settings,
+      | "whisper_model"
+      | "storage_dir"
+      | "ollama_chat_model"
+      | "custom_vocabulary"
+      | "advanced_diarization_enabled"
+      | "huggingface_token"
+    >
+  >
 ): Promise<Settings> {
   const resp = await fetch(`${BACKEND_URL}/settings`, {
     method: "PATCH",
@@ -224,6 +317,73 @@ export async function deleteSessionForever(id: string): Promise<void> {
   if (!resp.ok) {
     throw new Error(`Failed to delete session: ${resp.status}`);
   }
+}
+
+// Speaker is "You"/"Others" (Track A's mic-vs-system 2-party split) by
+// default, a raw pyannote label like "SPEAKER_00" (or a user-renamed value,
+// already resolved server-side) once Track B diarization is enabled, or
+// null when no structured transcript was produced at all (e.g. only one of
+// the mic/system tracks was captured and diarization wasn't enabled, so
+// nothing could label it).
+export type TranscriptSegment = {
+  start: number;
+  end: number;
+  speaker: string | null;
+  text: string;
+  // The original, stable label (e.g. "SPEAKER_00") before any user rename
+  // was resolved into `speaker` -- needed to target a second rename at the
+  // right key, since `speaker` alone can't be reversed back to it.
+  raw_speaker?: string | null;
+};
+
+export async function getSessionTranscript(id: string): Promise<TranscriptSegment[]> {
+  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/transcript`);
+  if (!resp.ok) {
+    throw new Error(`Failed to load transcript: ${resp.status}`);
+  }
+  const data = (await resp.json()) as { segments: TranscriptSegment[] };
+  return data.segments;
+}
+
+// Maps a raw speaker label (e.g. "SPEAKER_00") to a user-chosen display
+// name. Partial: only the labels included in `names` are touched, existing
+// mappings for other labels in the same session are preserved (the backend
+// merges rather than replaces).
+export async function updateSpeakerNames(
+  id: string,
+  names: Record<string, string>
+): Promise<Record<string, string>> {
+  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/speaker-names`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ names }),
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to update speaker names: ${resp.status}`);
+  }
+  const data = (await resp.json()) as { speaker_names: Record<string, string> };
+  return data.speaker_names;
+}
+
+// null action_items means structured extraction is unavailable for this
+// session -- an old session recorded before this feature existed, or one
+// where the local model's JSON output never parsed even after the
+// backend's own retry. Callers must fall back to rendering the session's
+// prose `notes` instead of a checklist; never treat null the same as an
+// empty (but valid) list.
+export type ActionItem = {
+  text: string;
+  owner: string | null;
+  due: string | null;
+};
+
+export async function getSessionActionItems(id: string): Promise<ActionItem[] | null> {
+  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/action-items`);
+  if (!resp.ok) {
+    throw new Error(`Failed to load action items: ${resp.status}`);
+  }
+  const data = (await resp.json()) as { action_items: ActionItem[] | null };
+  return data.action_items;
 }
 
 export function exportSessionNotesUrl(id: string): string {

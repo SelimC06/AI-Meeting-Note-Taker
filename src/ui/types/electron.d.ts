@@ -69,6 +69,8 @@ declare global {
 
   type RailPopState = { popped: boolean };
 
+  type ResizeDirection = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
+
   interface Window {
     // The port the backend actually bound to -- normally 8000, but a fallback
     // port when that was held by a foreign process (see main.js's
@@ -77,6 +79,12 @@ declare global {
     windowControls?: {
       minimize: () => void;
       close: () => void;
+      // Manual resize, driven by ResizeHandles.tsx -- transparent
+      // BrowserWindows lose the native resize-by-dragging-the-edge behavior
+      // on Windows regardless of `resizable: true`, so this reimplements it.
+      beginWindowResize: (direction: ResizeDirection) => Promise<void>;
+      windowResizeMove: () => void;
+      endWindowResize: () => Promise<void>;
       sendRailCommand: (action: RailCommandAction) => Promise<void>;
       onRailCommand: (callback: (action: RailCommandAction) => void) => () => void;
       pushRailStatus: (status: RailStatus) => Promise<void>;

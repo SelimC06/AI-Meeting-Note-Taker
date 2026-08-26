@@ -29,6 +29,9 @@ def test_default_settings_uses_env_vars(monkeypatch, tmp_path):
         "whisper_model": "small.en",
         "storage_dir": str(storage),
         "ollama_chat_model": "custom-chat:latest",
+        "custom_vocabulary": "",
+        "advanced_diarization_enabled": False,
+        "huggingface_token": "",
     }
 
 
@@ -40,6 +43,9 @@ def test_default_settings_falls_back_without_env_vars(monkeypatch, tmp_path):
     assert result["whisper_model"] == "tiny.en"
     assert result["ollama_chat_model"] == "gemma3:4b"
     assert result["storage_dir"] == str(storage)
+    assert result["custom_vocabulary"] == ""
+    assert result["advanced_diarization_enabled"] is False
+    assert result["huggingface_token"] == ""
 
 
 def test_load_or_init_seeds_and_persists_when_missing(tmp_path):
@@ -131,6 +137,24 @@ def test_save_merges_partial_update(tmp_path):
     assert result["storage_dir"] == str(storage)
     on_disk = json.loads(settings_path.read_text(encoding="utf-8"))
     assert on_disk["whisper_model"] == "small.en"
+
+
+def test_save_persists_advanced_diarization_settings(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    storage = tmp_path / "uploads"
+    load_or_init(settings_path, storage)
+
+    result = save(
+        settings_path,
+        {"advanced_diarization_enabled": True, "huggingface_token": "hf_abc123"},
+        storage,
+    )
+
+    assert result["advanced_diarization_enabled"] is True
+    assert result["huggingface_token"] == "hf_abc123"
+    on_disk = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert on_disk["advanced_diarization_enabled"] is True
+    assert on_disk["huggingface_token"] == "hf_abc123"
 
 
 def test_save_no_leftover_tmp_file(tmp_path):

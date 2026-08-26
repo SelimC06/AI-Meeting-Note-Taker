@@ -7,7 +7,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
 SESSIONS_INDEX_FILENAME = "sessions_index.json"
 
@@ -522,6 +522,97 @@ def sweep_stale_staging_dirs(store_dir: Path, max_age_seconds: int = 3600) -> Li
     return removed
 
 
+# Per-session structured transcript (Track A's "You" vs. "Others" segments),
+# stored as its own file rather than in sessions_index.json -- keeps the
+# index light per the existing pattern of storing large content (notes.md)
+# outside it.
+TRANSCRIPT_FILENAME = "transcript.json"
+
+
+def write_transcript_segments(session_dir: Path, segments: List[dict]) -> None:
+    """Atomically write a session's transcript segments to transcript.json.
+
+    Same fsync-before-replace pattern as _write_sessions_atomic /
+    settings_store._write_json_dict -- a power loss between write and replace
+    must never leave a truncated/empty transcript.json behind.
+    """
+    session_dir.mkdir(parents=True, exist_ok=True)
+    final_path = session_dir / TRANSCRIPT_FILENAME
+    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(segments, ensure_ascii=False, indent=2))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, final_path)
+
+
+def load_transcript_segments(session_dir: Path) -> List[dict]:
+    """Read a session's transcript.json. Missing or corrupt file -> []
+    (same resilience contract as load_sessions)."""
+    path = session_dir / TRANSCRIPT_FILENAME
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError, UnicodeDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return data
+
+
+# Per-session structured action items (see LLaVA_summarize.extract_action_items),
+# stored as its own file rather than in sessions_index.json -- same rationale
+# as TRANSCRIPT_FILENAME above: keeps the index light, and this is only
+# written when structured extraction actually succeeded, so its mere
+# presence already distinguishes "has structured action items" from "fell
+# back to prose notes for this session" without needing a separate flag.
+SUMMARY_FILENAME = "summary.json"
+
+
+def write_action_items(session_dir: Path, action_items: List[dict]) -> None:
+    """Atomically write a session's structured action items to summary.json.
+
+    Same fsync-before-replace pattern as write_transcript_segments /
+    _write_sessions_atomic. Only ever called with a non-None list -- callers
+    that got None back from extract_action_items (both parse attempts
+    failed, or extraction wasn't attempted) must simply not call this, so a
+    missing file unambiguously means "no structured data for this session".
+    """
+    session_dir.mkdir(parents=True, exist_ok=True)
+    final_path = session_dir / SUMMARY_FILENAME
+    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"action_items": action_items}, ensure_ascii=False, indent=2))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, final_path)
+
+
+def load_action_items(session_dir: Path) -> Optional[List[dict]]:
+    """Read a session's summary.json. Missing, corrupt, or malformed-shape
+    file -> None (same resilience contract as load_sessions/
+    load_transcript_segments). Callers (the /action-items endpoint) treat
+    None as "structured action items aren't available for this session" --
+    an old session recorded before this feature existed, or one where both
+    of extract_action_items' parse attempts failed -- and the frontend falls
+    back to showing the prose notes instead of a checklist.
+    """
+    path = session_dir / SUMMARY_FILENAME
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    items = data.get("action_items")
+    if not isinstance(items, list):
+        return None
+    return items
+
+
 def sweep_stale_partial_mux_files(store_dir: Path, max_age_seconds: int = 3600) -> List[str]:
     """Removes leftover .part mux temp files (see mux_video_audio) older than
     max_age_seconds. Meant to run once at backend startup, alongside the
@@ -562,3 +653,46 @@ def sweep_stale_partial_mux_files(store_dir: Path, max_age_seconds: int = 3600) 
         except OSError:
             continue
     return removed
+
+
+# Track B: user-editable overrides mapping a raw pyannote label
+# ("SPEAKER_00") to a real name ("Alice"). Kept as its own small file,
+# resolved against transcript.json at the API boundary
+# (GET /sessions/{id}/transcript) rather than mutating the raw diarization
+# output -- keeps transcript.json immutable/re-mappable if a name is
+# corrected twice.
+SPEAKER_NAMES_FILENAME = "speaker_names.json"
+
+
+def load_speaker_names(session_dir: Path) -> Dict[str, str]:
+    """Read a session's speaker_names.json. Missing, corrupt, or
+    malformed-shape file -> {} (same resilience contract as
+    load_transcript_segments)."""
+    path = session_dir / SPEAKER_NAMES_FILENAME
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError, UnicodeDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def write_speaker_names(session_dir: Path, updates: Dict[str, str]) -> None:
+    """Merge `updates` into a session's speaker name map and atomically
+    write the result -- a partial PATCH (renaming one speaker) must not
+    clobber names already set for other speakers in the same session.
+
+    Same fsync-before-replace pattern as write_transcript_segments.
+    """
+    session_dir.mkdir(parents=True, exist_ok=True)
+    merged = {**load_speaker_names(session_dir), **updates}
+    final_path = session_dir / SPEAKER_NAMES_FILENAME
+    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(merged, ensure_ascii=False, indent=2))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, final_path)

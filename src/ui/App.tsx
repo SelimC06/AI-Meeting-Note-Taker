@@ -1,6 +1,7 @@
 // src/ui/App.tsx
 import { useEffect, useRef, useState } from "react";
 import TitleBar from "./components/TitleBar";
+import ResizeHandles from "./components/ResizeHandles";
 import Sidebar from "./components/Sidebar";
 import Chat from "./components/Chat";
 import StatusLine from "./components/StatusLine";
@@ -12,6 +13,7 @@ import OllamaOnboardingGate from "./components/OllamaOnboardingGate";
 import { useSessions } from "./hooks/useSessions";
 import { useBackendHealth } from "./hooks/useBackendHealth";
 import { useBackendLifecycle } from "./hooks/useBackendLifecycle";
+import { useChatSessions } from "./hooks/useChatSessions";
 
 function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -28,6 +30,7 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarView, setSidebarView] = useState<"active" | "trash">("active");
   const { sessions, error: sessionsError, reload: reloadSessions } = useSessions(true, false);
+  const chatSessions = useChatSessions();
   const health = useBackendHealth(true);
   const backendUp = health?.backend ?? false;
   // Sidebar/Chat use this to stop suppressing sessionsError once the backend
@@ -113,8 +116,8 @@ function App() {
   }, []);
 
   return (
-    <div className="h-full flex items-center justify-center">
-      <div className="h-[450px] w-[800px] rounded-sm border border-line bg-void overflow-hidden flex flex-col">
+    <div className="h-full relative">
+      <div className="h-full w-full rounded-sm border border-line bg-void overflow-hidden flex flex-col">
         <TitleBar onOpenSettings={() => setSettingsOpen(true)} />
         <main className="flex-1 min-h-0 overflow-hidden [-webkit-app-region:no-drag] relative flex flex-col">
           <BackendStatusBanner />
@@ -131,6 +134,7 @@ function App() {
                 onSelect={setSelectedId}
                 backendUp={backendUp}
                 backendFailed={backendFailed}
+                onSessionDeleted={chatSessions.discardSession}
               />
             </ErrorBoundary>
             <ErrorBoundary>
@@ -140,6 +144,8 @@ function App() {
                 selectedId={selectedId}
                 backendUp={backendUp}
                 backendFailed={backendFailed}
+                onSelectSession={setSelectedId}
+                chatSessions={chatSessions}
               />
             </ErrorBoundary>
             <button
@@ -156,6 +162,11 @@ function App() {
             >
               {sidebarCollapsed ? "›" : "‹"}
             </button>
+
+            {/* Settings opens as its own rectangle over just this row --
+                the status line below stays visible and un-dimmed, same as
+                the title bar above it. */}
+            {settingsOpen && <SettingsModal active onClose={() => setSettingsOpen(false)} />}
           </div>
 
           <StatusLine
@@ -166,7 +177,6 @@ function App() {
           />
           <OllamaOnboardingGate active={backendUp} />
 
-          {settingsOpen && <SettingsModal active onClose={() => setSettingsOpen(false)} />}
           {showRecordingConsent && (
             <RecordingConsentModal
               onCancel={() => respondToRecordingConsent(false)}
@@ -175,6 +185,7 @@ function App() {
           )}
         </main>
       </div>
+      <ResizeHandles />
     </div>
   );
 }

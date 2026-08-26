@@ -2,7 +2,7 @@ import subprocess
 from faster_whisper import WhisperModel
 from pathlib import Path
 from .bin_paths import FFMPEG_BIN
-from .whisper_cache import get_whisper_model
+from .whisper_cache import get_whisper_model, transcribe_audio
 
 
 def extract_frames(
@@ -40,11 +40,39 @@ def extract_frames(
     return frames
 
 
+def transcribe_wav(
+    wav_path: str,
+    model_name: str = "base.en",
+    initial_prompt: str | None = None,
+) -> list[dict]:
+    """Transcribe a single already-extracted wav file, returning segment-level
+    timestamps. Used for the mic/system 2-party split: unlike
+    stop_recording_and_transcribe, this skips the ffmpeg audio-extraction
+    step entirely since the wav is already 16kHz mono.
+    """
+    model = get_whisper_model(WhisperModel, model_name, device="cpu", compute_type="int8")
+    segments, _ = transcribe_audio(model, wav_path, initial_prompt=initial_prompt)
+    return [
+        {
+            "start": seg.start,
+            "end": seg.end,
+            "text": seg.text.strip(),
+            "words": [
+                {"word": w.word, "start": w.start, "end": w.end, "probability": w.probability}
+                for w in (seg.words or [])
+            ],
+        }
+        for seg in segments
+        if seg.text and seg.text.strip()
+    ]
+
+
 def stop_recording_and_transcribe(
     video_path="capture.mkv",
     transcript_prefix="transcript_",
     model_name="base.en",
     separate_tracks=True,
+    initial_prompt: str | None = None,
     # frame extraction options:
     extract_frames_after: bool = False,
     frames_out_dir: str = "frames",
@@ -68,7 +96,7 @@ def stop_recording_and_transcribe(
         ], check=True)
 
     model = get_whisper_model(WhisperModel, model_name, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(str(wav_path))
+    segments, _ = transcribe_audio(model, str(wav_path), initial_prompt=initial_prompt)
 
     full_text = " ".join(seg.text for seg in segments).strip()
     out_txt = Path(transcript_prefix).with_suffix(".txt")

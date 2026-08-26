@@ -1046,3 +1046,140 @@ def test_sweep_stale_partial_mux_files_does_not_double_process_a_file(tmp_path: 
 
 def test_sweep_stale_partial_mux_files_missing_store_dir_returns_empty(tmp_path: Path):
     assert sweep_stale_partial_mux_files(tmp_path / "does-not-exist") == []
+
+
+# ---- transcript segments storage --------------------------------------------
+
+def test_write_and_load_transcript_segments_round_trip(tmp_path: Path):
+    from app.sessions_store import write_transcript_segments, load_transcript_segments
+
+    session_dir = tmp_path / "sess-1"
+    segments = [
+        {"start": 0.0, "end": 1.5, "speaker": "You", "text": "hello"},
+        {"start": 1.5, "end": 3.0, "speaker": "Others", "text": "hi there"},
+    ]
+
+    write_transcript_segments(session_dir, segments)
+
+    assert load_transcript_segments(session_dir) == segments
+
+
+def test_load_transcript_segments_missing_file_returns_empty_list(tmp_path: Path):
+    from app.sessions_store import load_transcript_segments
+
+    assert load_transcript_segments(tmp_path / "sess-1") == []
+
+
+def test_load_transcript_segments_tolerates_corrupt_file(tmp_path: Path):
+    from app.sessions_store import load_transcript_segments
+
+    session_dir = tmp_path / "sess-1"
+    session_dir.mkdir()
+    (session_dir / "transcript.json").write_text("{not valid json", encoding="utf-8")
+
+    assert load_transcript_segments(session_dir) == []
+
+
+def test_load_transcript_segments_tolerates_non_list_json(tmp_path: Path):
+    from app.sessions_store import load_transcript_segments
+
+    session_dir = tmp_path / "sess-1"
+    session_dir.mkdir()
+    (session_dir / "transcript.json").write_text(json.dumps({"not": "a list"}), encoding="utf-8")
+
+    assert load_transcript_segments(session_dir) == []
+
+
+def test_write_transcript_segments_fsyncs_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from app.sessions_store import write_transcript_segments
+
+    calls = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(
+        "app.sessions_store.os.fsync",
+        lambda fd: (calls.append(fd), real_fsync(fd))[1],
+    )
+
+    write_transcript_segments(tmp_path / "sess-1", [{"start": 0.0, "end": 1.0, "speaker": "You", "text": "hi"}])
+
+    assert len(calls) == 1
+
+
+def test_write_transcript_segments_no_leftover_tmp_file(tmp_path: Path):
+    from app.sessions_store import write_transcript_segments
+
+    session_dir = tmp_path / "sess-1"
+    write_transcript_segments(session_dir, [{"start": 0.0, "end": 1.0, "speaker": "You", "text": "hi"}])
+
+    assert not (session_dir / "transcript.json.tmp").exists()
+    assert (session_dir / "transcript.json").exists()
+
+
+def test_write_transcript_segments_creates_session_dir_if_missing(tmp_path: Path):
+    from app.sessions_store import write_transcript_segments
+
+    session_dir = tmp_path / "not-yet-created"
+    write_transcript_segments(session_dir, [])
+
+    assert (session_dir / "transcript.json").exists()
+
+
+# ---- speaker name overrides (Track B: rename SPEAKER_00 -> a real name) ----
+
+def test_write_and_load_speaker_names_round_trip(tmp_path: Path):
+    from app.sessions_store import write_speaker_names, load_speaker_names
+
+    session_dir = tmp_path / "sess-1"
+    names = {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}
+
+    write_speaker_names(session_dir, names)
+
+    assert load_speaker_names(session_dir) == names
+
+
+def test_load_speaker_names_missing_file_returns_empty_dict(tmp_path: Path):
+    from app.sessions_store import load_speaker_names
+
+    assert load_speaker_names(tmp_path / "sess-1") == {}
+
+
+def test_load_speaker_names_tolerates_corrupt_file(tmp_path: Path):
+    from app.sessions_store import load_speaker_names
+
+    session_dir = tmp_path / "sess-1"
+    session_dir.mkdir()
+    (session_dir / "speaker_names.json").write_text("{not valid json", encoding="utf-8")
+
+    assert load_speaker_names(session_dir) == {}
+
+
+def test_load_speaker_names_tolerates_non_dict_json(tmp_path: Path):
+    from app.sessions_store import load_speaker_names
+
+    session_dir = tmp_path / "sess-1"
+    session_dir.mkdir()
+    (session_dir / "speaker_names.json").write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+
+    assert load_speaker_names(session_dir) == {}
+
+
+def test_write_speaker_names_merges_into_existing_map(tmp_path: Path):
+    from app.sessions_store import write_speaker_names, load_speaker_names
+
+    session_dir = tmp_path / "sess-1"
+    write_speaker_names(session_dir, {"SPEAKER_00": "Alice"})
+    write_speaker_names(session_dir, {"SPEAKER_01": "Bob"})
+
+    assert load_speaker_names(session_dir) == {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}
+
+
+def test_write_speaker_names_no_leftover_tmp_file(tmp_path: Path):
+    from app.sessions_store import write_speaker_names
+
+    session_dir = tmp_path / "sess-1"
+    write_speaker_names(session_dir, {"SPEAKER_00": "Alice"})
+
+    assert not (session_dir / "speaker_names.json.tmp").exists()
+    assert (session_dir / "speaker_names.json").exists()

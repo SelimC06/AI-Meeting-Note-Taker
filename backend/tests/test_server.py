@@ -40,6 +40,12 @@ def client(tmp_path, monkeypatch):
     # call. Tests that care about a specific outcome monkeypatch
     # assert_ollama_up again themselves, after this fixture runs.
     monkeypatch.setattr(server_module, "assert_ollama_up", lambda: None)
+    # Default action-items extraction to "unavailable" (None) so tests that
+    # only care about llava_complete/notes never make a real network call to
+    # a local Ollama server. Tests exercising the action-items feature
+    # itself monkeypatch llava_extract_action_items again after this fixture
+    # runs.
+    monkeypatch.setattr(server_module, "llava_extract_action_items", lambda **kwargs: None)
     # base_url must be an allowed TrustedHostMiddleware host -- the default
     # "http://testserver" would otherwise get rejected with 400 before
     # reaching any route, since only localhost/127.0.0.1 are allowed.
@@ -473,7 +479,7 @@ def test_process_falls_back_to_stub_notes_without_transcription(client, monkeypa
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             raise RuntimeError("simulated whisper failure")
 
     fake_module = types.ModuleType("faster_whisper")
@@ -560,7 +566,7 @@ def test_process_skips_summarization_when_no_transcript(client, monkeypatch, cap
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -648,6 +654,55 @@ def test_process_reuses_existing_transcript_when_summarization_fails(client, mon
     # AI summary that happened to just be the transcript -- the user has no
     # way to tell the model never actually ran.
     assert "AI summarization failed" in job["notes"]
+
+
+def test_process_summarization_uses_configured_ollama_chat_model(client, monkeypatch, tmp_path):
+    """Regression test: summarization used to always call llava_complete with
+    no model= argument, so it silently fell back to LLaVA_summarize's own
+    hardcoded DEFAULT_MODEL (a vision model configurable only via the
+    OLLAMA_VISION_MODEL env var) -- completely ignoring whatever model the
+    user picked in Settings for chat. The configured OLLAMA_CHAT_MODEL must
+    now be threaded through as the model= argument.
+    """
+    import app.server as server_module
+
+    server_module.OLLAMA_CHAT_MODEL = "llama3.1:8b"
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    transcript_path = tmp_path / "transcript_.txt"
+    transcript_path.write_text("hello from existing transcript", encoding="utf-8")
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        return str(transcript_path), []
+
+    captured = {}
+
+    def fake_llava_complete(**kwargs):
+        captured.update(kwargs)
+        return "# Stub notes\n"
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", fake_llava_complete)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"])
+
+    assert captured["model"] == "llama3.1:8b"
 
 
 def test_process_survives_ollama_read_timeout_during_summarization(client, monkeypatch, tmp_path):
@@ -741,7 +796,7 @@ def test_process_survives_stop_recording_and_transcribe_failure(client, monkeypa
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -803,7 +858,7 @@ def test_process_appends_to_sessions_and_get_sessions_returns_it(client, monkeyp
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -861,7 +916,7 @@ def test_sessions_returns_newest_first(client, monkeypatch):
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -1325,7 +1380,7 @@ def test_process_does_not_extract_frames_via_stop_recording_and_transcribe(clien
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -1378,7 +1433,7 @@ def test_jobs_list_contains_created_job_with_expected_keys(client, monkeypatch):
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -1435,7 +1490,7 @@ def test_jobs_list_strips_notes_and_video_path_but_job_detail_keeps_them(client,
         def __init__(self, model_name, device=None, compute_type=None):
             pass
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -1529,8 +1584,22 @@ def test_get_settings_returns_current_values_and_choices(client: TestClient):
     assert "whisper_model" in body
     assert "storage_dir" in body
     assert "ollama_chat_model" in body
+    assert "custom_vocabulary" in body
     values = {c["value"] for c in body["whisper_model_choices"]}
     assert values == {"tiny.en", "base.en", "small.en", "medium.en"}
+
+
+def test_patch_settings_updates_custom_vocabulary(client: TestClient):
+    resp = client.patch("/settings", json={"custom_vocabulary": "Kestrel, SSOT"})
+    assert resp.status_code == 200
+    assert resp.json()["custom_vocabulary"] == "Kestrel, SSOT"
+
+    import app.server as server_module
+    assert server_module.CUSTOM_VOCABULARY == "Kestrel, SSOT"
+
+    # Reflected on a subsequent GET too.
+    resp2 = client.get("/settings")
+    assert resp2.json()["custom_vocabulary"] == "Kestrel, SSOT"
 
 
 def test_patch_settings_updates_whisper_model(client: TestClient):
@@ -1549,6 +1618,37 @@ def test_patch_settings_updates_whisper_model(client: TestClient):
 def test_patch_settings_rejects_invalid_whisper_model(client: TestClient):
     resp = client.patch("/settings", json={"whisper_model": "not-a-real-model"})
     assert resp.status_code == 400
+
+
+def test_get_settings_includes_advanced_diarization_fields(client: TestClient):
+    resp = client.get("/settings")
+    body = resp.json()
+    assert body["advanced_diarization_enabled"] is False
+    assert body["huggingface_token"] == ""
+
+
+def test_patch_settings_updates_advanced_diarization_enabled(client: TestClient):
+    resp = client.patch("/settings", json={"advanced_diarization_enabled": True})
+    assert resp.status_code == 200
+    assert resp.json()["advanced_diarization_enabled"] is True
+
+    import app.server as server_module
+    assert server_module.ADVANCED_DIARIZATION_ENABLED is True
+
+    resp2 = client.get("/settings")
+    assert resp2.json()["advanced_diarization_enabled"] is True
+
+
+def test_patch_settings_updates_huggingface_token(client: TestClient):
+    resp = client.patch("/settings", json={"huggingface_token": "hf_abc123"})
+    assert resp.status_code == 200
+    assert resp.json()["huggingface_token"] == "hf_abc123"
+
+    import app.server as server_module
+    assert server_module.HUGGINGFACE_TOKEN == "hf_abc123"
+
+    resp2 = client.get("/settings")
+    assert resp2.json()["huggingface_token"] == "hf_abc123"
 
 
 def test_patch_settings_updates_ollama_chat_model(client: TestClient):
@@ -1650,6 +1750,31 @@ def test_patch_settings_rejects_storage_move_while_a_job_is_busy(client: TestCli
         assert not new_dir.exists()
     finally:
         jobs.update_job(job_id, status="done")
+
+
+def test_patch_settings_rejects_storage_move_while_graph_indexing_is_busy(client: TestClient, tmp_path, monkeypatch):
+    """The graph indexing worker (graph_jobs._loop) writes knowledge_graph.json
+    into the store dir over a 30-90s Ollama call, the same way jobs.py's
+    worker writes session files -- a storage move mid-extraction can write
+    into a dir that's mid-move or already abandoned by the move. Regression
+    test mirroring test_patch_settings_rejects_storage_move_while_a_job_is_busy.
+    """
+    import app.server as server_module
+    from app import graph_jobs
+
+    if server_module.graph_jobs is None:
+        pytest.skip("graph_jobs feature not available in this build")
+
+    monkeypatch.setattr(graph_jobs, "is_busy", lambda: True)
+
+    new_dir = tmp_path.parent / f"{tmp_path.name}-new-storage"
+    original_store = server_module.STORE
+
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+
+    assert resp.status_code == 409
+    assert server_module.STORE == original_store
+    assert not new_dir.exists()
 
 
 def test_patch_settings_allows_storage_move_once_jobs_are_terminal(client: TestClient, tmp_path):
@@ -1982,6 +2107,74 @@ def test_process_uses_configured_whisper_model_via_transcribe_helper(client, mon
     assert captured["model_name"] == "small.en"
 
 
+def test_process_passes_custom_vocabulary_as_initial_prompt(client, monkeypatch):
+    import app.server as server_module
+
+    server_module.CUSTOM_VOCABULARY = "Kestrel, SSOT, Xiomara"
+
+    captured = {}
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        captured["initial_prompt"] = kwargs.get("initial_prompt")
+        return None, []
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"], timeout=30.0)
+    assert captured["initial_prompt"] == "Kestrel, SSOT, Xiomara"
+
+
+def test_process_empty_custom_vocabulary_passes_none_as_initial_prompt(client, monkeypatch):
+    import app.server as server_module
+
+    server_module.CUSTOM_VOCABULARY = ""
+
+    captured = {}
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        captured["initial_prompt"] = kwargs.get("initial_prompt")
+        return None, []
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"], timeout=30.0)
+    assert captured["initial_prompt"] is None
+
+
 def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
     import sys
     import types
@@ -2012,7 +2205,7 @@ def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
         def __init__(self, model_name, device=None, compute_type=None):
             captured["model_name"] = model_name
 
-        def transcribe(self, path, beam_size=1):
+        def transcribe(self, path, beam_size=1, **kwargs):
             return [FakeSegment()], object()
 
     fake_module = types.ModuleType("faster_whisper")
@@ -2026,6 +2219,147 @@ def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
     assert resp.status_code == 202
     wait_for_job(client, resp.json()["job_id"])
     assert captured["model_name"] == "medium.en"
+
+
+def test_process_fallback_whisper_uses_shared_transcribe_helper_defaults(client, monkeypatch):
+    """
+    Regression test for the beam_size=1 vs beam_size=5 drift between this
+    fallback path and the primary path documented in
+    docs/Core pipeline quality fix/03-transcription-accuracy.md -- both now
+    go through whisper_cache.transcribe_audio() so they can't diverge again.
+    """
+    import sys
+    import types
+    import app.server as server_module
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    captured = {}
+
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, device=None, compute_type=None):
+            pass
+
+        def transcribe(self, path, **kwargs):
+            captured.update(kwargs)
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"])
+
+    assert captured["beam_size"] == 1
+    assert captured["vad_filter"] is False
+    assert captured["word_timestamps"] is True
+
+
+def test_process_fallback_whisper_passes_custom_vocabulary_as_initial_prompt(client, monkeypatch):
+    import sys
+    import types
+    import app.server as server_module
+
+    server_module.CUSTOM_VOCABULARY = "Kestrel, SSOT, Xiomara"
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    captured = {}
+
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, device=None, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1, **kwargs):
+            captured["initial_prompt"] = kwargs.get("initial_prompt")
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"])
+    assert captured["initial_prompt"] == "Kestrel, SSOT, Xiomara"
+
+
+def test_process_whitespace_only_custom_vocabulary_passes_none_as_initial_prompt(client, monkeypatch):
+    import app.server as server_module
+
+    server_module.CUSTOM_VOCABULARY = "   \n"
+    # Reset WHISPER_MODEL -- a preceding test may have left it set to
+    # "medium.en" (used with a mocked faster_whisper module there), and if
+    # that leaked here it would make the real fallback whisper path (which
+    # this test can hit, since the primary path returns no txt_path) try to
+    # actually download an uncached model instead of using a cached one.
+    server_module.WHISPER_MODEL = "small.en"
+
+    captured = {}
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        captured["initial_prompt"] = kwargs.get("initial_prompt")
+        return None, []
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    wait_for_job(client, resp.json()["job_id"], timeout=30.0)
+    assert captured["initial_prompt"] is None
 
 
 def test_process_summarizes_with_the_configured_chat_model(client, monkeypatch):
@@ -2074,8 +2408,8 @@ def test_process_summarizes_with_the_configured_chat_model(client, monkeypatch):
     assert captured["model"] == "gemma3:4b"
 
 
-def test_process_summary_model_falls_back_when_job_predates_the_input(client, monkeypatch):
-    """A job queued by an older build has no "summary_model" key in its inputs;
+def test_process_chat_model_falls_back_when_job_predates_the_input(client, monkeypatch):
+    """A job queued by an older build has no "ollama_chat_model" key in its inputs;
     the worker must fall back to the configured model rather than KeyError."""
     import uuid
     import app.server as server_module
@@ -2115,7 +2449,7 @@ def test_process_summary_model_falls_back_when_job_predates_the_input(client, mo
             "system_webm": None,
             "mic_webm": None,
             "whisper_model": "tiny.en",
-            # no "summary_model" -- exactly what an older build enqueued
+            # no "ollama_chat_model" -- exactly what an older build enqueued
         },
     )
     jobs.enqueue(job_id)
@@ -2691,3 +3025,737 @@ def test_storage_usage_returns_counts_and_bytes(client: TestClient):
     assert body["used_bytes"] >= 100
     assert body["free_bytes"] > 0
     assert body["total_bytes"] > 0
+
+
+# ---------- graph chat ----------
+
+def _seed_session(sid, title, notes="notes", created_at="2026-08-01T10:00:00+00:00"):
+    from app.sessions_store import append_session
+    append_session(server_module.STORE, {
+        "id": sid, "created_at": created_at, "title": title, "notes": notes,
+        "video_path": "", "trashed_at": None, "status": "done",
+    })
+
+
+def test_graph_chat_streams_sources_line_then_tokens(client, monkeypatch):
+    _seed_session("m1", "Kickoff")
+    monkeypatch.setattr(server_module, "find_relevant_sessions", lambda store, q, max_sessions=5: ["m1"])
+    monkeypatch.setattr(server_module, "build_context", lambda store, sids: "CTX")
+
+    captured = {}
+
+    def fake_stream(context, message, history, model=None):
+        captured["context"] = context
+        captured["message"] = message
+        captured["history"] = history
+        yield "Hello "
+        yield "there."
+
+    monkeypatch.setattr(server_module, "stream_graph_chat_reply", fake_stream)
+
+    resp = client.post("/graph/chat", json={
+        "message": "what happened?",
+        "history": [{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"}],
+    })
+    assert resp.status_code == 200
+    lines = [json.loads(line) for line in resp.text.strip().splitlines()]
+    assert lines[0] == {"sources": [{"id": "m1", "title": "Kickoff", "created_at": "2026-08-01T10:00:00+00:00"}]}
+    assert "".join(line.get("token", "") for line in lines[1:]) == "Hello there."
+    assert captured["context"] == "CTX"
+    assert captured["message"] == "what happened?"
+    assert captured["history"] == [{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"}]
+
+
+def test_graph_chat_returns_503_when_ollama_down(client, monkeypatch):
+    def raise_down():
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(server_module, "assert_ollama_up", raise_down)
+    resp = client.post("/graph/chat", json={"message": "hi", "history": []})
+    assert resp.status_code == 503
+    assert "Local model unavailable" in resp.json()["detail"]
+
+
+def test_graph_chat_emits_error_line_on_midstream_failure(client, monkeypatch):
+    monkeypatch.setattr(server_module, "find_relevant_sessions", lambda store, q, max_sessions=5: [])
+    monkeypatch.setattr(server_module, "build_context", lambda store, sids: "")
+
+    def broken_stream(context, message, history, model=None):
+        yield "partial "
+        raise RuntimeError("ollama died mid-stream")
+
+    monkeypatch.setattr(server_module, "stream_graph_chat_reply", broken_stream)
+
+    resp = client.post("/graph/chat", json={"message": "hi", "history": []})
+    assert resp.status_code == 200
+    lines = [json.loads(line) for line in resp.text.strip().splitlines()]
+    assert lines[0] == {"sources": []}
+    assert lines[1] == {"token": "partial "}
+    assert "ollama died mid-stream" in lines[2]["error"]
+
+
+def test_process_job_enqueues_graph_indexing_after_save(client, monkeypatch):
+    # Same mock set as test_process_falls_back_to_stub_notes_without_transcription,
+    # plus a recorder on the graph enqueue hook.
+    import sys
+    import types
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, device=None, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1, **kwargs):
+            raise RuntimeError("simulated whisper failure")
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    enqueued = []
+    monkeypatch.setattr(server_module.graph_jobs, "enqueue_session", lambda sid: enqueued.append(sid))
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert enqueued == [resp.json()["session_id"]]
+
+
+# ---- Track A: mic/system dual-track diarization ("You" vs "Others") --------
+
+def _fake_to_wav_writer():
+    def fake_to_wav(src, dst, ar=16000, ac=1):
+        if src is None:
+            return None
+        dst.write_bytes(b"fake wav")
+        return dst
+    return fake_to_wav
+
+
+def test_process_transcribes_mic_and_system_tracks_independently_when_both_present(client, monkeypatch):
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+        name = Path(wav_path).name
+        if name == "mic.wav":
+            return [{"start": 0.0, "end": 1.0, "text": "yes exactly"}]
+        assert name == "system.wav"
+        return [{"start": 2.0, "end": 3.0, "text": "hello everyone"}]
+
+    monkeypatch.setattr(server_module, "transcribe_wav", fake_transcribe_wav)
+
+    def exploding_stop_recording_and_transcribe(**kwargs):
+        raise AssertionError(
+            "stop_recording_and_transcribe should not run when both mic and "
+            "system tracks are present -- the dual-track path should be used"
+        )
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", exploding_stop_recording_and_transcribe
+    )
+
+    captured = {}
+
+    def fake_llava_complete(**kwargs):
+        captured.update(kwargs)
+        return "# Notes\n"
+
+    monkeypatch.setattr(server_module, "llava_complete", fake_llava_complete)
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    session_id = job["session_id"]
+
+    transcript_resp = client.get(f"/sessions/{session_id}/transcript")
+    assert transcript_resp.status_code == 200
+    assert transcript_resp.json()["segments"] == [
+        {"start": 0.0, "end": 1.0, "speaker": "You", "text": "yes exactly", "words": [], "raw_speaker": "You"},
+        {"start": 2.0, "end": 3.0, "speaker": "Others", "text": "hello everyone", "words": [], "raw_speaker": "Others"},
+    ]
+
+    raw_txt = Path(captured["raw_txt_path"]).read_text(encoding="utf-8")
+    assert raw_txt == "You: yes exactly\nOthers: hello everyone"
+
+
+# ---- Track B: pyannote n-party diarization refinement ----------------------
+
+def _fake_save_upload(dst_dir, uf, name):
+    out = dst_dir / name
+    out.write_bytes(b"fake bytes")
+    return out
+
+
+def _fake_mux(video, audio, out_path):
+    out_path.write_bytes(b"fake final video")
+    return out_path
+
+
+def _post_dual_track(client, monkeypatch, fake_transcribe_wav):
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", _fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+    monkeypatch.setattr(server_module, "transcribe_wav", fake_transcribe_wav)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    assert resp.status_code == 202
+    return wait_for_job(client, resp.json()["job_id"])
+
+
+def _two_speaker_system_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+    name = Path(wav_path).name
+    if name == "mic.wav":
+        return [{"start": 0.0, "end": 1.0, "text": "yes exactly"}]
+    return [
+        {"start": 2.0, "end": 3.0, "text": "hello everyone"},
+        {"start": 4.0, "end": 5.0, "text": "hi there"},
+    ]
+
+
+def test_process_refines_others_with_pyannote_when_diarization_enabled(client, monkeypatch):
+    client.patch("/settings", json={"advanced_diarization_enabled": True, "huggingface_token": "tok"})
+
+    calls = []
+
+    def fake_diarize(wav_path, token):
+        calls.append((wav_path, token))
+        return [("SPEAKER_00", 2.0, 3.0), ("SPEAKER_01", 4.0, 5.0)]
+
+    monkeypatch.setattr(server_module, "pyannote_diarize", fake_diarize)
+
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    assert job["status"] == "done"
+
+    assert len(calls) == 1
+    assert Path(calls[0][0]).name == "system.wav"
+    assert calls[0][1] == "tok"
+
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    speakers = {s["speaker"] for s in segments}
+    assert speakers == {"You", "SPEAKER_00", "SPEAKER_01"}
+
+
+def test_process_skips_pyannote_diarization_when_disabled_by_default(client, monkeypatch):
+    def exploding_diarize(wav_path, token):
+        raise AssertionError("pyannote_diarize should not run when the setting is off")
+
+    monkeypatch.setattr(server_module, "pyannote_diarize", exploding_diarize)
+
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    assert job["status"] == "done"
+
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    assert {s["speaker"] for s in segments} == {"You", "Others"}
+
+
+def test_process_falls_back_to_track_a_output_when_pyannote_diarization_raises(client, monkeypatch):
+    client.patch("/settings", json={"advanced_diarization_enabled": True, "huggingface_token": "tok"})
+
+    def failing_diarize(wav_path, token):
+        raise RuntimeError("pyannote exploded")
+
+    monkeypatch.setattr(server_module, "pyannote_diarize", failing_diarize)
+
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    assert job["status"] == "done"
+
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    assert {s["speaker"] for s in segments} == {"You", "Others"}
+
+
+def test_process_does_not_call_pyannote_without_a_configured_token(client, monkeypatch):
+    client.patch("/settings", json={"advanced_diarization_enabled": True})
+
+    def exploding_diarize(wav_path, token):
+        raise AssertionError("pyannote_diarize should not run without a token configured")
+
+    monkeypatch.setattr(server_module, "pyannote_diarize", exploding_diarize)
+
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    assert job["status"] == "done"
+
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    assert {s["speaker"] for s in segments} == {"You", "Others"}
+
+
+def test_process_diarizes_single_track_fallback_when_enabled(client, monkeypatch):
+    """Only one of mic/system was captured -- Track A's dual-track split
+    can't run, but Track B can still diarize the single available track
+    directly when the setting is on."""
+    client.patch("/settings", json={"advanced_diarization_enabled": True, "huggingface_token": "tok"})
+
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", _fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+
+    def fake_llava_complete(**kwargs):
+        return Path(kwargs["raw_txt_path"]).read_text(encoding="utf-8")
+
+    monkeypatch.setattr(server_module, "llava_complete", fake_llava_complete)
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        out_txt = Path(kwargs["transcript_prefix"]).with_suffix(".txt")
+        out_txt.write_text("solo track transcript", encoding="utf-8")
+        return str(out_txt), None
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe
+    )
+
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+        return [
+            {"start": 0.0, "end": 1.0, "text": "hello"},
+            {"start": 2.0, "end": 3.0, "text": "hi back"},
+        ]
+
+    monkeypatch.setattr(server_module, "transcribe_wav", fake_transcribe_wav)
+
+    def fake_diarize(wav_path, token):
+        return [("SPEAKER_00", 0.0, 1.0), ("SPEAKER_01", 2.0, 3.0)]
+
+    monkeypatch.setattr(server_module, "pyannote_diarize", fake_diarize)
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert "solo track transcript" in job["notes"]
+
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    assert {s["speaker"] for s in segments} == {"SPEAKER_00", "SPEAKER_01"}
+
+
+def test_process_falls_back_to_single_track_transcript_when_only_mic_present(client, monkeypatch):
+    """Only one of mic/system was captured (e.g. system capture failed) --
+    Track A's 2-way split can't run, so this must fall back to today's
+    single-track, unlabeled transcript instead of erroring."""
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+
+    def exploding_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+        raise AssertionError("transcribe_wav should not run without both tracks present")
+
+    monkeypatch.setattr(server_module, "transcribe_wav", exploding_transcribe_wav)
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        transcript_path = Path(kwargs["transcript_prefix"]).with_suffix(".txt")
+        transcript_path.write_text("single track transcript", encoding="utf-8")
+        return str(transcript_path), None
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe
+    )
+
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n\nsingle track transcript")
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert "single track transcript" in job["notes"]
+
+    transcript_resp = client.get(f"/sessions/{job['session_id']}/transcript")
+    assert transcript_resp.status_code == 200
+    assert transcript_resp.json()["segments"] == []
+
+
+def test_process_falls_back_when_dual_track_transcription_raises(client, monkeypatch):
+    """A transcribe_wav failure on either track must fall back to the
+    existing single-track path rather than failing the whole job."""
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+
+    def failing_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+        raise RuntimeError("whisper exploded")
+
+    monkeypatch.setattr(server_module, "transcribe_wav", failing_transcribe_wav)
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        out_txt = Path(kwargs["transcript_prefix"]).with_suffix(".txt")
+        out_txt.write_text("fallback transcript", encoding="utf-8")
+        return str(out_txt), None
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe
+    )
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n\nfallback transcript")
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert "fallback transcript" in job["notes"]
+
+
+def test_get_session_transcript_404_for_unknown_session(client: TestClient):
+    resp = client.get("/sessions/does-not-exist/transcript")
+    assert resp.status_code == 404
+
+
+def test_get_session_transcript_returns_empty_list_when_no_transcript_json(client, monkeypatch):
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", None)
+    monkeypatch.setattr(server_module, "llava_complete", None)
+
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+
+    import sys
+    import types
+
+    class FakeSegment:
+        text = "hi"
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, device=None, compute_type=None):
+            pass
+
+        def transcribe(self, path, beam_size=1, **kwargs):
+            return [FakeSegment()], object()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+
+    transcript_resp = client.get(f"/sessions/{job['session_id']}/transcript")
+    assert transcript_resp.status_code == 200
+    assert transcript_resp.json() == {"segments": []}
+
+
+def test_get_session_transcript_resolves_speaker_names(client, monkeypatch):
+    _fake_save_and_mux(monkeypatch)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
+
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+        name = Path(wav_path).name
+        if name == "mic.wav":
+            return [{"start": 0.0, "end": 1.0, "text": "hi"}]
+        return [{"start": 2.0, "end": 3.0, "text": "hello"}]
+
+    monkeypatch.setattr(server_module, "transcribe_wav", fake_transcribe_wav)
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    session_id = job["session_id"]
+
+    # "Others" here stands in for a raw pyannote label in the Track B case --
+    # the resolution logic itself doesn't care what the raw label looks like.
+    rename_resp = client.patch(
+        f"/sessions/{session_id}/speaker-names", json={"names": {"Others": "Alice"}}
+    )
+    assert rename_resp.status_code == 200
+
+    transcript_resp = client.get(f"/sessions/{session_id}/transcript")
+    segments = transcript_resp.json()["segments"]
+    speakers = {s["speaker"] for s in segments}
+    assert speakers == {"You", "Alice"}
+
+    # raw_speaker must stay the original, stable label even after a rename --
+    # the frontend needs it to target a SECOND rename (e.g. "Alice" -> a
+    # corrected spelling) at the right key, since it can't reconstruct the
+    # raw label from an already-resolved display name.
+    others_segment = next(s for s in segments if s["speaker"] == "Alice")
+    assert others_segment["raw_speaker"] == "Others"
+    you_segment = next(s for s in segments if s["speaker"] == "You")
+    assert you_segment["raw_speaker"] == "You"
+
+
+def test_patch_speaker_names_404_for_unknown_session(client: TestClient):
+    resp = client.patch("/sessions/does-not-exist/speaker-names", json={"names": {"SPEAKER_00": "Alice"}})
+    assert resp.status_code == 404
+
+
+def test_patch_speaker_names_merges_across_calls(client, monkeypatch):
+    _fake_save_and_mux(monkeypatch)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
+    monkeypatch.setattr(server_module, "transcribe_wav", lambda *a, **k: [])
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    session_id = job["session_id"]
+
+    client.patch(f"/sessions/{session_id}/speaker-names", json={"names": {"SPEAKER_00": "Alice"}})
+    resp2 = client.patch(f"/sessions/{session_id}/speaker-names", json={"names": {"SPEAKER_01": "Bob"}})
+
+    assert resp2.json()["speaker_names"] == {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}
+
+
+def _fake_save_and_mux(monkeypatch):
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+
+    def fake_stop_recording_and_transcribe(**kwargs):
+        transcript_path = Path(kwargs["transcript_prefix"]).with_suffix(".txt")
+        transcript_path.write_text("someone should follow up", encoding="utf-8")
+        return str(transcript_path), None
+
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe
+    )
+
+
+def test_get_session_action_items_404_for_unknown_session(client: TestClient):
+    resp = client.get("/sessions/does-not-exist/action-items")
+    assert resp.status_code == 404
+
+
+def test_process_lands_action_items_in_session_and_survives_reload(client, monkeypatch):
+    """The happy path end-to-end: structured extraction succeeds, and the
+    result is retrievable via GET /sessions/{id}/action-items -- including
+    after the index is reloaded from disk (append_session/load_sessions),
+    not just from in-memory state right after the job finishes."""
+    _fake_save_and_mux(monkeypatch)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n\nfollow up")
+
+    def fake_extract_action_items(**kwargs):
+        return [{"text": "Send the follow-up doc", "owner": "Sam", "due": None}]
+
+    monkeypatch.setattr(server_module, "llava_extract_action_items", fake_extract_action_items)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    session_id = job["session_id"]
+
+    # Force a reload from disk, rather than serving a cached in-process copy.
+    from app import sessions_store as sessions_store_module
+
+    sessions_store_module._index_cache.clear()
+
+    action_items_resp = client.get(f"/sessions/{session_id}/action-items")
+    assert action_items_resp.status_code == 200
+    assert action_items_resp.json() == {
+        "action_items": [{"text": "Send the follow-up doc", "owner": "Sam", "due": None}]
+    }
+
+    # notes (the prose fallback content) must be completely unaffected by
+    # the structured extraction succeeding alongside it.
+    sessions_resp = client.get("/sessions")
+    record = next(r for r in sessions_resp.json() if r["id"] == session_id)
+    assert record["notes"] == "# Notes\n\nfollow up"
+
+
+def test_process_falls_back_to_prose_when_action_items_extraction_returns_none(client, monkeypatch):
+    """extract_action_items returning None (both its internal parse
+    attempts failed) must not fail the job or the notes -- the frontend is
+    expected to fall back to the prose notes rendering, signaled here by
+    GET /action-items simply returning null."""
+    _fake_save_and_mux(monkeypatch)
+    monkeypatch.setattr(
+        server_module, "llava_complete", lambda **kwargs: "# Notes\n\n## Action Items\n- someone should follow up"
+    )
+    monkeypatch.setattr(server_module, "llava_extract_action_items", lambda **kwargs: None)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert "Action Items" in job["notes"]
+
+    action_items_resp = client.get(f"/sessions/{job['session_id']}/action-items")
+    assert action_items_resp.status_code == 200
+    assert action_items_resp.json() == {"action_items": None}
+
+
+def test_process_falls_back_to_prose_when_action_items_extraction_raises(client, monkeypatch):
+    """Any exception out of extract_action_items (e.g. Ollama unreachable,
+    a timeout) must be swallowed the same way -- the job still succeeds
+    with its prose notes, and structured data is simply unavailable rather
+    than the whole recording being marked failed."""
+    _fake_save_and_mux(monkeypatch)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n\nfollow up")
+
+    def exploding_extract_action_items(**kwargs):
+        raise httpx.ReadTimeout("timed out waiting for Ollama")
+
+    monkeypatch.setattr(server_module, "llava_extract_action_items", exploding_extract_action_items)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert job["notes"] == "# Notes\n\nfollow up"
+
+    action_items_resp = client.get(f"/sessions/{job['session_id']}/action-items")
+    assert action_items_resp.status_code == 200
+    assert action_items_resp.json() == {"action_items": None}
+
+
+def test_process_stores_empty_action_items_list_when_model_finds_none(client, monkeypatch):
+    """An empty list is a legitimate, successfully-parsed result (the model
+    genuinely found no action items) and must be distinguished from
+    None/unavailable -- both by what's written to disk and what the
+    endpoint returns."""
+    _fake_save_and_mux(monkeypatch)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n\nnothing to do")
+    monkeypatch.setattr(server_module, "llava_extract_action_items", lambda **kwargs: [])
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+
+    action_items_resp = client.get(f"/sessions/{job['session_id']}/action-items")
+    assert action_items_resp.status_code == 200
+    assert action_items_resp.json() == {"action_items": []}
+
+
+def test_process_skips_action_items_extraction_when_summarization_itself_fails(client, monkeypatch):
+    """When llava_complete itself fails, the job already falls back to
+    showing the raw transcript as notes -- action items extraction must not
+    even be attempted against that same (evidently broken) summarization
+    path, and must not be able to turn a "summarization failed" session
+    into one that looks like it has valid structured data."""
+    _fake_save_and_mux(monkeypatch)
+
+    def failing_llava_complete(**kwargs):
+        raise RuntimeError("ollama exploded")
+
+    monkeypatch.setattr(server_module, "llava_complete", failing_llava_complete)
+
+    calls = {"count": 0}
+
+    def counting_extract_action_items(**kwargs):
+        calls["count"] += 1
+        return [{"text": "should never appear", "owner": None, "due": None}]
+
+    monkeypatch.setattr(server_module, "llava_extract_action_items", counting_extract_action_items)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert calls["count"] == 0
+
+    action_items_resp = client.get(f"/sessions/{job['session_id']}/action-items")
+    assert action_items_resp.status_code == 200
+    assert action_items_resp.json() == {"action_items": None}

@@ -44,11 +44,26 @@ export function isPointInRect(point, rect) {
     );
 }
 
-export function computeCornerSnap(workArea, bounds, threshold = 24) {
-    const nearLeft = bounds.x - workArea.x <= threshold;
-    const nearRight = (workArea.x + workArea.width) - (bounds.x + bounds.width) <= threshold;
-    const nearTop = bounds.y - workArea.y <= threshold;
-    const nearBottom = (workArea.y + workArea.height) - (bounds.y + bounds.height) <= threshold;
+// allowOffScreen=false (the default) is the rail's original behavior: any
+// edge at or past the threshold -- however far past, even hundreds of px
+// off-screen -- gets pulled flush. That's intentional for the rail, a small
+// dock the user generally wants fully reachable.
+//
+// allowOffScreen=true (the dashboard) bounds the check on BOTH sides instead
+// of just one: without it, a window dragged far past an edge has a hugely
+// NEGATIVE distance-to-edge, which still satisfies a bare "<= threshold" and
+// got yanked flush on-screen no matter how far off it was -- there was never
+// any way to leave a full window deliberately hanging half off-screen. This
+// turns the check into a small magnetic zone straddling the edge instead
+// (close from either side still snaps flush, same as before), matching how
+// Windows' own edge docking behaves for ordinary windows.
+export function computeCornerSnap(workArea, bounds, threshold = 24, { allowOffScreen = false } = {}) {
+    const within = (distance) => (allowOffScreen ? Math.abs(distance) <= threshold : distance <= threshold);
+
+    const nearLeft = within(bounds.x - workArea.x);
+    const nearRight = within((workArea.x + workArea.width) - (bounds.x + bounds.width));
+    const nearTop = within(bounds.y - workArea.y);
+    const nearBottom = within((workArea.y + workArea.height) - (bounds.y + bounds.height));
 
     let x = bounds.x;
     let y = bounds.y;

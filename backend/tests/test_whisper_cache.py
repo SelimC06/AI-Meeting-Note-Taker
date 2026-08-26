@@ -1,4 +1,4 @@
-from app.whisper_cache import get_whisper_model
+from app.whisper_cache import get_whisper_model, transcribe_audio
 
 
 class FakeModel:
@@ -48,3 +48,32 @@ def test_get_whisper_model_matches_server_and_ffmpeg_transcribe_call_conventions
 
     assert server_py_call is ffmpeg_transcribe_py_call
     assert FakeModel.instances_created == 1
+
+
+def test_transcribe_audio_default_params_are_consistent_across_all_call_sites():
+    """
+    Regression test for the primary/fallback/benchmark drift documented in
+    docs/Core pipeline quality fix/03-transcription-accuracy.md: three
+    separate WhisperModel.transcribe() call sites used to pass different
+    beam_size values. transcribe_audio() is now the only place that decides
+    these defaults, so every caller (ffmpeg_transcribe.py, server.py's
+    fallback path, wer_benchmark.py/speed_benchmark.py) gets the same
+    values by construction.
+    """
+    captured = {}
+
+    class FakeTranscribeModel:
+        def transcribe(self, path, **kwargs):
+            captured["path"] = path
+            captured.update(kwargs)
+            return "segments", "info"
+
+    result = transcribe_audio(FakeTranscribeModel(), "audio.wav", initial_prompt="glossary terms")
+
+    assert result == ("segments", "info")
+    assert captured["path"] == "audio.wav"
+    assert captured["initial_prompt"] == "glossary terms"
+    assert captured["beam_size"] == 1
+    assert captured["vad_filter"] is False
+    assert captured["word_timestamps"] is True
+    assert captured["condition_on_previous_text"] is True

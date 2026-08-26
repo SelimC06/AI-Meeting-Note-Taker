@@ -24,7 +24,53 @@ function formatBytes(n: number): string {
   return `${value.toFixed(1)} ${units[unitIndex]}`;
 }
 
+type SectionId =
+  | "transcription"
+  | "storage"
+  | "ai"
+  | "diarization"
+  | "privacy"
+  | "diagnostics"
+  | "about";
+
+type DotTone = "ok" | "warn" | "err" | "idle" | "none";
+
+const NAV_GROUPS: { heading: string; sections: { id: SectionId; label: string }[] }[] = [
+  {
+    heading: "Settings",
+    sections: [
+      { id: "transcription", label: "Transcription" },
+      { id: "storage", label: "Storage" },
+      { id: "ai", label: "AI Model" },
+      { id: "diarization", label: "Diarization" },
+    ],
+  },
+  {
+    heading: "Reference",
+    sections: [
+      { id: "privacy", label: "Privacy" },
+      { id: "diagnostics", label: "Diagnostics" },
+      { id: "about", label: "About" },
+    ],
+  },
+];
+
+function StatusDot({ tone }: { tone: DotTone }) {
+  if (tone === "none") return null;
+  const toneClass =
+    tone === "ok"
+      ? "bg-signal shadow-[0_0_6px_1px_rgba(237,230,214,0.5)]"
+      : tone === "warn"
+        ? "bg-amber-400 shadow-[0_0_6px_1px_rgba(251,191,36,0.5)]"
+        : tone === "err"
+          ? "bg-red-400 shadow-[0_0_6px_1px_rgba(248,113,113,0.5)]"
+          : "bg-dim";
+  return <span aria-hidden="true" className={"inline-block h-1.5 w-1.5 rounded-full shrink-0 " + toneClass} />;
+}
+
 export default function SettingsPage({ active }: { active: boolean }) {
+  const [activeSection, setActiveSection] = useState<SectionId>("transcription");
+
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -38,6 +84,13 @@ export default function SettingsPage({ active }: { active: boolean }) {
 
   const [whisperError, setWhisperError] = useState<string | null>(null);
   const [ollamaSaveError, setOllamaSaveError] = useState<string | null>(null);
+
+  const [vocabularyDraft, setVocabularyDraft] = useState("");
+  const [vocabularySaveError, setVocabularySaveError] = useState<string | null>(null);
+
+  const [diarizationError, setDiarizationError] = useState<string | null>(null);
+  const [tokenDraft, setTokenDraft] = useState("");
+  const [tokenSaveError, setTokenSaveError] = useState<string | null>(null);
 
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
@@ -54,7 +107,11 @@ export default function SettingsPage({ active }: { active: boolean }) {
     let cancelled = false;
     getSettings()
       .then((s) => {
-        if (!cancelled) setSettings(s);
+        if (!cancelled) {
+          setSettings(s);
+          setVocabularyDraft(s.custom_vocabulary);
+          setTokenDraft(s.huggingface_token);
+        }
       })
       .catch((e) => {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
@@ -148,6 +205,41 @@ export default function SettingsPage({ active }: { active: boolean }) {
     }
   };
 
+  const handleSaveVocabulary = async () => {
+    setVocabularySaveError(null);
+    try {
+      const updated = await updateSettings({ custom_vocabulary: vocabularyDraft });
+      setSettings(updated);
+      setVocabularyDraft(updated.custom_vocabulary);
+    } catch (e) {
+      setVocabularySaveError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleDiarizationToggle = async (value: boolean) => {
+    const prev = settings;
+    setSettings((s) => (s ? { ...s, advanced_diarization_enabled: value } : s));
+    setDiarizationError(null);
+    try {
+      const updated = await updateSettings({ advanced_diarization_enabled: value });
+      setSettings(updated);
+    } catch (e) {
+      setSettings(prev);
+      setDiarizationError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleSaveToken = async () => {
+    setTokenSaveError(null);
+    try {
+      const updated = await updateSettings({ huggingface_token: tokenDraft });
+      setSettings(updated);
+      setTokenDraft(updated.huggingface_token);
+    } catch (e) {
+      setTokenSaveError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const handleBrowseStorage = async () => {
     const chosen = await window.settingsAPI?.chooseFolder?.();
     if (!chosen || !settings) return;
@@ -166,7 +258,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
 
   if (loadError && !settings) {
     return (
-      <div className="h-full flex items-center justify-center text-dim text-xs px-6">
+      <div className="flex-1 min-h-0 flex items-center justify-center text-dim text-xs px-6">
         Failed to load settings: {loadError}
       </div>
     );
@@ -174,207 +266,348 @@ export default function SettingsPage({ active }: { active: boolean }) {
 
   if (!settings) {
     return (
-      <div className="h-full flex items-center justify-center text-dim text-xs">
+      <div className="flex-1 min-h-0 flex items-center justify-center text-dim text-xs">
         Loading settings...
       </div>
     );
   }
 
+  const diskLow =
+    usage != null &&
+    usage.total_bytes > 0 &&
+    (usage.free_bytes < 5 * 1024 ** 3 || usage.free_bytes / usage.total_bytes < 0.1);
+
+  const diarizationNeedsToken =
+    settings.advanced_diarization_enabled && !settings.huggingface_token;
+
+  const dotFor = (id: SectionId): DotTone => {
+    switch (id) {
+      case "storage":
+        return usage == null ? "none" : diskLow ? "warn" : "ok";
+      case "ai":
+        return ollamaLoading ? "none" : ollamaError ? "err" : "ok";
+      case "diarization":
+        if (!settings.advanced_diarization_enabled) return "idle";
+        return diarizationNeedsToken ? "err" : "ok";
+      case "about":
+        if (updaterStatus.state === "error") return "err";
+        if (updaterStatus.state === "ready") return "ok";
+        if (updaterStatus.state === "available" || updaterStatus.state === "downloading") return "warn";
+        if (updaterStatus.state === "idle") return "ok";
+        return "none";
+      default:
+        return "none";
+    }
+  };
+
   return (
-    <div className="h-full flex flex-col px-6 py-4 gap-3 text-phosphor overflow-y-auto">
-      <div>
-        <h1 className="text-sm font-semibold tracking-wide uppercase">[SETTINGS]</h1>
-        <p className="text-xs text-dim">transcription, storage, and chat preferences</p>
-      </div>
-
-      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
-        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
-          whisper model
-        </h2>
-        <div className="flex flex-col gap-1">
-          {settings.whisper_model_choices.map((choice) => (
-            <button
-              key={choice.value}
-              onClick={() => handleWhisperChange(choice.value)}
-              className={
-                "text-left px-2 py-1 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
-                (settings.whisper_model === choice.value
-                  ? "bg-signal text-void"
-                  : "text-dim hover:text-phosphor border border-line")
-              }
-            >
-              [{choice.value}] {choice.label} — {choice.description}
-            </button>
-          ))}
-        </div>
-        {whisperError && (
-          <p className="text-xs text-red-400">{whisperError}</p>
-        )}
-      </div>
-
-      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
-        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
-          storage location
-        </h2>
-        <p className="text-xs text-phosphor break-all">{settings.storage_dir}</p>
-        <button
-          onClick={handleBrowseStorage}
-          disabled={storageBusy}
-          className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:opacity-50"
-        >
-          {storageBusy ? "Moving recordings..." : "Browse..."}
-        </button>
-        {storageError && (
-          <p className="text-xs text-red-400">{storageError}</p>
-        )}
-      </div>
-
-      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
-        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
-          privacy
-        </h2>
-        <p className="text-xs text-phosphor">
-          Recordings and notes are stored only on this machine and never uploaded anywhere.
-          Items moved to trash are permanently deleted after 30 days.
-        </p>
-      </div>
-
-      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
-        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
-          diagnostics
-        </h2>
-        <p className="text-xs text-phosphor">
-          If something breaks, this app writes what happened to a local log file — nothing is
-          sent anywhere automatically. Open the folder below to find it if you want to look into
-          an issue yourself, or attach it if you're reporting a bug.
-        </p>
-        <button
-          onClick={() => window.diagnosticsAPI?.openLogsFolder()}
-          className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-        >
-          Open logs folder
-        </button>
-      </div>
-
-      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
-        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
-          storage usage
-        </h2>
-        {usageError && <p className="text-xs text-red-400">{usageError}</p>}
-        {!usageError && usage && (
-          <>
-            <p className="text-xs text-phosphor">
-              {formatBytes(usage.used_bytes)} used across {usage.session_count} session
-              {usage.session_count === 1 ? "" : "s"}
+    <div className="flex-1 min-h-0 flex flex-row text-phosphor">
+      <nav className="w-40 shrink-0 border-r border-line bg-void/40 p-2 flex flex-col gap-0.5">
+        {NAV_GROUPS.map((group) => (
+          <div key={group.heading}>
+            <p className="px-2 pt-2 pb-1.5 text-[9px] tracking-[0.15em] text-dim/50 select-none">
+              {group.heading.toUpperCase()}
             </p>
-            <p
-              className={
-                "text-xs " +
-                (usage.total_bytes > 0 &&
-                (usage.free_bytes < 5 * 1024 ** 3 || usage.free_bytes / usage.total_bytes < 0.1)
-                  ? "text-red-400"
-                  : "text-dim")
-              }
-            >
-              {formatBytes(usage.free_bytes)} free on disk
-            </p>
-            {usage.trashed_count > 0 && (
+            {group.sections.map((section) => (
+              <button
+                key={section.id}
+                onClick={() => setActiveSection(section.id)}
+                aria-current={activeSection === section.id ? "true" : undefined}
+                className={
+                  "w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm text-xs text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
+                  (activeSection === section.id
+                    ? "bg-signal text-void font-semibold"
+                    : "text-dim hover:text-phosphor hover:bg-line")
+                }
+              >
+                <span>{section.label}</span>
+                <StatusDot tone={dotFor(section.id)} />
+              </button>
+            ))}
+          </div>
+        ))}
+      </nav>
+
+      <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
+        {activeSection === "transcription" && (
+          <section className="flex flex-col gap-5">
+            <div>
+              <h2 className="text-xs font-semibold text-dim uppercase tracking-wide mb-2">
+                whisper model
+              </h2>
+              <div className="flex flex-col gap-1">
+                {settings.whisper_model_choices.map((choice) => (
+                  <button
+                    key={choice.value}
+                    onClick={() => handleWhisperChange(choice.value)}
+                    className={
+                      "text-left px-2 py-1 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
+                      (settings.whisper_model === choice.value
+                        ? "bg-signal text-void"
+                        : "text-dim hover:text-phosphor border border-line")
+                    }
+                  >
+                    [{choice.value}] {choice.label} — {choice.description}
+                  </button>
+                ))}
+              </div>
+              {whisperError && <p className="text-xs text-red-400 mt-2">{whisperError}</p>}
+            </div>
+
+            <div className="pt-5 border-t border-line/60 flex flex-col gap-2">
+              <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+                custom vocabulary
+              </h2>
+              <p className="text-xs text-dim">
+                Names, project codenames, and acronyms Whisper should recognize (comma-separated).
+              </p>
+              <label htmlFor="custom-vocabulary" className="sr-only">
+                custom vocabulary
+              </label>
+              <textarea
+                id="custom-vocabulary"
+                value={vocabularyDraft}
+                onChange={(e) => setVocabularyDraft(e.target.value)}
+                rows={3}
+                className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal resize-none"
+              />
+              <button
+                onClick={handleSaveVocabulary}
+                className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+              >
+                Save vocabulary
+              </button>
+              {vocabularySaveError && (
+                <p className="text-xs text-red-400">{vocabularySaveError}</p>
+              )}
+            </div>
+          </section>
+        )}
+
+        {activeSection === "storage" && (
+          <section className="flex flex-col gap-5">
+            <div className="flex flex-col gap-2">
+              <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+                storage location
+              </h2>
+              <p className="text-xs text-phosphor break-all">{settings.storage_dir}</p>
+              <button
+                onClick={handleBrowseStorage}
+                disabled={storageBusy}
+                className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:opacity-50"
+              >
+                {storageBusy ? "Moving recordings..." : "Browse..."}
+              </button>
+              {storageError && <p className="text-xs text-red-400">{storageError}</p>}
+            </div>
+
+            <div className="pt-5 border-t border-line/60 flex flex-col gap-2">
+              <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+                storage usage
+              </h2>
+              {usageError && <p className="text-xs text-red-400">{usageError}</p>}
+              {!usageError && usage && (
+                <>
+                  <p className="text-xs text-phosphor">
+                    {formatBytes(usage.used_bytes)} used across {usage.session_count} session
+                    {usage.session_count === 1 ? "" : "s"}
+                  </p>
+                  <p className={"text-xs " + (diskLow ? "text-red-400" : "text-dim")}>
+                    {formatBytes(usage.free_bytes)} free on disk
+                  </p>
+                  {usage.trashed_count > 0 && (
+                    <div
+                      className={
+                        "flex items-center gap-2 mt-1 p-2 rounded-sm border " +
+                        (diskLow ? "border-red-400/40 bg-red-400/5" : "border-line")
+                      }
+                    >
+                      <p className="text-xs text-dim flex-1">
+                        {usage.trashed_count} session{usage.trashed_count === 1 ? "" : "s"} in
+                        trash — purges automatically after 30 days
+                      </p>
+                      <button
+                        onClick={handleEmptyTrash}
+                        disabled={emptyingTrash}
+                        className="shrink-0 px-2 py-0.5 rounded-sm text-xs border border-red-400/40 text-red-400 hover:bg-red-400/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:opacity-50"
+                      >
+                        {emptyingTrash ? "Emptying..." : "Empty Trash"}
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+              {!usageError && !usage && <p className="text-xs text-dim">Loading storage usage...</p>}
+            </div>
+          </section>
+        )}
+
+        {activeSection === "ai" && (
+          <section className="flex flex-col gap-2">
+            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+              AI model (ollama)
+            </h2>
+            <p className="text-xs text-dim">Used for both chat and meeting summarization.</p>
+            {ollamaLoading ? (
+              <p className="text-xs text-dim">Loading installed models...</p>
+            ) : ollamaError ? (
               <div className="flex items-center gap-2">
-                <p className="text-xs text-dim">
-                  {usage.trashed_count} session{usage.trashed_count === 1 ? "" : "s"} in trash
-                </p>
+                <p className="text-xs text-red-400">Ollama unreachable — is it running?</p>
                 <button
-                  onClick={handleEmptyTrash}
-                  disabled={emptyingTrash}
-                  className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:opacity-50"
+                  onClick={loadOllamaModels}
+                  className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                 >
-                  {emptyingTrash ? "Emptying..." : "Empty Trash"}
+                  Retry
+                </button>
+              </div>
+            ) : (
+              <>
+                <select
+                  value={settings.ollama_chat_model}
+                  onChange={(e) => handleOllamaChange(e.target.value)}
+                  className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                >
+                  {!ollamaModels.includes(settings.ollama_chat_model) && (
+                    <option value={settings.ollama_chat_model}>
+                      {settings.ollama_chat_model} (not installed)
+                    </option>
+                  )}
+                  {ollamaModels.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+                {ollamaSaveError && <p className="text-xs text-red-400">{ollamaSaveError}</p>}
+              </>
+            )}
+          </section>
+        )}
+
+        {activeSection === "diarization" && (
+          <section className="flex flex-col gap-2">
+            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+              advanced diarization
+            </h2>
+            <p className="text-xs text-dim">
+              Split multiple remote participants into individually labeled speakers instead of one
+              generic "Others" bucket. Optional -- downloads a larger model on first use and
+              requires a free HuggingFace account.
+            </p>
+            <div className="flex gap-1">
+              {[
+                { value: false, label: "Off" },
+                { value: true, label: "On" },
+              ].map((opt) => (
+                <button
+                  key={opt.label}
+                  onClick={() => handleDiarizationToggle(opt.value)}
+                  className={
+                    "px-2 py-1 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
+                    (settings.advanced_diarization_enabled === opt.value
+                      ? "bg-signal text-void"
+                      : "text-dim hover:text-phosphor border border-line")
+                  }
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            {diarizationError && <p className="text-xs text-red-400">{diarizationError}</p>}
+            {diarizationNeedsToken && (
+              <p className="text-xs text-red-400 rounded-sm border border-red-400/40 bg-red-400/5 px-2 py-1.5">
+                A HuggingFace access token is required for diarization to actually run -- add one
+                below.
+              </p>
+            )}
+            <label htmlFor="huggingface-token" className="text-xs text-dim mt-2">
+              HuggingFace access token
+            </label>
+            <input
+              id="huggingface-token"
+              type="password"
+              value={tokenDraft}
+              onChange={(e) => setTokenDraft(e.target.value)}
+              placeholder="hf_..."
+              className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+            />
+            <button
+              onClick={handleSaveToken}
+              className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+            >
+              Save token
+            </button>
+            {tokenSaveError && <p className="text-xs text-red-400">{tokenSaveError}</p>}
+          </section>
+        )}
+
+        {activeSection === "privacy" && (
+          <section className="flex flex-col gap-2">
+            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">privacy</h2>
+            <p className="text-xs text-dim max-w-md leading-relaxed">
+              Recordings and notes are stored only on this machine and never uploaded anywhere.
+              Items moved to trash are permanently deleted after 30 days.
+            </p>
+          </section>
+        )}
+
+        {activeSection === "diagnostics" && (
+          <section className="flex flex-col gap-2">
+            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">diagnostics</h2>
+            <p className="text-xs text-dim max-w-md leading-relaxed">
+              If something breaks, this app writes what happened to a local log file — nothing is
+              sent anywhere automatically. Open the folder below to find it if you want to look
+              into an issue yourself, or attach it if you're reporting a bug.
+            </p>
+            <button
+              onClick={() => window.diagnosticsAPI?.openLogsFolder()}
+              className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+            >
+              Open logs folder
+            </button>
+          </section>
+        )}
+
+        {activeSection === "about" && (
+          <section className="flex flex-col gap-2">
+            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">updates</h2>
+            <p className="text-xs text-phosphor">
+              {appVersion ? `version ${appVersion}` : "loading version..."}
+            </p>
+            {updaterStatus.state === "not-checked" && (
+              <p className="text-xs text-dim">Not checked yet</p>
+            )}
+            {updaterStatus.state === "idle" && (
+              <p className="text-xs text-dim">You're on the latest version</p>
+            )}
+            {updaterStatus.state === "checking" && (
+              <p className="text-xs text-dim">Checking for updates...</p>
+            )}
+            {updaterStatus.state === "available" && (
+              <p className="text-xs text-dim">
+                Update {updaterStatus.version} found — downloading...
+              </p>
+            )}
+            {updaterStatus.state === "downloading" && (
+              <p className="text-xs text-dim">
+                Downloading update... {Math.round(updaterStatus.percent)}%
+              </p>
+            )}
+            {updaterStatus.state === "ready" && (
+              <div className="flex items-center gap-2">
+                <p className="text-xs text-phosphor">Update {updaterStatus.version} ready</p>
+                <button
+                  onClick={() => window.updaterAPI?.install?.()}
+                  className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                >
+                  restart to update
                 </button>
               </div>
             )}
-          </>
-        )}
-        {!usageError && !usage && <p className="text-xs text-dim">Loading storage usage...</p>}
-      </div>
-
-      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
-        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
-          chat model (ollama)
-        </h2>
-        {ollamaLoading ? (
-          <p className="text-xs text-dim">Loading installed models...</p>
-        ) : ollamaError ? (
-          <div className="flex items-center gap-2">
-            <p className="text-xs text-red-400">Ollama unreachable — is it running?</p>
-            <button
-              onClick={loadOllamaModels}
-              className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-            >
-              Retry
-            </button>
-          </div>
-        ) : (
-          <>
-            <select
-              value={settings.ollama_chat_model}
-              onChange={(e) => handleOllamaChange(e.target.value)}
-              className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-            >
-              {!ollamaModels.includes(settings.ollama_chat_model) && (
-                <option value={settings.ollama_chat_model}>
-                  {settings.ollama_chat_model} (not installed)
-                </option>
-              )}
-              {ollamaModels.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-            {ollamaSaveError && (
-              <p className="text-xs text-red-400">{ollamaSaveError}</p>
+            {updaterStatus.state === "error" && (
+              <p className="text-xs text-dim">Update check failed: {updaterStatus.message}</p>
             )}
-          </>
-        )}
-      </div>
-
-      <div className="rounded-sm bg-panel border border-line p-4 flex flex-col gap-2">
-        <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
-          updates
-        </h2>
-        <p className="text-xs text-phosphor">
-          {appVersion ? `version ${appVersion}` : "loading version..."}
-        </p>
-        {updaterStatus.state === "not-checked" && (
-          <p className="text-xs text-dim">Not checked yet</p>
-        )}
-        {updaterStatus.state === "idle" && (
-          <p className="text-xs text-dim">You're on the latest version</p>
-        )}
-        {updaterStatus.state === "checking" && (
-          <p className="text-xs text-dim">Checking for updates...</p>
-        )}
-        {updaterStatus.state === "available" && (
-          <p className="text-xs text-dim">Update {updaterStatus.version} found — downloading...</p>
-        )}
-        {updaterStatus.state === "downloading" && (
-          <p className="text-xs text-dim">
-            Downloading update... {Math.round(updaterStatus.percent)}%
-          </p>
-        )}
-        {updaterStatus.state === "ready" && (
-          <div className="flex items-center gap-2">
-            <p className="text-xs text-phosphor">Update {updaterStatus.version} ready</p>
-            <button
-              onClick={() => window.updaterAPI?.install?.()}
-              className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-            >
-              restart to update
-            </button>
-          </div>
-        )}
-        {updaterStatus.state === "error" && (
-          <p className="text-xs text-dim">Update check failed: {updaterStatus.message}</p>
+          </section>
         )}
       </div>
     </div>
