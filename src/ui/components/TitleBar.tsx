@@ -7,7 +7,7 @@ export default function TitleBar({ onOpenSettings }: Props) {
     <div className="h-10 flex items-center justify-between bg-panel border-b border-line text-phosphor select-none [-webkit-app-region:drag] text-xs">
       <div className="flex items-center gap-3 px-3 [-webkit-app-region:no-drag]">
         <span className="font-semibold">
-          $ deskrecap<span className="cursor-blink">▌</span>
+          $ deskrecap
         </span>
       </div>
 
