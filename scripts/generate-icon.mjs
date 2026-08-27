@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import png2icons from 'png2icons';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, '..');
@@ -9,6 +10,9 @@ const buildDir = path.join(projectRoot, 'build');
 fs.mkdirSync(buildDir, { recursive: true });
 
 const SIZE = 256;
+// .icns needs a much larger source than the Windows .ico does -- macOS
+// renders this at up to 512x512@2x (1024px) in Finder/the dock, and
+// upscaling the 256px source left visible blur/aliasing on the glyph.
 
 // Same '>' glyph as Website/scripts/generate-favicon.mjs (and
 // Website/index.html's inline SVG favicon), scaled up -- keeps the desktop
@@ -35,18 +39,32 @@ function encodeIco(pngBuffer, size) {
     return Buffer.concat([header, entry, pngBuffer]);
 }
 
+const ICNS_SOURCE_SIZE = 1024;
+
+async function renderPng(page, size) {
+    await page.setViewportSize({ width: size, height: size });
+    await page.evaluate((s) => {
+        const el = document.querySelector('svg');
+        el.setAttribute('width', String(s));
+        el.setAttribute('height', String(s));
+    }, size);
+    return page.screenshot({ omitBackground: false });
+}
+
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: SIZE, height: SIZE } });
 await page.setContent(html);
-await page.evaluate((size) => {
-    const el = document.querySelector('svg');
-    el.setAttribute('width', String(size));
-    el.setAttribute('height', String(size));
-}, SIZE);
-const png = await page.screenshot({ omitBackground: false });
+const png = await renderPng(page, SIZE);
+const icnsSourcePng = await renderPng(page, ICNS_SOURCE_SIZE);
 await browser.close();
+
+const icns = png2icons.createICNS(icnsSourcePng, png2icons.BICUBIC2, 0);
+if (!icns) {
+    throw new Error('png2icons failed to produce an .icns file');
+}
 
 fs.writeFileSync(path.join(buildDir, 'icon.png'), png);
 fs.writeFileSync(path.join(buildDir, 'icon.ico'), encodeIco(png, SIZE));
+fs.writeFileSync(path.join(buildDir, 'icon.icns'), icns);
 
-console.log(`Wrote ${path.join(buildDir, 'icon.png')} and ${path.join(buildDir, 'icon.ico')}`);
+console.log(`Wrote ${path.join(buildDir, 'icon.png')}, ${path.join(buildDir, 'icon.ico')}, and ${path.join(buildDir, 'icon.icns')}`);
