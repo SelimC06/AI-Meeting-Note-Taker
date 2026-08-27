@@ -441,7 +441,9 @@ export default function RailApp() {
                     !toastDismissed && canRetryUpload
                         ? { label: "retry upload", onClick: handleRetryUpload }
                         : !toastDismissed && displayError?.kind === "permission-denied"
-                        ? { label: "open privacy settings", onClick: () => window.settingsAPI?.openPrivacySettings?.("microphone") }
+                        ? { label: "open privacy settings", onClick: () => window.settingsAPI?.openPrivacySettings?.(
+                            window.electronAPI?.platform === "darwin" ? "screenRecording" : "microphone"
+                          ) }
                         : undefined
                 }
             />

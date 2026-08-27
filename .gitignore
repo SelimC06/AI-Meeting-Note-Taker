@@ -32,6 +32,9 @@ backend/.pytest_cache/
 __pycache__/
 *.pyc
 
+# Backend virtualenv (produced by npm run setup:backend)
+.venv/
+
 # Vendored build tools (fetched, not checked in)
 vendor/
 

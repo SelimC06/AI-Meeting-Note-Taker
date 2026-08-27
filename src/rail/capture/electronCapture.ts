@@ -31,42 +31,46 @@ export async function startElectronCapture(opts: ElectronCaptureOptions = {}): P
   if (!isElectron) throw new Error("Not running in Electron.");
 
   const withSystemAudio = opts.withSystemAudio !== false;
-  const sourceId = opts.sourceId || (await window.electronAPI!.pickPrimaryScreenId());
-  if (!sourceId) throw new Error("No capture source selected.");
   const fps = opts.videoFrameRate ?? 30;
+  const platform = window.electronAPI!.platform;
 
-  // Chromium/Electron desktop capture constraints
-  const videoConstraints: ChromeDesktopCaptureConstraints = {
-    mandatory: {
-      chromeMediaSource: "desktop",
-      chromeMediaSourceId: sourceId,
-      maxFrameRate: fps,
-    },
-  };
+  let screenAndSystem: MediaStream;
 
-  // When withSystemAudio=true, we ask for the desktop's loopback audio
-  const systemAudioConstraints: ChromeDesktopCaptureConstraints | boolean = withSystemAudio
-    ? { mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId: sourceId } }
-    : false;
+  if (platform === "darwin") {
+    // macOS 13+ (Electron 32+): getDisplayMedia is backed by
+    // ScreenCaptureKit and captures system audio natively -- no virtual
+    // loopback driver needed. The legacy chromeMediaSource:"desktop"
+    // mandatory-constraints path below never captures audio on macOS.
+    screenAndSystem = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: fps },
+      audio: withSystemAudio,
+    });
+  } else {
+    const sourceId = opts.sourceId || (await window.electronAPI!.pickPrimaryScreenId());
+    if (!sourceId) throw new Error("No capture source selected.");
 
-  // One getUserMedia for both video and (system) audio; cast at this single
-  // call site since MediaStreamConstraints has no slot for Chromium's
-  // non-standard `mandatory` shape.
-  const screenAndSystem = await navigator.mediaDevices.getUserMedia({
-    video: videoConstraints,
-    audio: systemAudioConstraints,
-  } as unknown as MediaStreamConstraints);
+    const videoConstraints: ChromeDesktopCaptureConstraints = {
+      mandatory: {
+        chromeMediaSource: "desktop",
+        chromeMediaSourceId: sourceId,
+        maxFrameRate: fps,
+      },
+    };
+    const systemAudioConstraints: ChromeDesktopCaptureConstraints | boolean = withSystemAudio
+      ? { mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId: sourceId } }
+      : false;
+
+    screenAndSystem = await navigator.mediaDevices.getUserMedia({
+      video: videoConstraints,
+      audio: systemAudioConstraints,
+    } as unknown as MediaStreamConstraints);
+  }
 
   const screen = new MediaStream(screenAndSystem.getVideoTracks());
 
-  // If system audio granted, split it out
   const sysTracks = screenAndSystem.getAudioTracks();
   const systemAudio = sysTracks.length ? new MediaStream(sysTracks) : undefined;
 
-  // Mic capture (separate; no echo cancellation for better sync to desktop).
-  // If this fails after screen+system audio were already granted, stop
-  // those already-acquired tracks before rethrowing -- otherwise the OS
-  // capture indicator stays lit with no handle left to turn it off.
   let micAudio: MediaStream;
   try {
     micAudio = await navigator.mediaDevices.getUserMedia({

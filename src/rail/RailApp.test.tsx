@@ -359,6 +359,27 @@ it("shows an 'open privacy settings' action on a permission-denied error and cal
   expect(openPrivacySettings).toHaveBeenCalledWith("microphone");
 });
 
+it("opens the screen-recording privacy pane on macOS when a permission-denied error is shown", () => {
+  const openPrivacySettings = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("settingsAPI", { openPrivacySettings });
+  vi.stubGlobal("electronAPI", {
+    platform: "darwin",
+    pickPrimaryScreenId: vi.fn(),
+    setRailErrorVisible: vi.fn().mockResolvedValue(undefined),
+  });
+  mockHook({
+    error: {
+      kind: "permission-denied",
+      message: "Screen or microphone access denied — check your OS privacy settings.",
+    },
+  });
+
+  const { getByRole } = render(<RailApp />);
+  fireEvent.click(getByRole("button", { name: "open privacy settings" }));
+
+  expect(openPrivacySettings).toHaveBeenCalledWith("screenRecording");
+});
+
 it("does not show the 'open privacy settings' action for a generic error", () => {
   mockHook({ error: { kind: "generic", message: "Recording failed: no codec available" } });
 

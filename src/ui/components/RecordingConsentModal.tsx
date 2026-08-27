@@ -6,6 +6,7 @@ interface Props {
 }
 
 export default function RecordingConsentModal({ onCancel, onConfirm }: Props) {
+  const isMac = window.electronAPI?.platform === "darwin";
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCancel();
@@ -26,6 +27,13 @@ export default function RecordingConsentModal({ onCancel, onConfirm }: Props) {
           break their trust, or the law, depending on where you are. Give participants a heads-up
           before you hit record.
         </p>
+        {isMac && (
+          <p className="text-xs text-dim leading-relaxed">
+            macOS will also ask you to grant Screen Recording permission the first time you
+            record — if a recording comes back silent, check System Settings → Privacy &amp;
+            Security → Screen Recording and relaunch the app after enabling it.
+          </p>
+        )}
         <div className="flex justify-end gap-2 mt-1">
           <button
             onClick={onCancel}

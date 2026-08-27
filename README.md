@@ -84,7 +84,7 @@ default, override with the `PORT` env var). Prefer this over hand-typing
 `uvicorn app.server:app --reload --port 8000`, since that command does not
 enforce the localhost-only bind.
 
-## Building an installer (Windows)
+## Building an installer
 
 ```
 npm install
@@ -92,10 +92,10 @@ npm run setup:backend
 npm run dist
 ```
 
-This produces a Windows installer under `release/`. The installer bundles the
-Python backend (frozen with PyInstaller) and ffmpeg/ffprobe, so **end users
-installing the packaged app do not need Python or ffmpeg installed
-separately.**
+On Windows this produces an NSIS installer under `release/`; on macOS, a `.dmg`
+and a `.zip`. The package bundles the Python backend (frozen with PyInstaller)
+and ffmpeg/ffprobe, so **end users installing the packaged app do not need
+Python or ffmpeg installed separately.**
 
 The one remaining external dependency for end users is
 [Ollama](https://ollama.com) — install it and pull a chat model before using
@@ -104,6 +104,59 @@ the chat/summarize features.
 `npm run setup:backend` and the `.venv` it creates are only needed for
 *building* the installer (or running the backend directly in dev mode) — they
 are not needed by someone just installing and running the packaged app.
+
+### macOS: build on the architecture you're shipping to
+
+**A macOS package is only valid for the architecture of the machine that built
+it** — build the arm64 release on Apple Silicon and the x64 release on Intel.
+Two of the three bundled pieces are host-native and cannot cross-compile:
+
+- the backend, frozen by PyInstaller from the local `.venv` (`npm run
+  build:backend`), and
+- ffmpeg/ffprobe, vendored as native static builds (`npm run fetch:ffmpeg`,
+  which picks its download by `process.arch` and stamps `vendor/ffmpeg/.arch`
+  so a `vendor/` directory copied from another machine is re-fetched rather
+  than silently packaged).
+
+`build.mac` therefore sets no explicit `arch`, which leaves electron-builder on
+its default: the host architecture. Don't pin one back in — hardcoding `arm64`
+previously meant an Intel machine produced an arm64 bundle wrapping an x86_64
+backend and arm64 ffmpeg, which could not run anywhere.
+
+The Python used for the build must be 3.9+ (`requirements.txt` needs it).
+macOS's own `/usr/bin/python3` is 3.8 and answers to both `python` and
+`python3`; `npm run setup:backend` checks the version and refuses it rather
+than building a venv that every `pip install` then fails against. Install a
+newer one (`brew install python@3.12`) if it does.
+
+### macOS: signing and notarization
+
+Local builds work with no Apple credentials at all — `scripts/notarize.mjs`
+logs that it's skipping and returns, leaving an unsigned build that runs fine
+on the machine that produced it.
+
+To ship to *other* Macs you need both halves, because `build.mac.hardenedRuntime`
+is `true` and Gatekeeper rejects a hardened app that isn't notarized:
+
+1. **A Developer ID Application certificate** in the login keychain.
+   electron-builder finds it automatically; without it the app is only
+   ad-hoc signed.
+2. **An App Store Connect API key**, passed to `afterSign` through these
+   environment variables (all three required — if any is missing,
+   notarization is skipped with a message naming which):
+
+   | Variable | Value |
+   | --- | --- |
+   | `APPLE_API_KEY` | path to the `AuthKey_XXXXXXXXXX.p8` file |
+   | `APPLE_API_KEY_ID` | the key ID (the `XXXXXXXXXX` in the filename) |
+   | `APPLE_API_ISSUER` | the issuer UUID from App Store Connect |
+
+   Treat the `.p8` as a secret: never commit it or bake it into
+   `package.json`.
+
+Entitlements live in `build/entitlements.mac.plist` and are applied to both the
+app and its inherited helper processes. The microphone usage string end users
+see at the permission prompt is `build.mac.extendInfo.NSMicrophoneUsageDescription`.
 
 ### Publishing updates
 

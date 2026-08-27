@@ -71,6 +71,8 @@ contextBridge.exposeInMainWorld('windowControls', {
 });
 
 contextBridge.exposeInMainWorld("electronAPI", {
+  platform: process.platform,
+
   pickPrimaryScreenId: async () => {
     const list = await ipcRenderer.invoke("list-capture-sources", ["screen"]);
     return list[0]?.id ?? null;

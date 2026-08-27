@@ -194,6 +194,20 @@ test('attemptRecovery reports failed after exhausting all attempts', async () =>
     }
 });
 
+// Resolves false once `pid` is gone, or true if it is still running at the deadline.
+async function waitForPidGone(pid, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        try {
+            process.kill(pid, 0);
+        } catch {
+            return false;
+        }
+        if (Date.now() >= deadline) return true;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+}
+
 test('attemptRecovery kills a failed attempt\'s child before the next attempt starts (no orphaned process)', async () => {
     const logDir = makeTmpLogDir();
     const pidDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-recovery-pids-'));
@@ -231,12 +245,14 @@ setInterval(() => {}, 1000);
         const pids = fs.readFileSync(pidFile, 'utf8').trim().split('\n').filter(Boolean).map(Number);
         assert.equal(pids.length, 2, 'expected both attempts to have spawned a child process');
         for (const pid of pids) {
-            let alive = true;
-            try {
-                process.kill(pid, 0);
-            } catch {
-                alive = false;
-            }
+            // Poll rather than probing once: stopBackend's POSIX path sends SIGTERM and
+            // returns without waiting for the signal to actually be delivered, so the
+            // last attempt's child -- killed microseconds before this assertion -- is
+            // still briefly alive. (On Windows `taskkill /F` blocks until the process is
+            // gone, which is why a single instant probe only ever passed there.) The
+            // invariant under test is that no child is left orphaned, not that the kill
+            // is synchronous, so give delivery a bounded window to land.
+            const alive = await waitForPidGone(pid, 5000);
             assert.equal(alive, false, `expected child pid ${pid} to have been killed after its attempt failed, but it is still running`);
         }
     } finally {

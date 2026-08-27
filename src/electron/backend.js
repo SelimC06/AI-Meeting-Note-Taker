@@ -25,6 +25,15 @@ export function resolveBackendCommand(projectRoot, resourcesPath, isPackaged, pl
     return { command: pythonExe, args: ['-m', 'app.server'], cwd: path.join(projectRoot, 'backend') };
 }
 
+export function resolveFfmpegPaths(resourcesPath, platform = process.platform) {
+    const ext = platform === 'win32' ? '.exe' : '';
+    const ffmpegDir = path.join(resourcesPath, 'ffmpeg');
+    return {
+        ffmpegBin: path.join(ffmpegDir, `ffmpeg${ext}`),
+        ffprobeBin: path.join(ffmpegDir, `ffprobe${ext}`),
+    };
+}
+
 let backendProcess = null;
 let backendLogTail = [];
 let intentionalStop = false;
@@ -133,15 +142,27 @@ export async function findPidsListeningOnPort(port, platform, execFileAsyncFn = 
 // Resolves the on-disk executable backing a running PID, so ensurePortFree can tell a
 // previous instance of *our own* backend apart from some unrelated process (a user's own
 // dev server, etc.) that happens to be listening on the same port.
-export async function getProcessExecutablePath(pid, platform = process.platform) {
+export async function getProcessExecutablePath(pid, platform = process.platform, execFileAsyncFn = execFileAsync) {
     if (platform === 'win32') {
         try {
-            const { stdout } = await execFileAsync('powershell', [
+            const { stdout } = await execFileAsyncFn('powershell', [
                 '-NoProfile',
                 '-NonInteractive',
                 '-Command',
                 `(Get-Process -Id ${Number(pid)} -ErrorAction Stop).Path`,
             ]);
+            return stdout.trim() || null;
+        } catch {
+            return null;
+        }
+    }
+    if (platform === 'darwin') {
+        // macOS has no /proc; `ps -o comm=` prints the full path for a
+        // process launched by absolute path (our own backend always is --
+        // see resolveBackendCommand), same as the `lsof`-based listener
+        // lookup in findPidsListeningOnPort above already assumes for macOS.
+        try {
+            const { stdout } = await execFileAsyncFn('ps', ['-p', String(pid), '-o', 'comm=']);
             return stdout.trim() || null;
         } catch {
             return null;

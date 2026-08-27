@@ -887,8 +887,10 @@ def _run_process_job(job_id: str) -> None:
     system_webm = Path(inputs["system_webm"]) if inputs["system_webm"] else None
     mic_webm = Path(inputs["mic_webm"]) if inputs["mic_webm"] else None
     whisper_model = inputs["whisper_model"]
-    custom_vocabulary = inputs["custom_vocabulary"]
-    ollama_chat_model = inputs["ollama_chat_model"]
+    # .get, not [...]: a job queued by an older build (or persisted across an
+    # upgrade) has none of these keys, and that must not crash the worker.
+    custom_vocabulary = inputs.get("custom_vocabulary", "")
+    ollama_chat_model = inputs.get("ollama_chat_model") or OLLAMA_CHAT_MODEL
     # .get(...) with defaults: inputs dicts created by an older backend
     # build (before Track B) won't have these keys if a job was somehow
     # still in flight across an upgrade -- treat that the same as "disabled".
@@ -1021,8 +1023,15 @@ def _run_process_job(job_id: str) -> None:
 
                 notes = llava_complete(
                     raw_txt_path=txt_path,
-                    out_path=str(session / "notes.md"),
+                    # Summarization here is text-only (no frame_paths, see the
+                    # comment above), so it runs on the configured chat model
+                    # rather than LLaVA_summarize's vision-model default. That
+                    # default is a SECOND model the user was never told to pull
+                    # -- and when it wasn't installed, Ollama's 404 turned every
+                    # single recording into "AI summarization failed", even
+                    # though the chat model sitting right there could do the job.
                     model=ollama_chat_model,
+                    out_path=str(session / "notes.md"),
                     max_chars=12000,
                     stream=False,
                     num_ctx=8192,
@@ -1062,6 +1071,15 @@ def _run_process_job(job_id: str) -> None:
                         explanation = (
                             "_AI summarization timed out (the local model didn't "
                             "respond in time) -- showing the raw transcript instead._\n\n"
+                        )
+                    elif "not found" in str(e).lower():
+                        # Ollama answers 404 for a model that was never pulled.
+                        # Naming the model and the exact command beats a bare
+                        # "failed", which gives the user nothing to act on.
+                        explanation = (
+                            f"_AI summarization failed: the model `{ollama_chat_model}` isn't "
+                            "installed in Ollama -- showing the raw transcript instead. "
+                            f"Run `ollama pull {ollama_chat_model}` to enable summaries._\n\n"
                         )
                     else:
                         explanation = (

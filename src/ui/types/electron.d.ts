@@ -115,6 +115,7 @@ declare global {
       getVersion: () => Promise<string>;
     };
     electronAPI?: {
+      platform: NodeJS.Platform;
       pickPrimaryScreenId: () => Promise<string | null>;
       setRailErrorVisible: (visible: boolean) => Promise<void>;
     };
@@ -123,7 +124,7 @@ declare global {
     };
     settingsAPI?: {
       chooseFolder: () => Promise<string | null>;
-      openPrivacySettings: (kind: "microphone" | "camera") => Promise<void>;
+      openPrivacySettings: (kind: "microphone" | "camera" | "screenRecording") => Promise<void>;
     };
     backendAPI?: {
       onStatus: (callback: (status: BackendStatus) => void) => () => void;

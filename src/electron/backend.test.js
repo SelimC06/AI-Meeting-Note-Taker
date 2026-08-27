@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { resolveVenvPython, resolveBackendCommand, startBackend, stopBackend, waitForHealth, HEALTH_ATTEMPT_TIMEOUT_MS, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree, getProcessExecutablePath, findPidsListeningOnPort } from './backend.js';
+import { resolveVenvPython, resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, waitForHealth, HEALTH_ATTEMPT_TIMEOUT_MS, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree, getProcessExecutablePath, findPidsListeningOnPort } from './backend.js';
 
 function makeTmpProjectRoot() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'backend-test-'));
@@ -104,6 +104,18 @@ test('resolveBackendCommand returns null in dev mode when .venv is missing', () 
     } finally {
         fs.rmSync(projectRoot, { recursive: true, force: true });
     }
+});
+
+test('resolveFfmpegPaths appends .exe on win32', () => {
+    const result = resolveFfmpegPaths('C:\\resources', 'win32');
+    assert.strictEqual(result.ffmpegBin, path.join('C:\\resources', 'ffmpeg', 'ffmpeg.exe'));
+    assert.strictEqual(result.ffprobeBin, path.join('C:\\resources', 'ffmpeg', 'ffprobe.exe'));
+});
+
+test('resolveFfmpegPaths has no extension on darwin', () => {
+    const result = resolveFfmpegPaths('/resources', 'darwin');
+    assert.strictEqual(result.ffmpegBin, path.join('/resources', 'ffmpeg', 'ffmpeg'));
+    assert.strictEqual(result.ffprobeBin, path.join('/resources', 'ffmpeg', 'ffprobe'));
 });
 
 test('stopBackend is a no-op when no process was started', () => {
@@ -306,6 +318,15 @@ test('findPidsListeningOnPort (win32) returns [] when Get-NetTCPConnection error
     assert.deepEqual(pids, []);
 });
 
+// The three ensurePortFree tests below exercise the REAL listener lookup (no mocked
+// execFileAsync), so they must run against the host platform rather than a hardcoded
+// 'win32'. Passing 'win32' on macOS sent them down the PowerShell branch, which can't
+// resolve `powershell` at all -- findPidsListeningOnPort swallowed the spawn error and
+// reported "no listeners", so the orphan was never killed and the first test hung
+// forever awaiting an 'exit' that could not arrive (npm run test:main never finished
+// on macOS, in CI as well as locally).
+const HOST_PLATFORM = process.platform;
+
 test('ensurePortFree kills a process listening on the given port when it matches expectedExePath (orphaned zombie scenario)', async () => {
     const port = await getFreePort();
     // Spawned directly via child_process, NOT through startBackend/stopBackend — this
@@ -327,7 +348,7 @@ test('ensurePortFree kills a process listening on the given port when it matches
             });
         });
 
-        const freed = await ensurePortFree(port, process.execPath, 'win32');
+        const freed = await ensurePortFree(port, process.execPath, HOST_PLATFORM);
         assert.equal(freed, true);
 
         // ensurePortFree now detects the port freeing up via a ~1ms bind
@@ -373,8 +394,14 @@ test('ensurePortFree does not kill a foreign process and reports the port as sti
             });
         });
 
-        const fakeLookup = async () => 'C:\\Some\\Other\\App\\unrelated.exe';
-        const freed = await ensurePortFree(port, 'C:\\Program Files\\App\\app-backend.exe', 'win32', 1000, fakeLookup);
+        const foreignExe = HOST_PLATFORM === 'win32'
+            ? 'C:\\Some\\Other\\App\\unrelated.exe'
+            : '/opt/some-other-app/unrelated';
+        const ourExe = HOST_PLATFORM === 'win32'
+            ? 'C:\\Program Files\\App\\app-backend.exe'
+            : '/Applications/DeskRecap.app/Contents/Resources/backend/app-backend';
+        const fakeLookup = async () => foreignExe;
+        const freed = await ensurePortFree(port, ourExe, HOST_PLATFORM, 1000, fakeLookup);
 
         assert.equal(freed, false);
         assert.equal(foreign.exitCode, null, 'foreign process should not have been killed');
@@ -388,11 +415,11 @@ test('ensurePortFree does not kill a foreign process and reports the port as sti
 
 test('ensurePortFree resolves to true without error when nothing is listening on the port', async () => {
     const port = await getFreePort();
-    const freed = await ensurePortFree(port, process.execPath, 'win32');
+    const freed = await ensurePortFree(port, process.execPath, HOST_PLATFORM);
     assert.equal(freed, true);
 });
 
-test('getProcessExecutablePath resolves the real executable path of a running process', async () => {
+test('getProcessExecutablePath resolves the real executable path of a running process', { skip: process.platform !== 'win32' }, async () => {
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
     try {
         await new Promise((resolve) => setTimeout(resolve, 200)); // let the process fully start
@@ -403,9 +430,25 @@ test('getProcessExecutablePath resolves the real executable path of a running pr
     }
 });
 
-test('getProcessExecutablePath returns null for a pid that does not exist', async () => {
+test('getProcessExecutablePath returns null for a pid that does not exist', { skip: process.platform !== 'win32' }, async () => {
     const resolvedPath = await getProcessExecutablePath(999999, 'win32');
     assert.equal(resolvedPath, null);
+});
+
+test('getProcessExecutablePath resolves the exe path on darwin via `ps`', async () => {
+    const fakeExecFileAsync = async (cmd, args) => {
+        assert.strictEqual(cmd, 'ps');
+        assert.deepStrictEqual(args, ['-p', '4242', '-o', 'comm=']);
+        return { stdout: '/Applications/DeskRecap.app/Contents/Resources/backend/app-backend\n' };
+    };
+    const path = await getProcessExecutablePath(4242, 'darwin', fakeExecFileAsync);
+    assert.strictEqual(path, '/Applications/DeskRecap.app/Contents/Resources/backend/app-backend');
+});
+
+test('getProcessExecutablePath returns null on darwin if ps fails (process already gone)', async () => {
+    const fakeExecFileAsync = async () => { throw new Error('No such process'); };
+    const path = await getProcessExecutablePath(4242, 'darwin', fakeExecFileAsync);
+    assert.strictEqual(path, null);
 });
 
 function tryBind(port) {
