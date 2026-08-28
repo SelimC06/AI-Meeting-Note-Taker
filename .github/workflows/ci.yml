@@ -77,6 +77,12 @@ jobs:
           python-version: "3.13"
           cache: pip
 
+      # See the equivalent choco install step in the `backend` (Windows) job
+      # above: ffmpeg/ffprobe aren't on PATH by default on this runner either,
+      # and vendor/ffmpeg is gitignored, so ffprobe_ok() would otherwise crash
+      # with FileNotFoundError instead of its graceful "invalid file" handling.
+      - run: brew install ffmpeg
+
       - run: pip install -r requirements.txt
       - run: python -m pytest -q
         working-directory: backend
