@@ -41,15 +41,10 @@ it("shows a reconnected message", () => {
   expect(screen.getByText("Backend reconnected")).toBeInTheDocument();
 });
 
-it("offers Retry when phase is failed, wired to backendAPI.restart", () => {
-  const restart = vi.fn().mockResolvedValue(undefined);
-  vi.stubGlobal("backendAPI", { onStatus: vi.fn(), restart });
+it("renders nothing when phase is failed", () => {
   mockLifecycle({ phase: "failed", logTail: "traceback..." });
-
-  render(<BackendStatusBanner />);
-  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-
-  expect(restart).toHaveBeenCalledTimes(1);
+  const { container } = render(<BackendStatusBanner />);
+  expect(container.firstChild).toBeNull();
 });
 
 it("offers Retry when phase is unresponsive (unreachable for >~10s with no main-driven event yet)", () => {
