@@ -197,6 +197,17 @@ This uploads the installer and a `latest.yml` manifest to the R2 bucket.
 Bump `"version"` in `package.json` first — electron-updater compares
 semver against `latest.yml` to decide whether an update exists.
 
+Also tag the release in git, matching `package.json`'s version:
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+The R2 manifest is what the app updates against, not the tag — but the tag
+is what turns a bug report's "which version are you on" into something you
+can actually check out and debug against later.
+
 ## Scripts
 
 | Script | Purpose |
