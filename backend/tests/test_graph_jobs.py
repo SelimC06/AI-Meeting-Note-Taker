@@ -42,9 +42,27 @@ def wait_until(cond, timeout=2.0):
     return False
 
 
+def test_index_session_passes_client_through_to_extract_from_notes(tmp_path, monkeypatch):
+    append_session(tmp_path, _record("s1"))
+
+    captured = {}
+
+    def fake_extract_from_notes(notes, model, client=None):
+        captured["client"] = client
+        captured["model"] = model
+        return Extraction(entities=[], relations=[])
+
+    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", fake_extract_from_notes)
+
+    sentinel_client = object()
+    graph_jobs.index_session(tmp_path, "s1", "gpt-4o-mini", client=sentinel_client)
+    assert captured["client"] is sentinel_client
+    assert captured["model"] == "gpt-4o-mini"
+
+
 def test_index_session_extracts_and_merges(tmp_path, monkeypatch):
     append_session(tmp_path, _record("s1"))
-    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", lambda notes, model: SAMPLE_EXTRACTION)
+    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", lambda notes, model, client=None: SAMPLE_EXTRACTION)
     graph_jobs.index_session(tmp_path, "s1", model="test-model")
     graph = knowledge_graph.load_graph(tmp_path)
     assert graph["indexed_sessions"] == ["s1"]
@@ -54,7 +72,7 @@ def test_index_session_extracts_and_merges(tmp_path, monkeypatch):
 def test_index_session_skips_unknown_trashed_and_already_indexed(tmp_path, monkeypatch):
     calls = []
 
-    def fake_extract(notes, model):
+    def fake_extract(notes, model, client=None):
         calls.append(notes)
         return SAMPLE_EXTRACTION
 
@@ -73,14 +91,14 @@ def test_index_session_skips_unknown_trashed_and_already_indexed(tmp_path, monke
 
 def test_index_session_leaves_session_unindexed_on_empty_extraction(tmp_path, monkeypatch):
     append_session(tmp_path, _record("s1"))
-    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", lambda notes, model: Extraction())
+    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", lambda notes, model, client=None: Extraction())
     graph_jobs.index_session(tmp_path, "s1", model="m")
     assert knowledge_graph.load_graph(tmp_path)["indexed_sessions"] == []
 
 
 def test_worker_processes_enqueued_sessions(tmp_path, monkeypatch):
     append_session(tmp_path, _record("s1"))
-    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", lambda notes, model: SAMPLE_EXTRACTION)
+    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", lambda notes, model, client=None: SAMPLE_EXTRACTION)
     monkeypatch.setattr(graph_jobs.jobs, "is_busy", lambda: False)
 
     graph_jobs.start_worker(lambda: tmp_path, lambda: "test-model")
@@ -91,7 +109,7 @@ def test_worker_processes_enqueued_sessions(tmp_path, monkeypatch):
 
 def test_worker_yields_while_recording_pipeline_is_busy(tmp_path, monkeypatch):
     append_session(tmp_path, _record("s1"))
-    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", lambda notes, model: SAMPLE_EXTRACTION)
+    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", lambda notes, model, client=None: SAMPLE_EXTRACTION)
 
     busy = {"value": True}
     monkeypatch.setattr(graph_jobs.jobs, "is_busy", lambda: busy["value"])
@@ -110,16 +128,16 @@ def test_worker_survives_an_exception_and_continues(tmp_path, monkeypatch):
     append_session(tmp_path, _record("bad"))
     append_session(tmp_path, _record("good"))
 
-    def flaky_extract(notes, model):
+    def flaky_extract(notes, model, client=None):
         if "bad" in flaky_extract.current:
             raise RuntimeError("simulated extraction crash")
         return SAMPLE_EXTRACTION
 
     real_index = graph_jobs.index_session
 
-    def tracking_index(store_dir, session_id, model):
+    def tracking_index(store_dir, session_id, model, client=None):
         flaky_extract.current = session_id
-        real_index(store_dir, session_id, model)
+        real_index(store_dir, session_id, model, client=client)
 
     monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", flaky_extract)
     monkeypatch.setattr(graph_jobs, "index_session", tracking_index)
@@ -143,7 +161,7 @@ def test_is_busy_true_only_while_index_session_is_running(tmp_path, monkeypatch)
     release = threading.Event()
     started = threading.Event()
 
-    def blocking_extract(notes, model):
+    def blocking_extract(notes, model, client=None):
         started.set()
         release.wait(timeout=2)
         return SAMPLE_EXTRACTION

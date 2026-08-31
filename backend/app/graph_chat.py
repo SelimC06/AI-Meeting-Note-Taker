@@ -20,13 +20,18 @@ def stream_graph_chat_reply(
     temperature: float = 0.3,
     num_ctx: int = 8192,
     num_predict: int = 800,
+    client=None,
 ) -> Iterator[str]:
     """Yield response chunks for one cross-meeting chat turn.
 
     `context` is the labeled multi-meeting notes block built by
     graph_retrieve.build_context. `history` is prior turns as
     {"role": "user"|"assistant", "content": str} dicts, oldest first.
+    `client` defaults to chat.py's module-level Ollama client when None --
+    pass an alternative to route this call through a different LLM
+    backend.
     """
+    active_client = client if client is not None else _client
     system_prompt = (
         "You are answering questions that may span MULTIPLE recorded "
         "meetings, in a normal spoken conversational tone.\n"
@@ -58,7 +63,7 @@ def stream_graph_chat_reply(
     buffer = ""
     buffering = True
 
-    for chunk in _client.chat(model=model, messages=messages, options=options, stream=True):
+    for chunk in active_client.chat(model=model, messages=messages, options=options, stream=True):
         delta = chunk.get("message", {}).get("content", "")
         if not delta:
             continue

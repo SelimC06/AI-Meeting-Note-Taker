@@ -229,6 +229,13 @@ export type Settings = {
   // download the (gated) model weights.
   advanced_diarization_enabled: boolean;
   huggingface_token: string;
+  // Custom (3rd-party, OpenAI-compatible) LLM provider. Off by default --
+  // Ollama stays the default provider for chat, summarization, and
+  // knowledge-graph extraction.
+  ai_provider: "ollama" | "custom";
+  custom_api_base_url: string;
+  custom_api_key: string;
+  custom_model_name: string;
   whisper_model_choices: WhisperModelChoice[];
 };
 
@@ -250,6 +257,10 @@ export async function updateSettings(
       | "custom_vocabulary"
       | "advanced_diarization_enabled"
       | "huggingface_token"
+      | "ai_provider"
+      | "custom_api_base_url"
+      | "custom_api_key"
+      | "custom_model_name"
     >
   >
 ): Promise<Settings> {

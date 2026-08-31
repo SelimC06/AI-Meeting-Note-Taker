@@ -7,6 +7,55 @@ from PIL import Image
 import app.LLaVA_summarize as llava_module
 
 
+def test_complete_uses_passed_in_client_instead_of_module_default(tmp_path, monkeypatch):
+    class _FakeClient:
+        def list(self):
+            return {"models": []}
+
+        def chat(self, model, messages, options, stream):
+            assert model == "gpt-4o-mini"
+            return {"message": {"content": "custom summary"}}
+
+    def fail_if_called():
+        raise AssertionError("module _health_client should not have been used")
+
+    monkeypatch.setattr(llava_module, "_assert_ollama_up", fail_if_called)
+
+    txt_path = tmp_path / "raw.txt"
+    txt_path.write_text("transcript text", encoding="utf-8")
+
+    result = llava_module.complete(
+        raw_txt_path=str(txt_path),
+        model="gpt-4o-mini",
+        client=_FakeClient(),
+        stream=False,
+    )
+    assert result == "custom summary"
+
+
+def test_extract_action_items_uses_passed_in_client_instead_of_module_default(tmp_path, monkeypatch):
+    class _FakeClient:
+        def list(self):
+            return {"models": []}
+
+        def chat(self, model, messages, options, stream, format):
+            assert model == "gpt-4o-mini"
+            return {"message": {"content": '{"action_items": []}'}}
+
+    def fail_if_called():
+        raise AssertionError("module _health_client should not have been used")
+
+    monkeypatch.setattr(llava_module, "_assert_ollama_up", fail_if_called)
+
+    txt_path = tmp_path / "raw.txt"
+    txt_path.write_text("transcript text", encoding="utf-8")
+
+    result = llava_module.extract_action_items(
+        raw_txt_path=str(txt_path), model="gpt-4o-mini", client=_FakeClient()
+    )
+    assert result == []
+
+
 def test_complete_returns_markdown_and_writes_out_path(tmp_path, monkeypatch):
     monkeypatch.setattr(llava_module._health_client, "list", lambda: {"models": []})
 

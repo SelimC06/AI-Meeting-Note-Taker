@@ -30,6 +30,13 @@ def default_settings(default_storage_dir: Path) -> Dict[str, Any]:
         # must never turn on without the user explicitly opting in.
         "advanced_diarization_enabled": False,
         "huggingface_token": "",
+        # Custom (3rd-party, OpenAI-compatible) LLM provider. Off by
+        # default -- Ollama stays the default provider for chat,
+        # summarization, and knowledge-graph extraction.
+        "ai_provider": "ollama",
+        "custom_api_base_url": "",
+        "custom_api_key": "",
+        "custom_model_name": "",
     }
 
 

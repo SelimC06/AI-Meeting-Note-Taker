@@ -56,3 +56,22 @@ def test_empty_chunks_are_skipped(monkeypatch):
 
     monkeypatch.setattr(graph_chat_module._client, "chat", fake_chat)
     assert "".join(graph_chat.stream_graph_chat_reply("CTX", "q", [])) == "x"
+
+
+def test_stream_graph_chat_reply_uses_passed_in_client_instead_of_module_default(monkeypatch):
+    class _FakeClient:
+        def chat(self, model, messages, options, stream):
+            assert model == "gpt-4o-mini"
+            yield {"message": {"content": "custom provider reply"}}
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("module-level _client should not have been used")
+
+    monkeypatch.setattr(graph_chat_module._client, "chat", fail_if_called)
+
+    result = "".join(
+        graph_chat.stream_graph_chat_reply(
+            "context", "q", [], model="gpt-4o-mini", client=_FakeClient()
+        )
+    )
+    assert result == "custom provider reply"

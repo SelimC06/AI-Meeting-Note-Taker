@@ -71,7 +71,7 @@ def backfill_unindexed(store_dir: Path) -> int:
     return count
 
 
-def index_session(store_dir: Path, session_id: str, model: str) -> None:
+def index_session(store_dir: Path, session_id: str, model: str, client=None) -> None:
     """Extract + merge one session. Skips (no-op) unknown, trashed, or
     already-indexed sessions. An empty extraction (extract pass failed or
     found nothing) leaves the session unindexed so the next backfill sweep
@@ -82,17 +82,21 @@ def index_session(store_dir: Path, session_id: str, model: str) -> None:
         return
     if session_id in knowledge_graph.load_graph(store_dir)["indexed_sessions"]:
         return
-    extraction = graph_extract.extract_from_notes(record.get("notes") or "", model=model)
+    extraction = graph_extract.extract_from_notes(record.get("notes") or "", model=model, client=client)
     if not extraction.entities:
         return
     knowledge_graph.merge_extraction(store_dir, session_id, extraction.model_dump())
 
 
-def start_worker(get_store: Callable[[], Path], get_model: Callable[[], str]) -> None:
+def start_worker(
+    get_store: Callable[[], Path],
+    get_model: Callable[[], str],
+    get_client: Callable[[], object] = lambda: None,
+) -> None:
     """Start the single daemon worker thread. Idempotent, same as
-    jobs.start_worker. get_store/get_model are callables (not values) so
-    the worker always sees the CURRENT storage dir and chat model even
-    after a settings change mid-session.
+    jobs.start_worker. get_store/get_model/get_client are callables (not
+    values) so the worker always sees the CURRENT storage dir, chat model,
+    and LLM client even after a settings change mid-session.
     """
     global _worker_started
     with _worker_lock:
@@ -114,7 +118,7 @@ def start_worker(get_store: Callable[[], Path], get_model: Callable[[], str]) ->
                 with _INDEXING_LOCK:
                     _indexing = True
                 try:
-                    index_session(get_store(), session_id, get_model())
+                    index_session(get_store(), session_id, get_model(), client=get_client())
                 finally:
                     with _INDEXING_LOCK:
                         _indexing = False

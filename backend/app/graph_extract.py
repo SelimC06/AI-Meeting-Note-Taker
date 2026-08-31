@@ -87,8 +87,9 @@ def resolve_graph_model(chat_model: str) -> str:
     return os.getenv("GRAPH_MODEL") or chat_model
 
 
-def extract_pass(notes: str, model: str) -> Extraction:
-    resp = _client.chat(
+def extract_pass(notes: str, model: str, client=None) -> Extraction:
+    active_client = client if client is not None else _client
+    resp = active_client.chat(
         model=model,
         messages=[
             {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
@@ -101,15 +102,16 @@ def extract_pass(notes: str, model: str) -> Extraction:
     return Extraction.model_validate_json(resp["message"]["content"])
 
 
-def verify_pass(notes: str, extraction: Extraction, model: str) -> Extraction:
+def verify_pass(notes: str, extraction: Extraction, model: str, client=None) -> Extraction:
     if not extraction.relations:
         return extraction
+    active_client = client if client is not None else _client
     names = {e.id: e.name for e in extraction.entities}
     claims = "\n".join(
         f"{i}. {names.get(r.source_id, '?')} -- {r.relation} -- {names.get(r.target_id, '?')}"
         for i, r in enumerate(extraction.relations, 1)
     )
-    resp = _client.chat(
+    resp = active_client.chat(
         model=model,
         messages=[
             {"role": "system", "content": VERIFY_SYSTEM_PROMPT},
@@ -128,16 +130,16 @@ def verify_pass(notes: str, extraction: Extraction, model: str) -> Extraction:
     return Extraction(entities=extraction.entities, relations=kept)
 
 
-def extract_from_notes(notes: str, model: str) -> Extraction:
+def extract_from_notes(notes: str, model: str, client=None) -> Extraction:
     """Run both passes. Schema failures degrade per the design's table:
     extract failing -> empty Extraction (session stays unindexed, retried
     by backfill); verify failing -> unverified extraction passes through.
     """
     try:
-        extraction = extract_pass(notes, model)
+        extraction = extract_pass(notes, model, client=client)
     except (ValidationError, ValueError):
         return Extraction()
     try:
-        return verify_pass(notes, extraction, model)
+        return verify_pass(notes, extraction, model, client=client)
     except (ValidationError, ValueError):
         return extraction

@@ -124,6 +124,25 @@ def test_strip_title_preamble_no_op_on_plain_text():
     assert chat_module._strip_title_preamble(text) == text
 
 
+def test_stream_chat_reply_uses_passed_in_client_instead_of_module_default(monkeypatch):
+    class _FakeClient:
+        def chat(self, model, messages, options, stream):
+            assert model == "gpt-4o-mini"
+            yield {"message": {"content": "custom provider reply"}}
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("module-level _client should not have been used")
+
+    monkeypatch.setattr(chat_module._client, "chat", fail_if_called)
+
+    result = "".join(
+        chat_module.stream_chat_reply(
+            "notes", "hi", [], model="gpt-4o-mini", client=_FakeClient()
+        )
+    )
+    assert result == "custom provider reply"
+
+
 def test_assert_ollama_up_calls_client_list(monkeypatch):
     calls = []
     monkeypatch.setattr(chat_module._health_client, "list", lambda: calls.append(True))

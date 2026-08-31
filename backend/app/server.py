@@ -60,6 +60,7 @@ from .settings_store import (
 from .bin_paths import FFMPEG_BIN, FFPROBE_BIN
 from .whisper_cache import get_whisper_model, transcribe_audio
 from . import jobs
+from . import llm_provider
 
 try:
     from .ffmpeg_transcribe import stop_recording_and_transcribe, transcribe_wav  # type: ignore
@@ -287,6 +288,10 @@ OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
 CUSTOM_VOCABULARY = _settings["custom_vocabulary"]
 ADVANCED_DIARIZATION_ENABLED = _settings["advanced_diarization_enabled"]
 HUGGINGFACE_TOKEN = _settings["huggingface_token"]
+AI_PROVIDER = _settings["ai_provider"]
+CUSTOM_API_BASE_URL = _settings["custom_api_base_url"]
+CUSTOM_API_KEY = _settings["custom_api_key"]
+CUSTOM_MODEL_NAME = _settings["custom_model_name"]
 
 # Set for the duration of move_storage_dir inside patch_settings below.
 # POST /process checks this and rejects with 503 rather than writing a
@@ -604,6 +609,10 @@ class SettingsUpdate(BaseModel):
     custom_vocabulary: Optional[str] = None
     advanced_diarization_enabled: Optional[bool] = None
     huggingface_token: Optional[str] = None
+    ai_provider: Optional[str] = None
+    custom_api_base_url: Optional[str] = None
+    custom_api_key: Optional[str] = None
+    custom_model_name: Optional[str] = None
 
 
 @app.get("/settings")
@@ -621,6 +630,10 @@ def get_settings():
         "custom_vocabulary": CUSTOM_VOCABULARY,
         "advanced_diarization_enabled": ADVANCED_DIARIZATION_ENABLED,
         "huggingface_token": HUGGINGFACE_TOKEN,
+        "ai_provider": AI_PROVIDER,
+        "custom_api_base_url": CUSTOM_API_BASE_URL,
+        "custom_api_key": CUSTOM_API_KEY,
+        "custom_model_name": CUSTOM_MODEL_NAME,
         "whisper_model_choices": WHISPER_MODEL_CHOICES,
     }
 
@@ -629,6 +642,7 @@ def get_settings():
 def patch_settings(body: SettingsUpdate):
     global STORE, WHISPER_MODEL, OLLAMA_CHAT_MODEL, CUSTOM_VOCABULARY, move_in_progress
     global ADVANCED_DIARIZATION_ENABLED, HUGGINGFACE_TOKEN
+    global AI_PROVIDER, CUSTOM_API_BASE_URL, CUSTOM_API_KEY, CUSTOM_MODEL_NAME
 
     if body.whisper_model is not None and body.whisper_model not in WHISPER_MODEL_VALUES:
         raise HTTPException(400, f"Invalid whisper_model: {body.whisper_model!r}")
@@ -654,6 +668,10 @@ def patch_settings(body: SettingsUpdate):
             "custom_vocabulary": CUSTOM_VOCABULARY,
             "advanced_diarization_enabled": ADVANCED_DIARIZATION_ENABLED,
             "huggingface_token": HUGGINGFACE_TOKEN,
+            "ai_provider": AI_PROVIDER,
+            "custom_api_base_url": CUSTOM_API_BASE_URL,
+            "custom_api_key": CUSTOM_API_KEY,
+            "custom_model_name": CUSTOM_MODEL_NAME,
         }
         if body.whisper_model is not None:
             updates["whisper_model"] = body.whisper_model
@@ -665,6 +683,14 @@ def patch_settings(body: SettingsUpdate):
             updates["advanced_diarization_enabled"] = body.advanced_diarization_enabled
         if body.huggingface_token is not None:
             updates["huggingface_token"] = body.huggingface_token
+        if body.ai_provider is not None:
+            updates["ai_provider"] = body.ai_provider
+        if body.custom_api_base_url is not None:
+            updates["custom_api_base_url"] = body.custom_api_base_url
+        if body.custom_api_key is not None:
+            updates["custom_api_key"] = body.custom_api_key
+        if body.custom_model_name is not None:
+            updates["custom_model_name"] = body.custom_model_name
 
         if body.storage_dir is not None:
             new_dir = Path(body.storage_dir)
@@ -723,6 +749,10 @@ def patch_settings(body: SettingsUpdate):
         CUSTOM_VOCABULARY = settings["custom_vocabulary"]
         ADVANCED_DIARIZATION_ENABLED = settings["advanced_diarization_enabled"]
         HUGGINGFACE_TOKEN = settings["huggingface_token"]
+        AI_PROVIDER = settings["ai_provider"]
+        CUSTOM_API_BASE_URL = settings["custom_api_base_url"]
+        CUSTOM_API_KEY = settings["custom_api_key"]
+        CUSTOM_MODEL_NAME = settings["custom_model_name"]
 
     return {**settings, "whisper_model_choices": WHISPER_MODEL_CHOICES}
 
@@ -769,7 +799,14 @@ def chat(session_id: str, body: ChatRequest):
     # Bind the settings-backed globals once so this request sees one
     # consistent snapshot even if a PATCH /settings lands mid-request.
     store = STORE
-    chat_model = OLLAMA_CHAT_MODEL
+    settings_snapshot = {
+        "ai_provider": AI_PROVIDER,
+        "ollama_chat_model": OLLAMA_CHAT_MODEL,
+        "custom_api_base_url": CUSTOM_API_BASE_URL,
+        "custom_api_key": CUSTOM_API_KEY,
+        "custom_model_name": CUSTOM_MODEL_NAME,
+    }
+    active_client, chat_model = llm_provider.resolve_active_client(settings_snapshot)
 
     if stream_chat_reply is None or assert_ollama_up is None:
         raise HTTPException(503, "Chat is unavailable on this server")
@@ -777,7 +814,10 @@ def chat(session_id: str, body: ChatRequest):
     session_record = _get_session_or_404(store, session_id)
 
     try:
-        assert_ollama_up()
+        if active_client is None:
+            assert_ollama_up()
+        else:
+            active_client.list()
     except Exception as e:
         raise HTTPException(503, f"Local model unavailable: {e}")
 
@@ -790,7 +830,9 @@ def chat(session_id: str, body: ChatRequest):
         # rendered as assistant text and echoed back in the next turn's
         # history.
         try:
-            for chunk in stream_chat_reply(session_record["notes"], body.message, history, model=chat_model):
+            for chunk in stream_chat_reply(
+                session_record["notes"], body.message, history, model=chat_model, client=active_client
+            ):
                 yield json.dumps({"token": chunk}) + "\n"
         except Exception as e:
             log(f"chat stream failed: {e}")
@@ -804,13 +846,23 @@ def graph_chat(body: ChatRequest):
     # Bind the settings-backed globals once so this request sees one
     # consistent snapshot even if a PATCH /settings lands mid-request.
     store = STORE
-    chat_model = OLLAMA_CHAT_MODEL
+    settings_snapshot = {
+        "ai_provider": AI_PROVIDER,
+        "ollama_chat_model": OLLAMA_CHAT_MODEL,
+        "custom_api_base_url": CUSTOM_API_BASE_URL,
+        "custom_api_key": CUSTOM_API_KEY,
+        "custom_model_name": CUSTOM_MODEL_NAME,
+    }
+    active_client, chat_model = llm_provider.resolve_active_client(settings_snapshot)
 
     if stream_graph_chat_reply is None or find_relevant_sessions is None or assert_ollama_up is None:
         raise HTTPException(503, "Chat is unavailable on this server")
 
     try:
-        assert_ollama_up()
+        if active_client is None:
+            assert_ollama_up()
+        else:
+            active_client.list()
     except Exception as e:
         raise HTTPException(503, f"Local model unavailable: {e}")
 
@@ -831,7 +883,7 @@ def graph_chat(body: ChatRequest):
         # can render source chips before/while tokens stream.
         yield json.dumps({"sources": sources}) + "\n"
         try:
-            for chunk in stream_graph_chat_reply(context, body.message, history, model=chat_model):
+            for chunk in stream_graph_chat_reply(context, body.message, history, model=chat_model, client=active_client):
                 yield json.dumps({"token": chunk}) + "\n"
         except Exception as e:
             log(f"graph chat stream failed: {e}")
@@ -896,6 +948,14 @@ def _run_process_job(job_id: str) -> None:
     # still in flight across an upgrade -- treat that the same as "disabled".
     advanced_diarization_enabled = inputs.get("advanced_diarization_enabled", False)
     huggingface_token = inputs.get("huggingface_token", "")
+    job_settings_snapshot = {
+        "ai_provider": inputs.get("ai_provider", "ollama"),
+        "ollama_chat_model": ollama_chat_model,
+        "custom_api_base_url": inputs.get("custom_api_base_url", ""),
+        "custom_api_key": inputs.get("custom_api_key", ""),
+        "custom_model_name": inputs.get("custom_model_name", ""),
+    }
+    active_client, ollama_chat_model = llm_provider.resolve_active_client(job_settings_snapshot)
 
     try:
         jobs.update_job(job_id, stage="muxing")
@@ -1037,6 +1097,7 @@ def _run_process_job(job_id: str) -> None:
                     num_ctx=8192,
                     num_predict=800,
                     temperature=0.3,
+                    client=active_client,
                 )
 
                 # Structured action items are a best-effort add-on to the
@@ -1055,6 +1116,7 @@ def _run_process_job(job_id: str) -> None:
                         structured_action_items = llava_extract_action_items(
                             raw_txt_path=txt_path,
                             model=ollama_chat_model,
+                            client=active_client,
                         )
                     except Exception as e:
                         log(f"action items extraction failed, falling back to prose notes: {e}")
@@ -1076,11 +1138,18 @@ def _run_process_job(job_id: str) -> None:
                         # Ollama answers 404 for a model that was never pulled.
                         # Naming the model and the exact command beats a bare
                         # "failed", which gives the user nothing to act on.
-                        explanation = (
-                            f"_AI summarization failed: the model `{ollama_chat_model}` isn't "
-                            "installed in Ollama -- showing the raw transcript instead. "
-                            f"Run `ollama pull {ollama_chat_model}` to enable summaries._\n\n"
-                        )
+                        if job_settings_snapshot["ai_provider"] == "custom":
+                            explanation = (
+                                f"_AI summarization failed: the model `{ollama_chat_model}` was not "
+                                "found by the configured custom provider -- showing the raw transcript "
+                                "instead. Check the model name in Settings._\n\n"
+                            )
+                        else:
+                            explanation = (
+                                f"_AI summarization failed: the model `{ollama_chat_model}` isn't "
+                                "installed in Ollama -- showing the raw transcript instead. "
+                                f"Run `ollama pull {ollama_chat_model}` to enable summaries._\n\n"
+                            )
                     else:
                         explanation = (
                             "_AI summarization failed -- showing the raw transcript instead._\n\n"
@@ -1160,7 +1229,26 @@ jobs.start_worker(_run_process_job)
 # indexed too. GRAPH_INDEXING_DISABLED=1 (set by the test conftest) keeps
 # test runs from starting real background extraction against a dev store.
 if graph_jobs is not None and os.getenv("GRAPH_INDEXING_DISABLED") != "1":
-    graph_jobs.start_worker(lambda: STORE, lambda: resolve_graph_model(OLLAMA_CHAT_MODEL))
+    def _graph_settings_snapshot():
+        return {
+            "ai_provider": AI_PROVIDER,
+            "ollama_chat_model": OLLAMA_CHAT_MODEL,
+            "custom_api_base_url": CUSTOM_API_BASE_URL,
+            "custom_api_key": CUSTOM_API_KEY,
+            "custom_model_name": CUSTOM_MODEL_NAME,
+        }
+
+    def _graph_model():
+        client, model = llm_provider.resolve_active_client(_graph_settings_snapshot())
+        # resolve_graph_model's GRAPH_MODEL env override only makes sense
+        # against the Ollama chat model -- a custom provider's model name
+        # is already exactly what the user configured in Settings.
+        return model if client is not None else resolve_graph_model(model)
+
+    def _graph_client():
+        return llm_provider.resolve_active_client(_graph_settings_snapshot())[0]
+
+    graph_jobs.start_worker(lambda: STORE, _graph_model, _graph_client)
     try:
         graph_jobs.backfill_unindexed(STORE)
     except Exception as e:
@@ -1249,6 +1337,10 @@ def process(
                 "ollama_chat_model": ollama_chat_model,
                 "advanced_diarization_enabled": advanced_diarization_enabled,
                 "huggingface_token": huggingface_token,
+                "ai_provider": AI_PROVIDER,
+                "custom_api_base_url": CUSTOM_API_BASE_URL,
+                "custom_api_key": CUSTOM_API_KEY,
+                "custom_model_name": CUSTOM_MODEL_NAME,
             },
         )
         jobs.enqueue(job_id)

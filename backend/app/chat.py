@@ -74,13 +74,18 @@ def stream_chat_reply(
     temperature: float = 0.3,
     num_ctx: int = 8192,
     num_predict: int = 800,
+    client=None,
 ) -> Iterator[str]:
     """Yield response text chunks for one chat turn about a single meeting.
 
     `notes` is that meeting's stored notes (the only context the model gets —
     no raw transcript). `history` is the prior conversation turns as
     {"role": "user"|"assistant", "content": str} dicts, oldest first.
+    `client` defaults to this module's own Ollama client when None -- pass
+    an alternative (e.g. an OpenAICompatClient) to route this call through
+    a different LLM backend without changing anything else here.
     """
+    active_client = client if client is not None else _client
     system_prompt = (
         "You are answering questions about ONE specific recorded meeting, "
         "in a normal spoken conversational tone.\n"
@@ -111,7 +116,7 @@ def stream_chat_reply(
     buffer = ""
     buffering = True
 
-    for chunk in _client.chat(model=model, messages=messages, options=options, stream=True):
+    for chunk in active_client.chat(model=model, messages=messages, options=options, stream=True):
         delta = chunk.get("message", {}).get("content", "")
         if not delta:
             continue

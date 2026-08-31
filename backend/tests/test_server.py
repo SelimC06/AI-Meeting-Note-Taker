@@ -1054,6 +1054,64 @@ def test_chat_returns_503_when_ollama_unreachable(client: TestClient, monkeypatc
     assert resp.status_code == 503
 
 
+def test_chat_uses_custom_provider_when_configured(client: TestClient, monkeypatch):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc123",
+        "created_at": "2026-08-03T00:00:00+00:00",
+        "title": "Test Meeting",
+        "notes": "notes",
+        "video_path": "x",
+    })
+
+    captured = {}
+
+    class _FakeClient:
+        def list(self):
+            return {}
+
+    def fake_stream_chat_reply(notes, message, history, **kwargs):
+        captured["model"] = kwargs.get("model")
+        captured["client"] = kwargs.get("client")
+        yield "custom reply"
+
+    monkeypatch.setattr(server_module, "stream_chat_reply", fake_stream_chat_reply)
+    monkeypatch.setattr(
+        server_module.llm_provider, "resolve_active_client", lambda settings: (_FakeClient(), "gpt-4o-mini")
+    )
+
+    resp = client.post("/chat/abc123", json={"message": "hi", "history": []})
+    assert resp.status_code == 200
+    assert captured["model"] == "gpt-4o-mini"
+    assert isinstance(captured["client"], _FakeClient)
+
+
+def test_chat_still_uses_ollama_health_check_when_provider_is_ollama(client: TestClient, monkeypatch):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc123",
+        "created_at": "2026-08-03T00:00:00+00:00",
+        "title": "Test Meeting",
+        "notes": "notes",
+        "video_path": "x",
+    })
+
+    calls = []
+    monkeypatch.setattr(server_module, "assert_ollama_up", lambda: calls.append("assert_ollama_up"))
+
+    def fake_stream_chat_reply(notes, message, history, **kwargs):
+        assert kwargs.get("client") is None
+        yield "ok"
+
+    monkeypatch.setattr(server_module, "stream_chat_reply", fake_stream_chat_reply)
+
+    resp = client.post("/chat/abc123", json={"message": "hi", "history": []})
+    assert resp.status_code == 200
+    assert calls == ["assert_ollama_up"]
+
+
 def test_debug_ollama_route_removed(client: TestClient):
     resp = client.get("/debug/ollama")
     assert resp.status_code == 404
@@ -1658,6 +1716,50 @@ def test_patch_settings_updates_ollama_chat_model(client: TestClient):
 
     import app.server as server_module
     assert server_module.OLLAMA_CHAT_MODEL == "llama3.1:8b"
+
+
+def test_get_settings_includes_custom_provider_fields(client: TestClient):
+    resp = client.get("/settings")
+    body = resp.json()
+    assert body["ai_provider"] == "ollama"
+    assert body["custom_api_base_url"] == ""
+    assert body["custom_api_key"] == ""
+    assert body["custom_model_name"] == ""
+
+
+def test_patch_settings_updates_custom_provider_fields(client: TestClient):
+    resp = client.patch(
+        "/settings",
+        json={
+            "ai_provider": "custom",
+            "custom_api_base_url": "https://api.openai.com/v1",
+            "custom_api_key": "sk-test",
+            "custom_model_name": "gpt-4o-mini",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ai_provider"] == "custom"
+    assert body["custom_api_base_url"] == "https://api.openai.com/v1"
+    assert body["custom_api_key"] == "sk-test"
+    assert body["custom_model_name"] == "gpt-4o-mini"
+
+    import app.server as server_module
+    assert server_module.AI_PROVIDER == "custom"
+    assert server_module.CUSTOM_API_BASE_URL == "https://api.openai.com/v1"
+    assert server_module.CUSTOM_API_KEY == "sk-test"
+    assert server_module.CUSTOM_MODEL_NAME == "gpt-4o-mini"
+
+    resp2 = client.get("/settings")
+    assert resp2.json()["ai_provider"] == "custom"
+
+    # ai_provider (unlike the other settings globals this file already
+    # mutates in place, e.g. OLLAMA_CHAT_MODEL) changes real request
+    # routing -- leaving it at "custom" would make every later test's
+    # /chat and /graph/chat calls try a real network request against
+    # "https://api.openai.com/v1". Reset it so this test doesn't leak
+    # state into the rest of the session.
+    client.patch("/settings", json={"ai_provider": "ollama"})
 
 
 def test_patch_settings_moves_storage_dir(client: TestClient, tmp_path):
@@ -3044,7 +3146,7 @@ def test_graph_chat_streams_sources_line_then_tokens(client, monkeypatch):
 
     captured = {}
 
-    def fake_stream(context, message, history, model=None):
+    def fake_stream(context, message, history, model=None, client=None):
         captured["context"] = context
         captured["message"] = message
         captured["history"] = history
@@ -3080,7 +3182,7 @@ def test_graph_chat_emits_error_line_on_midstream_failure(client, monkeypatch):
     monkeypatch.setattr(server_module, "find_relevant_sessions", lambda store, q, max_sessions=5: [])
     monkeypatch.setattr(server_module, "build_context", lambda store, sids: "")
 
-    def broken_stream(context, message, history, model=None):
+    def broken_stream(context, message, history, model=None, client=None):
         yield "partial "
         raise RuntimeError("ollama died mid-stream")
 

@@ -32,7 +32,34 @@ def test_default_settings_uses_env_vars(monkeypatch, tmp_path):
         "custom_vocabulary": "",
         "advanced_diarization_enabled": False,
         "huggingface_token": "",
+        "ai_provider": "ollama",
+        "custom_api_base_url": "",
+        "custom_api_key": "",
+        "custom_model_name": "",
     }
+
+
+def test_default_settings_includes_custom_provider_fields(tmp_path):
+    storage = tmp_path / "uploads"
+    result = default_settings(storage)
+    assert result["ai_provider"] == "ollama"
+    assert result["custom_api_base_url"] == ""
+    assert result["custom_api_key"] == ""
+    assert result["custom_model_name"] == ""
+
+
+def test_load_or_init_backfills_custom_provider_fields_for_an_older_settings_file(tmp_path):
+    storage = tmp_path / "uploads"
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps({"whisper_model": "small.en", "storage_dir": str(storage)}),
+        encoding="utf-8",
+    )
+    result = load_or_init(path, storage)
+    assert result["ai_provider"] == "ollama"
+    assert result["custom_api_base_url"] == ""
+    assert result["custom_api_key"] == ""
+    assert result["custom_model_name"] == ""
 
 
 def test_default_settings_falls_back_without_env_vars(monkeypatch, tmp_path):

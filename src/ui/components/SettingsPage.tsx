@@ -85,6 +85,12 @@ export default function SettingsPage({ active }: { active: boolean }) {
   const [whisperError, setWhisperError] = useState<string | null>(null);
   const [ollamaSaveError, setOllamaSaveError] = useState<string | null>(null);
 
+  const [providerSaveError, setProviderSaveError] = useState<string | null>(null);
+  const [baseUrlDraft, setBaseUrlDraft] = useState("");
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [customModelDraft, setCustomModelDraft] = useState("");
+  const [connectionSaveError, setConnectionSaveError] = useState<string | null>(null);
+
   const [vocabularyDraft, setVocabularyDraft] = useState("");
   const [vocabularySaveError, setVocabularySaveError] = useState<string | null>(null);
 
@@ -111,6 +117,9 @@ export default function SettingsPage({ active }: { active: boolean }) {
           setSettings(s);
           setVocabularyDraft(s.custom_vocabulary);
           setTokenDraft(s.huggingface_token);
+          setBaseUrlDraft(s.custom_api_base_url);
+          setApiKeyDraft(s.custom_api_key);
+          setCustomModelDraft(s.custom_model_name);
         }
       })
       .catch((e) => {
@@ -202,6 +211,36 @@ export default function SettingsPage({ active }: { active: boolean }) {
     } catch (e) {
       setSettings(prev);
       setOllamaSaveError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleProviderChange = async (value: "ollama" | "custom") => {
+    const prev = settings;
+    setSettings((s) => (s ? { ...s, ai_provider: value } : s));
+    setProviderSaveError(null);
+    try {
+      const updated = await updateSettings({ ai_provider: value });
+      setSettings(updated);
+    } catch (e) {
+      setSettings(prev);
+      setProviderSaveError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleSaveConnection = async () => {
+    setConnectionSaveError(null);
+    try {
+      const updated = await updateSettings({
+        custom_api_base_url: baseUrlDraft,
+        custom_api_key: apiKeyDraft,
+        custom_model_name: customModelDraft,
+      });
+      setSettings(updated);
+      setBaseUrlDraft(updated.custom_api_base_url);
+      setApiKeyDraft(updated.custom_api_key);
+      setCustomModelDraft(updated.custom_model_name);
+    } catch (e) {
+      setConnectionSaveError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -444,42 +483,114 @@ export default function SettingsPage({ active }: { active: boolean }) {
 
         {activeSection === "ai" && (
           <section className="flex flex-col gap-2">
-            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
-              AI model (ollama)
-            </h2>
-            <p className="text-xs text-dim">Used for both chat and meeting summarization.</p>
-            {ollamaLoading ? (
-              <p className="text-xs text-dim">Loading installed models...</p>
-            ) : ollamaError ? (
-              <div className="flex items-center gap-2">
-                <p className="text-xs text-red-400">Ollama unreachable — is it running?</p>
-                <button
-                  onClick={loadOllamaModels}
-                  className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-                >
-                  Retry
-                </button>
+            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">AI model</h2>
+            <p className="text-xs text-dim">Used for chat, meeting summarization, and the knowledge graph.</p>
+
+            <div className="flex items-center gap-2">
+              <label htmlFor="ai-provider" className="text-xs text-dim">
+                Provider
+              </label>
+              <select
+                id="ai-provider"
+                value={settings.ai_provider}
+                onChange={(e) => handleProviderChange(e.target.value as "ollama" | "custom")}
+                className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+              >
+                <option value="ollama">Ollama (local)</option>
+                <option value="custom">Custom (OpenAI-compatible)</option>
+              </select>
+            </div>
+            {providerSaveError && <p className="text-xs text-red-400">{providerSaveError}</p>}
+
+            {settings.ai_provider === "ollama" && (
+              <div className="mt-2 pl-3 border-l-2 border-line flex flex-col gap-2">
+                {ollamaLoading ? (
+                  <p className="text-xs text-dim">Loading installed models...</p>
+                ) : ollamaError ? (
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs text-red-400">Ollama unreachable — is it running?</p>
+                    <button
+                      onClick={loadOllamaModels}
+                      className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <label htmlFor="ollama-chat-model" className="text-xs text-dim">
+                      Chat model
+                    </label>
+                    <select
+                      id="ollama-chat-model"
+                      value={settings.ollama_chat_model}
+                      onChange={(e) => handleOllamaChange(e.target.value)}
+                      className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                    >
+                      {!ollamaModels.includes(settings.ollama_chat_model) && (
+                        <option value={settings.ollama_chat_model}>
+                          {settings.ollama_chat_model} (not installed)
+                        </option>
+                      )}
+                      {ollamaModels.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                    {ollamaSaveError && <p className="text-xs text-red-400">{ollamaSaveError}</p>}
+                  </>
+                )}
               </div>
-            ) : (
-              <>
-                <select
-                  value={settings.ollama_chat_model}
-                  onChange={(e) => handleOllamaChange(e.target.value)}
+            )}
+
+            {settings.ai_provider === "custom" && (
+              <div className="mt-2 pl-3 border-l-2 border-line flex flex-col gap-2">
+                <p className="text-xs text-dim">
+                  Connects to any OpenAI-compatible endpoint. Meeting content is sent to this
+                  provider instead of staying on this machine.
+                </p>
+                <label htmlFor="custom-base-url" className="text-xs text-dim">
+                  Base URL
+                </label>
+                <input
+                  id="custom-base-url"
+                  type="text"
+                  value={baseUrlDraft}
+                  onChange={(e) => setBaseUrlDraft(e.target.value)}
+                  placeholder="https://api.openai.com/v1"
                   className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                />
+                <label htmlFor="custom-api-key" className="text-xs text-dim">
+                  API Key
+                </label>
+                <input
+                  id="custom-api-key"
+                  type="password"
+                  value={apiKeyDraft}
+                  onChange={(e) => setApiKeyDraft(e.target.value)}
+                  placeholder="sk-..."
+                  className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                />
+                <label htmlFor="custom-model-name" className="text-xs text-dim">
+                  Model name
+                </label>
+                <input
+                  id="custom-model-name"
+                  type="text"
+                  value={customModelDraft}
+                  onChange={(e) => setCustomModelDraft(e.target.value)}
+                  placeholder="gpt-4o-mini"
+                  className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                />
+                <button
+                  onClick={handleSaveConnection}
+                  className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                 >
-                  {!ollamaModels.includes(settings.ollama_chat_model) && (
-                    <option value={settings.ollama_chat_model}>
-                      {settings.ollama_chat_model} (not installed)
-                    </option>
-                  )}
-                  {ollamaModels.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                </select>
-                {ollamaSaveError && <p className="text-xs text-red-400">{ollamaSaveError}</p>}
-              </>
+                  Save connection
+                </button>
+                {connectionSaveError && <p className="text-xs text-red-400">{connectionSaveError}</p>}
+              </div>
             )}
           </section>
         )}

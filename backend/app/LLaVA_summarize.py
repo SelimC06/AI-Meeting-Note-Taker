@@ -52,9 +52,14 @@ def complete(
     num_predict=800,
     image_prompt: str = "Use the attached screenshots: extract on-screen text (OCR), headings, names, dates, and decisions. If a screenshot only shows part of the meeting, say so and summarize only that portion. Do not invent missing sections.",
     temperature=0.3,
-    on_token=None, ):
+    on_token=None,
+    client=None, ):
 
-    _assert_ollama_up()
+    active_client = client if client is not None else _client
+    if client is None:
+        _assert_ollama_up()
+    else:
+        client.list()
 
     transcript = Path(raw_txt_path).read_text(encoding="utf-8")
     # max_chars used to be accepted but never applied -- a long transcript
@@ -113,7 +118,7 @@ def complete(
 
     if stream:
         parts = []
-        for chunk in _client.chat(model=model, messages=messages, options=options, stream=True):
+        for chunk in active_client.chat(model=model, messages=messages, options=options, stream=True):
             delta = chunk.get("message", {}).get("content", "")
             if delta:
                 parts.append(delta)
@@ -121,7 +126,7 @@ def complete(
                     on_token(delta)
         md = "".join(parts).strip()
     else:
-        resp = _client.chat(model=model, messages=messages, options=options, stream=False)
+        resp = active_client.chat(model=model, messages=messages, options=options, stream=False)
         md = resp["message"]["content"].strip()
 
     if out_path:
@@ -214,6 +219,7 @@ def extract_action_items(
     num_ctx: int = 8192,
     num_predict: int = 400,
     temperature: float = 0.2,
+    client=None,
 ) -> Optional[List[dict]]:
     """Ask the model for action items as structured JSON.
 
@@ -239,7 +245,11 @@ def extract_action_items(
     model legitimately found no action items), or None if both attempts
     failed to produce parseable structured data.
     """
-    _assert_ollama_up()
+    active_client = client if client is not None else _client
+    if client is None:
+        _assert_ollama_up()
+    else:
+        client.list()
 
     transcript = Path(raw_txt_path).read_text(encoding="utf-8")
     if max_chars is not None and len(transcript) > max_chars:
@@ -280,7 +290,7 @@ def extract_action_items(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        resp = _client.chat(
+        resp = active_client.chat(
             model=model, messages=messages, options=options, stream=False, format="json"
         )
         content = resp["message"]["content"].strip()

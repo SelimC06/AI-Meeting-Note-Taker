@@ -20,6 +20,30 @@ SAMPLE_RELATIONS = [
 ]
 
 
+def test_extract_from_notes_uses_passed_in_client_instead_of_module_default(monkeypatch):
+    class _FakeClient:
+        def chat(self, model, messages, format, options, stream):
+            assert model == "gpt-4o-mini"
+            return {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "entities": [{"id": 0, "name": "Alice", "type": "person", "aliases": []}],
+                            "relations": [],
+                        }
+                    )
+                }
+            }
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("module _client should not have been used")
+
+    monkeypatch.setattr(graph_extract._client, "chat", fail_if_called)
+
+    result = graph_extract.extract_from_notes("Alice said hi.", model="gpt-4o-mini", client=_FakeClient())
+    assert result.entities[0].name == "Alice"
+
+
 def test_extract_pass_parses_schema_valid_response(monkeypatch):
     captured = {}
 

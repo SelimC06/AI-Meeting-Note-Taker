@@ -18,6 +18,10 @@ const baseSettings: Settings = {
   custom_vocabulary: "",
   advanced_diarization_enabled: false,
   huggingface_token: "",
+  ai_provider: "ollama",
+  custom_api_base_url: "",
+  custom_api_key: "",
+  custom_model_name: "",
   whisper_model_choices: [
     { value: "tiny.en", label: "Tiny", description: "Fastest, lower accuracy" },
     { value: "base.en", label: "Base", description: "Balanced (default)" },
@@ -429,4 +433,74 @@ it("does not warn about a missing token once diarization is enabled and a token 
 
   await screen.findByRole("button", { name: "On" });
   expect(screen.queryByText(/HuggingFace access token is required/i)).not.toBeInTheDocument();
+});
+
+it("shows the Ollama model picker by default in the AI Model section", async () => {
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("AI Model");
+
+  const providerSelect = await screen.findByLabelText(/provider/i);
+  expect(providerSelect).toHaveValue("ollama");
+  expect(screen.queryByLabelText(/base url/i)).not.toBeInTheDocument();
+});
+
+it("shows custom provider fields when Custom is selected, and hides the Ollama model dropdown", async () => {
+  vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, ai_provider: "custom" });
+
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("AI Model");
+
+  const providerSelect = await screen.findByLabelText(/provider/i);
+  fireEvent.change(providerSelect, { target: { value: "custom" } });
+
+  expect(await screen.findByLabelText(/base url/i)).toBeInTheDocument();
+  expect(screen.getByLabelText(/^api key$/i)).toBeInTheDocument();
+  expect(screen.getByLabelText(/model name/i)).toBeInTheDocument();
+  expect(screen.queryByLabelText(/chat model/i)).not.toBeInTheDocument();
+});
+
+it("saves the provider selection immediately", async () => {
+  vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, ai_provider: "custom" });
+
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("AI Model");
+
+  const providerSelect = await screen.findByLabelText(/provider/i);
+  fireEvent.change(providerSelect, { target: { value: "custom" } });
+
+  await waitFor(() => {
+    expect(updateSettings).toHaveBeenCalledWith({ ai_provider: "custom" });
+  });
+});
+
+it("saves the custom provider connection fields together", async () => {
+  vi.mocked(getSettings).mockResolvedValue({ ...baseSettings, ai_provider: "custom" });
+  vi.mocked(updateSettings).mockResolvedValue({
+    ...baseSettings,
+    ai_provider: "custom",
+    custom_api_base_url: "https://api.openai.com/v1",
+    custom_api_key: "sk-test",
+    custom_model_name: "gpt-4o-mini",
+  });
+
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("AI Model");
+
+  const baseUrlInput = await screen.findByLabelText(/base url/i);
+  fireEvent.change(baseUrlInput, { target: { value: "https://api.openai.com/v1" } });
+  fireEvent.change(screen.getByLabelText(/^api key$/i), { target: { value: "sk-test" } });
+  fireEvent.change(screen.getByLabelText(/model name/i), { target: { value: "gpt-4o-mini" } });
+  fireEvent.click(screen.getByRole("button", { name: /save connection/i }));
+
+  await waitFor(() => {
+    expect(updateSettings).toHaveBeenCalledWith({
+      custom_api_base_url: "https://api.openai.com/v1",
+      custom_api_key: "sk-test",
+      custom_model_name: "gpt-4o-mini",
+    });
+  });
 });
