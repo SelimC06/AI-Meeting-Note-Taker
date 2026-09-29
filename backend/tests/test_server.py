@@ -4045,3 +4045,93 @@ def test_transcript_endpoint_falls_back_to_plain_transcript_txt(client, monkeypa
 
     segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
     assert [(s["speaker"], s["text"]) for s in segments] == [(None, "first run"), (None, "second run")]
+
+
+def _process_with_transcript(client, monkeypatch, tmp_path, transcript_text, fake_llava_complete):
+    def fake_save_upload(dst_dir, uf, name):
+        out = dst_dir / name
+        out.write_bytes(b"fake video bytes")
+        return out
+
+    def fake_mux(video, audio, out_path):
+        out_path.write_bytes(b"fake final video")
+        return out_path
+
+    transcript_path = tmp_path / "transcript_.txt"
+    transcript_path.write_text(transcript_text, encoding="utf-8")
+
+    monkeypatch.setattr(server_module, "save_upload", fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
+    monkeypatch.setattr(
+        server_module, "stop_recording_and_transcribe", lambda **kwargs: (str(transcript_path), [])
+    )
+    monkeypatch.setattr(server_module, "llava_complete", fake_llava_complete)
+
+    resp = client.post(
+        "/process",
+        files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")},
+    )
+    assert resp.status_code == 202
+    return wait_for_job(client, resp.json()["job_id"])
+
+
+def test_process_does_not_cap_the_transcript_and_reports_chunk_progress(client, monkeypatch, tmp_path):
+    """Regression test: the summary call used to pass max_chars=12000, which
+    cut every meeting to its first ~13 minutes. Long transcripts are now
+    chunked inside llava_complete, which reports per-chunk progress onto the
+    job so a long meeting doesn't look stuck on "summarizing"."""
+    captured = {}
+    seen_progress = []
+
+    def fake_llava_complete(**kwargs):
+        captured.update(kwargs)
+        for done in (1, 2, 3):
+            kwargs["on_progress"](done, 3)
+            seen_progress.append(server_module.jobs.get_job(job_ids[0])["progress"])
+        return "# Notes\n- summarized"
+
+    job_ids = []
+    real_create_job = server_module.jobs.create_job
+
+    def recording_create_job(*args, **kwargs):
+        job_id = real_create_job(*args, **kwargs)
+        job_ids.append(job_id)
+        return job_id
+
+    monkeypatch.setattr(server_module.jobs, "create_job", recording_create_job)
+
+    job = _process_with_transcript(client, monkeypatch, tmp_path, "hello", fake_llava_complete)
+
+    assert job["status"] == "done"
+    assert captured.get("max_chars") is None
+    assert seen_progress == [
+        {"done": 1, "total": 3}, {"done": 2, "total": 3}, {"done": 3, "total": 3}
+    ]
+    assert job["progress"] is None  # cleared once summarizing is over
+
+
+def test_raw_transcript_fallback_marks_a_truncated_transcript_visibly(client, monkeypatch, tmp_path):
+    """The failed-summary fallback stores the raw transcript as the notes,
+    capped at 12000 chars -- that cap used to cut silently, so the notes
+    (and per-meeting chat, which only sees notes) looked like the whole
+    meeting."""
+    def failing_llava_complete(**kwargs):
+        raise RuntimeError("llava down")
+
+    long_transcript = "\n".join(f"Alice: line {i:05d} " + "x" * 80 for i in range(600))
+    job = _process_with_transcript(client, monkeypatch, tmp_path, long_transcript, failing_llava_complete)
+
+    assert job["status"] == "done"
+    assert "line 00000" in job["notes"]
+    assert "line 00599" not in job["notes"]
+    assert "Transcript truncated" in job["notes"]
+
+
+def test_raw_transcript_fallback_does_not_mark_a_short_transcript(client, monkeypatch, tmp_path):
+    def failing_llava_complete(**kwargs):
+        raise RuntimeError("llava down")
+
+    job = _process_with_transcript(client, monkeypatch, tmp_path, "Alice: short", failing_llava_complete)
+
+    assert "Alice: short" in job["notes"]
+    assert "Transcript truncated" not in job["notes"]

@@ -32,6 +32,9 @@ def create_job(session_id: str, inputs: dict) -> str:
             "session_id": session_id,
             "status": "queued",
             "stage": None,
+            # {"done": int, "total": int} while a stage has countable
+            # sub-steps (summarizing a long transcript in chunks), else None.
+            "progress": None,
             "error": None,
             "notes": None,
             "video_path": None,

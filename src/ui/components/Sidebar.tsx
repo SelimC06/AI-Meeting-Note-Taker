@@ -322,7 +322,10 @@ const Sidebar: React.FC<Props> = ({
                 {activeJobs.map((j) => (
                   <li key={`job-${j.id}`} className="px-2 py-2 text-xs text-dim flex items-center gap-1.5">
                     <span className="h-1.5 w-1.5 rounded-full bg-signal cursor-blink shrink-0" aria-hidden="true" />
-                    <span className="truncate">processing{j.stage ? ` — ${j.stage}` : "…"}</span>
+                    <span className="truncate">
+                      processing{j.stage ? ` — ${j.stage}` : "…"}
+                      {j.progress ? ` ${j.progress.done}/${j.progress.total}` : ""}
+                    </span>
                   </li>
                 ))}
               </ul>

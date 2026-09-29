@@ -99,37 +99,6 @@ def test_complete_propagates_error_when_ollama_unreachable(tmp_path, monkeypatch
         llava_module.complete(raw_txt_path=str(transcript_path), frame_paths=[])
 
 
-def test_complete_truncates_transcript_to_max_chars(tmp_path, monkeypatch):
-    """
-    Regression test for brief 13 #2: `max_chars` was accepted but never
-    applied -- a long transcript always went in whole, could blow past
-    num_ctx, and Ollama silently truncated the WHOLE prompt (including the
-    instructions/template that come after it). Now truncated up front.
-    """
-    monkeypatch.setattr(llava_module._health_client, "list", lambda: {"models": []})
-
-    captured = {}
-
-    def fake_chat(model, messages, options, stream):
-        captured["messages"] = messages
-        return {"message": {"content": "ok"}}
-
-    monkeypatch.setattr(llava_module._client, "chat", fake_chat)
-
-    long_transcript = "word " * 5000  # 30000 chars, far past max_chars=100
-    transcript_path = tmp_path / "transcript.txt"
-    transcript_path.write_text(long_transcript, encoding="utf-8")
-
-    llava_module.complete(raw_txt_path=str(transcript_path), frame_paths=[], max_chars=100)
-
-    user_content = captured["messages"][1]["content"]
-    assert long_transcript not in user_content
-    assert long_transcript[:100] in user_content
-    assert "[transcript truncated]" in user_content
-    # The instructions/template after the transcript must still be intact.
-    assert "## Key Points" in user_content
-
-
 def test_complete_does_not_truncate_a_transcript_under_max_chars(tmp_path, monkeypatch):
     monkeypatch.setattr(llava_module._health_client, "list", lambda: {"models": []})
 
@@ -431,27 +400,6 @@ def test_extract_action_items_skips_entries_with_no_usable_text(tmp_path, monkey
     ]
 
 
-def test_extract_action_items_truncates_transcript_to_max_chars(tmp_path, monkeypatch):
-    monkeypatch.setattr(llava_module._health_client, "list", lambda: {"models": []})
-
-    captured = {}
-
-    def fake_chat(model, messages, options, stream, format):
-        captured["user_content"] = messages[1]["content"]
-        return {"message": {"content": '{"action_items": []}'}}
-
-    monkeypatch.setattr(llava_module._client, "chat", fake_chat)
-
-    long_transcript = "word " * 5000
-    transcript_path = tmp_path / "transcript.txt"
-    transcript_path.write_text(long_transcript, encoding="utf-8")
-
-    llava_module.extract_action_items(raw_txt_path=str(transcript_path), max_chars=100)
-
-    assert long_transcript not in captured["user_content"]
-    assert "[transcript truncated]" in captured["user_content"]
-
-
 def test_extract_action_items_does_not_retry_on_transport_failure(tmp_path, monkeypatch):
     """A network-level failure (Ollama down/timeout) is a different failure
     mode than malformed JSON -- it must propagate immediately (so the
@@ -493,3 +441,277 @@ def test_complete_propagates_read_timeout_from_generation_call(tmp_path, monkeyp
 
     with pytest.raises(httpx.ReadTimeout):
         llava_module.complete(raw_txt_path=str(transcript_path), frame_paths=[])
+
+
+# --- Long-transcript chunking (map-reduce) --------------------------------
+#
+# Regression tests for the transcript being cut at a fixed 12000 chars
+# (~13 minutes of speech) before summarizing, with only a
+# "[transcript truncated]" marker inside the prompt -- the notes and action
+# items for a 1-hour meeting silently ignored ~75% of it.
+
+
+class _FakeLLM:
+    """Records every call and answers by prompt type, so a test can check
+    which transcript lines reached the model and in how many calls."""
+
+    def __init__(self, action_items_for=None):
+        self.calls = []
+        self.action_items_for = action_items_for or (lambda chunk: [])
+
+    def list(self):
+        return {"models": []}
+
+    def chat(self, model, messages, options, stream, format=None):
+        system = messages[0]["content"]
+        user = messages[1]["content"]
+        self.calls.append({"system": system, "user": user, "options": options, "format": format})
+        if format == "json":
+            import json
+            return {"message": {"content": json.dumps({"action_items": self.action_items_for(user)})}}
+        if "ONE PART" in system:
+            return {"message": {"content": f"- partial notes #{len(self.calls)}"}}
+        if "partial notes taken from consecutive parts" in system:
+            return {"message": {"content": f"- merged notes #{len(self.calls)}"}}
+        return {"message": {"content": "# Weekly Sync\n- final summary"}}
+
+
+def _transcript(n_lines, width=100):
+    # "Speaker: text" lines with a timestamp, like the speaker-labelled
+    # transcript paths write -- each line is unique so a test can tell
+    # exactly which lines were sent.
+    lines = []
+    for i in range(n_lines):
+        prefix = f"[{i // 60:02d}:{i % 60:02d}] {'Alice' if i % 2 else 'Bob'}: line {i:05d} "
+        lines.append(prefix + "x" * max(0, width - len(prefix)))
+    return "\n".join(lines)
+
+
+def _sent_transcript_lines(calls, system_marker):
+    sent = []
+    for call in calls:
+        if system_marker in call["system"]:
+            body = call["user"].split('"""')[1]
+            sent.extend(body.split("\n"))
+    return sent
+
+
+def test_short_transcript_is_summarized_in_a_single_call_as_before(tmp_path):
+    fake = _FakeLLM()
+    progress = []
+    txt = tmp_path / "t.txt"
+    transcript = _transcript(50)  # ~5k chars
+    txt.write_text(transcript, encoding="utf-8")
+
+    md = llava_module.complete(raw_txt_path=str(txt), client=fake, on_progress=lambda d, t: progress.append((d, t)))
+
+    assert md == "# Weekly Sync\n- final summary"
+    assert len(fake.calls) == 1
+    user = fake.calls[0]["user"]
+    assert transcript in user
+    assert user.startswith("Summarize the transcript into the template below.")
+    assert "## Key Points" in user
+    assert "truncated" not in user
+    assert progress == []  # single call: nothing to count
+
+
+def test_long_transcript_is_chunked_on_line_boundaries_and_every_line_is_summarized(tmp_path):
+    fake = _FakeLLM()
+    progress = []
+    txt = tmp_path / "t.txt"
+    transcript = _transcript(600)  # ~60k chars, ~1 hour of speech
+    txt.write_text(transcript, encoding="utf-8")
+
+    md = llava_module.complete(raw_txt_path=str(txt), client=fake, on_progress=lambda d, t: progress.append((d, t)))
+
+    map_calls = [c for c in fake.calls if "ONE PART" in c["system"]]
+    assert len(map_calls) >= 3
+    # Every line reaches the model exactly once, whole, in order.
+    assert _sent_transcript_lines(fake.calls, "ONE PART") == transcript.split("\n")
+    # Each call's prompt fits the configured context (conservative 3 chars/token).
+    for call in fake.calls:
+        assert (len(call["system"]) + len(call["user"])) / 3 + call["options"]["num_predict"] <= call["options"]["num_ctx"]
+
+    final = fake.calls[-1]
+    assert "## Key Points" in final["user"]
+    for i in range(len(map_calls)):
+        assert f"Part {i + 1} of {len(map_calls)}" in final["user"]
+    assert md == "# Weekly Sync\n- final summary"
+    assert "covers only" not in md
+
+    total = len(map_calls) + 1
+    assert progress == [(i, total) for i in range(1, total + 1)]
+
+
+def test_chunk_size_is_derived_from_num_ctx(tmp_path):
+    txt = tmp_path / "t.txt"
+    txt.write_text(_transcript(600), encoding="utf-8")
+
+    small, big = _FakeLLM(), _FakeLLM()
+    llava_module.complete(raw_txt_path=str(txt), client=small, num_ctx=8192)
+    llava_module.complete(raw_txt_path=str(txt), client=big, num_ctx=32768)
+
+    n_small = sum("ONE PART" in c["system"] for c in small.calls)
+    n_big = sum("ONE PART" in c["system"] for c in big.calls)
+    assert n_small >= 3
+    # A 4x context fits this whole ~1-hour transcript in one call.
+    assert n_big == 0 and len(big.calls) == 1
+
+
+def test_very_long_transcript_reduces_partials_hierarchically(tmp_path, monkeypatch):
+    # Partial notes big enough that they can't all fit the final call
+    # together, forcing at least one intermediate merge round.
+    class _VerboseFake(_FakeLLM):
+        def chat(self, model, messages, options, stream, format=None):
+            resp = super().chat(model, messages, options, stream, format)
+            if "ONE PART" in messages[0]["content"]:
+                resp = {"message": {"content": "- partial " + "y" * 6000}}
+            return resp
+
+    fake = _VerboseFake()
+    txt = tmp_path / "t.txt"
+    transcript = _transcript(3000)  # ~300k chars, ~5 hours
+    txt.write_text(transcript, encoding="utf-8")
+
+    md = llava_module.complete(raw_txt_path=str(txt), client=fake)
+
+    assert _sent_transcript_lines(fake.calls, "ONE PART") == transcript.split("\n")
+    assert any("partial notes taken from consecutive parts" in c["system"] for c in fake.calls)
+    for call in fake.calls:
+        assert (len(call["system"]) + len(call["user"])) / 3 + call["options"]["num_predict"] <= call["options"]["num_ctx"]
+    assert md.startswith("# Weekly Sync")
+    assert "covers only" not in md
+
+
+def test_transcript_past_the_chunk_cap_says_so_visibly_in_the_notes(tmp_path, monkeypatch):
+    monkeypatch.setattr(llava_module, "_MAX_CHUNKS", 2)
+    fake = _FakeLLM()
+    txt = tmp_path / "t.txt"
+    out = tmp_path / "notes.md"
+    txt.write_text(_transcript(600), encoding="utf-8")
+
+    md = llava_module.complete(raw_txt_path=str(txt), out_path=str(out), client=fake, duration_seconds=3600)
+
+    assert sum("ONE PART" in c["system"] for c in fake.calls) == 2
+    # Title stays first (server.extract_title reads it), notice right under it.
+    lines = md.split("\n")
+    assert lines[0] == "# Weekly Sync"
+    assert "covers only the first ~" in md and "minutes" in md
+    assert out.read_text(encoding="utf-8") == md
+
+
+def test_coverage_notice_without_duration_uses_percentage(tmp_path, monkeypatch):
+    monkeypatch.setattr(llava_module, "_MAX_CHUNKS", 2)
+    txt = tmp_path / "t.txt"
+    txt.write_text(_transcript(600), encoding="utf-8")
+
+    md = llava_module.complete(raw_txt_path=str(txt), client=_FakeLLM())
+
+    assert "% of the transcript" in md
+
+
+def test_single_giant_line_is_split_at_sentence_boundaries(tmp_path):
+    # The legacy transcription path joins every Whisper segment into ONE line.
+    sentences = [f"Sentence number {i} is about topic {i}." for i in range(3000)]
+    transcript = " ".join(sentences)
+    fake = _FakeLLM()
+    txt = tmp_path / "t.txt"
+    txt.write_text(transcript, encoding="utf-8")
+
+    llava_module.complete(raw_txt_path=str(txt), client=fake)
+
+    sent = _sent_transcript_lines(fake.calls, "ONE PART")
+    assert len(sent) > 1
+    assert " ".join(sent) == transcript
+    for piece in sent:
+        assert piece.endswith(".")  # never cut mid-sentence
+
+
+def test_split_transcript_never_cuts_a_line():
+    transcript = _transcript(200)
+    chunks = llava_module._split_transcript(transcript, 1000)
+    assert all(len(c) <= 1000 for c in chunks)
+    assert "\n".join(chunks) == transcript
+
+
+def test_progress_callback_errors_do_not_fail_the_summary(tmp_path):
+    txt = tmp_path / "t.txt"
+    txt.write_text(_transcript(600), encoding="utf-8")
+
+    def boom(done, total):
+        raise RuntimeError("ui went away")
+
+    md = llava_module.complete(raw_txt_path=str(txt), client=_FakeLLM(), on_progress=boom)
+    assert md.startswith("# Weekly Sync")
+
+
+def test_extract_action_items_short_transcript_is_a_single_call(tmp_path):
+    fake = _FakeLLM(action_items_for=lambda user: [{"text": "Ship it", "owner": "Bob", "due": None}])
+    txt = tmp_path / "t.txt"
+    transcript = _transcript(50)
+    txt.write_text(transcript, encoding="utf-8")
+
+    result = llava_module.extract_action_items(raw_txt_path=str(txt), client=fake)
+
+    assert result == [{"text": "Ship it", "owner": "Bob", "due": None}]
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["user"].startswith("Extract action items from this transcript as JSON.")
+    assert transcript in fake.calls[0]["user"]
+
+
+def test_extract_action_items_long_transcript_covers_every_chunk_and_dedupes(tmp_path):
+    def items_for(user):
+        # One item unique to each chunk (keyed by its first line number),
+        # plus a recap item every chunk repeats with varying case/punctuation
+        # -- only the last mention carries the due date.
+        first_line = user.split('"""')[1].split("\n")[0]
+        n = first_line.split("line ")[1].split(" ")[0]
+        return [
+            {"text": f"Follow up on line {n}", "owner": None, "due": None},
+            {"text": "Send the recap email!" if n != "00000" else "send the recap email", "owner": "Alice",
+             "due": "Friday" if n != "00000" else None},
+        ]
+
+    fake = _FakeLLM(action_items_for=items_for)
+    progress = []
+    txt = tmp_path / "t.txt"
+    transcript = _transcript(600)
+    txt.write_text(transcript, encoding="utf-8")
+
+    result = llava_module.extract_action_items(
+        raw_txt_path=str(txt), client=fake, on_progress=lambda d, t: progress.append((d, t))
+    )
+
+    n_chunks = len(fake.calls)
+    assert n_chunks >= 3
+    assert _sent_transcript_lines(fake.calls, "extracting action items") == transcript.split("\n")
+    follow_ups = [i for i in result if i["text"].startswith("Follow up")]
+    assert len(follow_ups) == n_chunks
+    recaps = [i for i in result if "recap" in i["text"].lower()]
+    assert recaps == [{"text": "send the recap email", "owner": "Alice", "due": "Friday"}]
+    assert result[0]["text"] == "Follow up on line 00000"  # meeting order kept
+    assert progress == [(i, n_chunks) for i in range(1, n_chunks + 1)]
+
+
+def test_extract_action_items_returns_none_if_any_chunk_fails_twice(tmp_path):
+    class _OneBadChunk(_FakeLLM):
+        def chat(self, model, messages, options, stream, format=None):
+            if "part 2 of" in messages[1]["content"]:
+                self.calls.append({"system": messages[0]["content"], "user": messages[1]["content"]})
+                return {"message": {"content": "not json"}}
+            return super().chat(model, messages, options, stream, format)
+
+    txt = tmp_path / "t.txt"
+    txt.write_text(_transcript(600), encoding="utf-8")
+
+    assert llava_module.extract_action_items(raw_txt_path=str(txt), client=_OneBadChunk()) is None
+
+
+def test_extract_action_items_falls_back_to_none_past_the_chunk_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(llava_module, "_MAX_CHUNKS", 2)
+    fake = _FakeLLM()
+    txt = tmp_path / "t.txt"
+    txt.write_text(_transcript(600), encoding="utf-8")
+
+    assert llava_module.extract_action_items(raw_txt_path=str(txt), client=fake) is None
+    assert fake.calls == []

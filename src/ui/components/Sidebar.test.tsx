@@ -219,6 +219,28 @@ it("shows a processing row for an active job and reloads sessions once it finish
   expect(screen.queryByText(/processing/)).not.toBeInTheDocument();
 });
 
+it("shows chunk progress while a long meeting is summarizing", async () => {
+  vi.mocked(listJobs).mockResolvedValue([
+    {
+      id: "job-1",
+      session_id: "s1",
+      status: "running",
+      stage: "summarizing",
+      progress: { done: 2, total: 4 },
+      error: null,
+      notes: null,
+      video_path: null,
+      created_at: "2026-08-06T00:00:00Z",
+    },
+  ]);
+  renderSidebar();
+
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(screen.getByText("processing — summarizing 2/4")).toBeInTheDocument();
+});
+
 it("fetches trashed sessions separately when view is trash", async () => {
   vi.mocked(getSessions).mockResolvedValue([
     sessionA,

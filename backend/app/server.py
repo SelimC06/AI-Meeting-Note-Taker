@@ -1027,6 +1027,30 @@ def _record_failed_session(session: Path, error: str) -> None:
         log(f"failed to record failed session {session.name}: {append_err}")
 
 
+# The raw-transcript fallback notes are capped so a failed summary of a
+# long meeting doesn't store (and later feed per-meeting chat) a huge blob.
+_RAW_TRANSCRIPT_NOTES_MAX_CHARS = 12000
+
+
+def _raw_transcript_notes_body(transcript: str) -> str:
+    """Body for the notes shown when AI summarization didn't run. The cap
+    used to cut silently, so notes (and chat, which only sees notes) looked
+    like the whole meeting when they were only its first ~13 minutes."""
+    if not transcript:
+        return "(empty)"
+    if len(transcript) <= _RAW_TRANSCRIPT_NOTES_MAX_CHARS:
+        return transcript
+    cut = transcript.rfind("\n", 0, _RAW_TRANSCRIPT_NOTES_MAX_CHARS)
+    if cut <= 0:
+        cut = _RAW_TRANSCRIPT_NOTES_MAX_CHARS
+    percent = int(cut * 100 / len(transcript))
+    return (
+        transcript[:cut]
+        + f"\n\n_[Transcript truncated: only the first ~{percent}% is shown here. "
+        "The full transcript is in the Transcript view and the export.]_"
+    )
+
+
 def _run_process_job(job_id: str) -> None:
     inputs = jobs.get_job_inputs(job_id)
     if inputs is None:
@@ -1222,6 +1246,21 @@ def _run_process_job(job_id: str) -> None:
 
         jobs.update_job(job_id, stage="summarizing")
         if txt_path is not None:
+            # Long transcripts are summarized in several model calls (see
+            # LLaVA_summarize's chunking); report each one so a 2-hour
+            # meeting doesn't sit on a bare "summarizing" for many minutes
+            # looking stuck.
+            def report_progress(done: int, total: int) -> None:
+                jobs.update_job(job_id, progress={"done": done, "total": total})
+
+            # Only used to word a "summary covers the first N minutes"
+            # notice if a transcript is ever too long to summarize in full.
+            segments_for_duration = load_transcript_segments(session)
+            try:
+                meeting_seconds = max(float(seg.get("end") or 0) for seg in segments_for_duration) or None
+            except (ValueError, TypeError, AttributeError):
+                meeting_seconds = None
+
             try:
                 if llava_complete is None:
                     raise RuntimeError("llava_complete import is None (summarizer missing)")
@@ -1237,13 +1276,18 @@ def _run_process_job(job_id: str) -> None:
                     # though the chat model sitting right there could do the job.
                     model=ollama_chat_model,
                     out_path=str(session / "notes.md"),
-                    max_chars=12000,
+                    # No max_chars: the transcript is chunked to fit num_ctx
+                    # rather than cut at a fixed length (which used to drop
+                    # everything after the first ~13 minutes).
                     stream=False,
                     num_ctx=8192,
                     num_predict=800,
                     temperature=0.3,
                     client=active_client,
+                    on_progress=report_progress,
+                    duration_seconds=meeting_seconds,
                 )
+                jobs.update_job(job_id, progress=None)
 
                 # Structured action items are a best-effort add-on to the
                 # prose summary above, not a requirement for the job to
@@ -1262,11 +1306,14 @@ def _run_process_job(job_id: str) -> None:
                             raw_txt_path=txt_path,
                             model=ollama_chat_model,
                             client=active_client,
+                            on_progress=report_progress,
                         )
                     except Exception as e:
                         log(f"action items extraction failed, falling back to prose notes: {e}")
                         structured_action_items = None
+                    jobs.update_job(job_id, progress=None)
             except Exception as e:
+                jobs.update_job(job_id, progress=None)
                 log(f"summarization failed, falling back to raw transcript: {e}")
                 try:
                     transcript = Path(txt_path).read_text(encoding="utf-8")
@@ -1303,7 +1350,7 @@ def _run_process_job(job_id: str) -> None:
                         "# Title: Zoom Meeting\n\n"
                         + explanation
                         + "# Transcript (auto)\n"
-                        + (transcript[:12000] or "(empty)")
+                        + _raw_transcript_notes_body(transcript)
                     )
                 except Exception as read_err:
                     log(f"failed to read existing transcript {txt_path}: {read_err}")
@@ -1325,7 +1372,7 @@ def _run_process_job(job_id: str) -> None:
                 notes = (
                     "# Title: Zoom Meeting\n\n"
                     "# Transcript (auto)\n"
-                    + (transcript[:12000] or "(empty)")
+                    + _raw_transcript_notes_body(transcript)
                 )
             except Exception as e:
                 log(f"fallback whisper failed: {e}")

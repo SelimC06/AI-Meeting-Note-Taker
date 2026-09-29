@@ -457,6 +457,9 @@ export type JobStatus = {
   session_id: string;
   status: "queued" | "running" | "done" | "failed";
   stage: "muxing" | "transcribing" | "summarizing" | "saving" | null;
+  // Set while a stage runs several model calls (a long transcript is
+  // summarized in chunks), so the UI can show it's still moving.
+  progress?: { done: number; total: number } | null;
   error: string | null;
   notes: string | null;
   video_path: string | null;

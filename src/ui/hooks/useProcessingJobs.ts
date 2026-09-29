@@ -4,6 +4,7 @@ import { getJobStatus, listJobs, type JobStatus } from "../api";
 export type ProcessingJob = {
   id: string;
   stage: JobStatus["stage"];
+  progress?: JobStatus["progress"];
   status: JobStatus["status"];
   error: string | null;
 };
@@ -18,7 +19,7 @@ const POLL_INTERVAL_MS = 1500;
 const LOST_TRACK_FAILURE_THRESHOLD = 5;
 
 function toProcessingJob(job: JobStatus): ProcessingJob {
-  return { id: job.id, stage: job.stage, status: job.status, error: job.error };
+  return { id: job.id, stage: job.stage, progress: job.progress, status: job.status, error: job.error };
 }
 
 export function useProcessingJobs() {
