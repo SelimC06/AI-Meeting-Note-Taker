@@ -20,6 +20,16 @@ const SIZE = 256;
 const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='#1A1A19'/><text x='16' y='22' font-family='monospace' font-size='20' fill='#EDE6D6' text-anchor='middle'>&gt;</text></svg>`;
 const html = `<!doctype html><html><body style="margin:0">${svg}</body></html>`;
 
+// macOS 26+ draws any app icon that isn't the standard rounded-square shape
+// shrunk onto a grey placeholder tile, so the full-bleed square above can't be
+// reused for the .icns. This follows Apple's icon grid instead: an 824px
+// rounded square centred on a transparent 1024px canvas, with the glyph at
+// the same proportions as the square version. The '>' is a path traced from
+// the shipped build/icon.png rather than <text>, since which font 'monospace'
+// resolves to depends on the machine (a different Chromium drew it rounded).
+const macSvg = `<svg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024' viewBox='0 0 1024 1024'><rect x='100' y='100' width='824' height='824' rx='185' fill='#1A1A19'/><g transform='translate(100 100) scale(25.75)'><polyline points='13.04,11.63 18.81,16.63 13.04,21.63' fill='none' stroke='#EDE6D6' stroke-width='1.56' stroke-linecap='butt' stroke-linejoin='miter'/></g></svg>`;
+const macHtml = `<!doctype html><html><body style="margin:0;background:transparent">${macSvg}</body></html>`;
+
 function encodeIco(pngBuffer, size) {
     const header = Buffer.alloc(6);
     header.writeUInt16LE(0, 0); // reserved
@@ -55,7 +65,9 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: SIZE, height: SIZE } });
 await page.setContent(html);
 const png = await renderPng(page, SIZE);
-const icnsSourcePng = await renderPng(page, ICNS_SOURCE_SIZE);
+await page.setViewportSize({ width: ICNS_SOURCE_SIZE, height: ICNS_SOURCE_SIZE });
+await page.setContent(macHtml);
+const icnsSourcePng = await page.screenshot({ omitBackground: true });
 await browser.close();
 
 const icns = png2icons.createICNS(icnsSourcePng, png2icons.BICUBIC2, 0);
