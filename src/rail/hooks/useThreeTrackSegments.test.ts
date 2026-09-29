@@ -104,6 +104,28 @@ it("exposes the mic MediaStream while recording and clears it on stop", async ()
   expect(result.current.micStream).toBeNull();
 });
 
+it("exposes the system-audio MediaStream while recording and clears it on stop", async () => {
+  const systemStream = new MediaStream();
+  vi.mocked(getSeparateCapture).mockResolvedValueOnce({
+    system: systemStream,
+    mic: new MediaStream(),
+    stopAll: vi.fn(),
+  });
+
+  const { result } = renderHook(() => useThreeTrackSegments());
+  expect(result.current.systemStream).toBeNull();
+
+  await act(async () => {
+    await result.current.record();
+  });
+  expect(result.current.systemStream).toBe(systemStream);
+
+  await act(async () => {
+    await result.current.stop();
+  });
+  expect(result.current.systemStream).toBeNull();
+});
+
 it("stop() calls stopAll and resets status to idle even if a recorder's stop() rejects", async () => {
   const stopAll = vi.fn();
   vi.mocked(getSeparateCapture).mockResolvedValueOnce({

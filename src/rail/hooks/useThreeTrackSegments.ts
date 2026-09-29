@@ -42,6 +42,9 @@ export function useThreeTrackSegments() {
   const [status, setStatus] = useState<"idle" | "starting" | "recording" | "paused">("idle");
   const [error, setError] = useState<ClassifiedError | null>(null);
   const [micStream, setMicStream] = useState<MediaStream | null>(null);
+  // Exposed alongside micStream so the rail's level meter can react to the
+  // other side of a call too, not just the user's own voice.
+  const [systemStream, setSystemStream] = useState<MediaStream | null>(null);
 
   // Set by stop() when it's called while record() is still awaiting
   // getSeparateCapture() (status === "starting", recRef/streamsRef not
@@ -88,6 +91,7 @@ export function useThreeTrackSegments() {
 
       streamsRef.current = streams;
       setMicStream(streams.mic ?? null);
+      setSystemStream(streams.system ?? null);
 
       const screenRec = streams.screen ? getVideoRecorder(streams.screen) : undefined;
       const systemRec = streams.system ? getAudioRecorder(streams.system) : undefined;
@@ -123,6 +127,7 @@ export function useThreeTrackSegments() {
       setError(classifyRecordError(e));
       setStatus("idle");
       setMicStream(null);
+      setSystemStream(null);
     }
 
   };
@@ -179,6 +184,7 @@ export function useThreeTrackSegments() {
       segsRef.current = { screen: [], systemAudio: [], micAudio: [] };
       setStatus("idle");
       setMicStream(null);
+      setSystemStream(null);
     }
 
     const combined: Combined = {
@@ -205,5 +211,5 @@ export function useThreeTrackSegments() {
     return p;
   };
 
-  return { status, record, pause, resume, stop, error, micStream };
+  return { status, record, pause, resume, stop, error, micStream, systemStream };
 }

@@ -20,7 +20,7 @@ const STAGE_LABELS: Record<string, string> = {
 };
 
 export default function RailApp() {
-    const { status, record, pause, resume, stop, error: recordError, micStream } = useThreeTrackSegments();
+    const { status, record, pause, resume, stop, error: recordError, micStream, systemStream } = useThreeTrackSegments();
     const { jobs, addJob, removeJob } = useProcessingJobs();
 
     const [resultFlash, setResultFlash] = useState<"success" | null>(null);
@@ -29,7 +29,7 @@ export default function RailApp() {
     const [toastDismissed, setToastDismissed] = useState(false);
 
     const elapsed = useElapsedTime(status);
-    const levels = useMicLevel(micStream);
+    const levels = useMicLevel(micStream, systemStream);
 
     useEffect(() => {
         if (resultFlash === null) return;

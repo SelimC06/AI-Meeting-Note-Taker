@@ -135,8 +135,7 @@ const TranscriptView: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   if (segments.length === 0) {
     return (
       <div className="flex-1 overflow-y-auto px-3 py-2 text-xs text-dim">
-        No structured transcript available for this recording. This is captured only when both
-        your microphone and system audio were recorded separately.
+        No speech was transcribed for this recording.
       </div>
     );
   }
@@ -144,6 +143,13 @@ const TranscriptView: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   return (
     <div className="flex-1 overflow-y-auto px-3 py-2 text-xs space-y-2">
       {segments.map((seg, i) => {
+        if (seg.speaker == null && seg.raw_speaker == null) {
+          return (
+            <div key={i} className="text-phosphor">
+              {seg.text}
+            </div>
+          );
+        }
         const rawLabel = seg.raw_speaker ?? seg.speaker ?? "Unknown";
         const displayName = nameOverrides[rawLabel] ?? seg.speaker ?? "Unknown";
         const isYou = rawLabel === "You";

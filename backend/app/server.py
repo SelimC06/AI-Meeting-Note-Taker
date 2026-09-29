@@ -1057,6 +1057,44 @@ def _run_process_job(job_id: str) -> None:
                 except Exception as e:
                     log(f"single-track pyannote diarization failed, skipping: {e}")
 
+        # Every recording with any audio gets a structured transcript, not
+        # just the dual-track case above: mic-only, system-only, or a
+        # dual-track transcription that failed and fell back to the mixed
+        # audio. The same pass also feeds the summary (txt_path), so this
+        # replaces -- rather than adds to -- the stop_recording_and_transcribe
+        # run below, which is left for recordings with no separate audio
+        # track at all.
+        if (
+            txt_path is None
+            and mixed_wav is not None
+            and transcribe_wav is not None
+            and not load_transcript_segments(session)
+        ):
+            # mixed_wav is whichever track(s) exist, so label by source:
+            # mic alone is the user, system alone is the other side, and a
+            # mix of both can't be attributed to either.
+            if system_wav is None:
+                single_speaker = "You"
+            elif mic_wav is None:
+                single_speaker = "Others"
+            else:
+                single_speaker = None
+            try:
+                single_segments = transcribe_wav(
+                    str(mixed_wav), model_name=whisper_model,
+                    initial_prompt=custom_vocabulary.strip() or None,
+                )
+                single_segments = [{**seg, "speaker": single_speaker} for seg in single_segments]
+                if single_segments:
+                    write_transcript_segments(session, single_segments)
+                single_txt = session / "transcript_.txt"
+                single_txt.write_text(
+                    "\n".join(seg["text"] for seg in single_segments), encoding="utf-8"
+                )
+                txt_path = str(single_txt)
+            except Exception as e:
+                log(f"single-track transcription failed, falling back to the final video: {e}")
+
         if txt_path is None and stop_recording_and_transcribe is not None:
             try:
                 # extract_frames_after=False: summarization is text-only --
@@ -1385,12 +1423,31 @@ def _is_valid_session_id(session_id: str) -> bool:
     return bool(session_id) and "/" not in session_id and "\\" not in session_id and _SESSION_ID_RE.match(session_id) is not None
 
 
+def _plain_transcript_segments(session_dir: Path) -> List[dict]:
+    """Fallback for sessions with no transcript.json -- recorded before every
+    recording got one, or with no separate audio track -- built from the
+    plain transcript_*.txt the summary was made from. One speaker-less,
+    untimed segment per non-empty line; the "---" lines are the separators
+    stop_recording_and_transcribe writes between appended runs."""
+    segments: List[dict] = []
+    for txt in sorted(session_dir.glob("transcript_*.txt")):
+        try:
+            text = txt.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if line and line != "---":
+                segments.append({"start": None, "end": None, "speaker": None, "text": line})
+    return segments
+
+
 @app.get("/sessions/{session_id}/transcript")
 def get_session_transcript(session_id: str):
     store = STORE
     _get_session_or_404(store, session_id)
     session_dir = store / session_id
-    segments = load_transcript_segments(session_dir)
+    segments = load_transcript_segments(session_dir) or _plain_transcript_segments(session_dir)
     # Resolve raw speaker labels ("You"/"Others", or a pyannote SPEAKER_N
     # label once Track B lands) against any user-set names -- done here, at
     # the API boundary, rather than mutating transcript.json, so the raw

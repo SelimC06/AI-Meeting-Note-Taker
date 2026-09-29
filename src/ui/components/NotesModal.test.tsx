@@ -112,15 +112,33 @@ it("renames a speaker label and applies the new name to every matching segment",
   expect(screen.queryByText("SPEAKER_00")).not.toBeInTheDocument();
 });
 
-it("shows a fallback message when no structured transcript is available", async () => {
+it("shows a no-speech message when the transcript is empty", async () => {
   vi.spyOn(api, "getSessionTranscript").mockResolvedValue([]);
 
   render(<NotesModal session={session} onClose={() => {}} />);
   fireEvent.click(screen.getByRole("button", { name: "Transcript" }));
 
   await waitFor(() => {
-    expect(screen.getByText(/No structured transcript/i)).toBeInTheDocument();
+    expect(screen.getByText(/No speech was transcribed/i)).toBeInTheDocument();
   });
+  // The old copy blamed missing mic/system tracks -- that's no longer a
+  // requirement for having a transcript.
+  expect(screen.queryByText(/system audio/i)).not.toBeInTheDocument();
+});
+
+it("renders speaker-less segments as plain text, with no rename control", async () => {
+  vi.spyOn(api, "getSessionTranscript").mockResolvedValue([
+    { start: null, end: null, speaker: null, raw_speaker: null, text: "hello from a mixed track" },
+  ]);
+
+  render(<NotesModal session={session} onClose={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: "Transcript" }));
+
+  await waitFor(() => {
+    expect(screen.getByText("hello from a mixed track")).toBeInTheDocument();
+  });
+  expect(screen.queryByText("Unknown")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^Rename/ })).not.toBeInTheDocument();
 });
 
 it("shows an error message when the transcript fetch fails", async () => {

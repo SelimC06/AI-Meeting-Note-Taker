@@ -337,8 +337,11 @@ export async function deleteSessionForever(id: string): Promise<void> {
 // the mic/system tracks was captured and diarization wasn't enabled, so
 // nothing could label it).
 export type TranscriptSegment = {
-  start: number;
-  end: number;
+  // null for a session with only a plain-text transcript (no timings).
+  start: number | null;
+  end: number | null;
+  // null when the audio can't be attributed to anyone (a mixed-down track,
+  // or a plain-text transcript) -- rendered as text with no speaker label.
   speaker: string | null;
   text: string;
   // The original, stable label (e.g. "SPEAKER_00") before any user rename

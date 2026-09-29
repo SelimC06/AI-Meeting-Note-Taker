@@ -32,32 +32,44 @@ let lastDockSlotClientRect = null;
 let railMoveSettleTimer = null;
 let railPopOutTimer = null;
 let mainMoveSettleTimer = null;
-let mainSnapAnimationTimer = null;
+// window -> { timer, target } for each in-flight snap slide (see
+// animateWindowPosition). Per-window rather than one shared timer, since the
+// dashboard and the floating rail can each be mid-snap independently.
+const snapAnimations = new Map();
 // { direction, startBounds, startCursor } while a dashboard resize-handle
 // drag is in progress; null otherwise. Module-level rather than per-call
 // because 'window:resizeMove' ticks (see below) need the drag's original
 // bounds/cursor position to compute a delta from, not just the latest tick.
 let dashboardResizeState = null;
 
+// Stops `window`'s in-flight snap slide, if any, and returns the x/y it was
+// heading to (null if nothing was running) -- lets a caller that needs to
+// set bounds itself land where the slide would have, instead of wherever
+// it happened to be mid-way.
+function cancelSnapAnimation(window) {
+    const anim = snapAnimations.get(window);
+    if (!anim) return null;
+    clearInterval(anim.timer);
+    snapAnimations.delete(window);
+    return anim.target;
+}
+
 // Aero Snap's own edge-dock slides the window into place rather than
 // teleporting it there; interpolating setBounds calls over a few frames
-// gets the dashboard's corner-snap the same feel. x/y-only (width/height
-// come along unchanged from `bounds`) since this only ever runs right after
-// computeCornerSnap, which never touches size.
+// gives both the dashboard's and the floating rail's corner-snap that same
+// feel. x/y-only (width/height come along unchanged from `bounds`) since
+// this only ever runs right after computeCornerSnap, which never touches size.
 function animateWindowPosition(window, fromBounds, toXY, durationMs = 140, steps = 8) {
-    if (mainSnapAnimationTimer) {
-        clearInterval(mainSnapAnimationTimer);
-        mainSnapAnimationTimer = null;
-    }
+    cancelSnapAnimation(window);
     const { x: fromX, y: fromY, width, height } = fromBounds;
     const deltaX = toXY.x - fromX;
     const deltaY = toXY.y - fromY;
     let step = 0;
-    mainSnapAnimationTimer = setInterval(() => {
+    const timer = setInterval(() => {
         step += 1;
         if (!window || window.isDestroyed()) {
-            clearInterval(mainSnapAnimationTimer);
-            mainSnapAnimationTimer = null;
+            clearInterval(timer);
+            snapAnimations.delete(window);
             return;
         }
         const t = Math.min(step / steps, 1);
@@ -69,10 +81,11 @@ function animateWindowPosition(window, fromBounds, toXY, durationMs = 140, steps
             height,
         });
         if (t >= 1) {
-            clearInterval(mainSnapAnimationTimer);
-            mainSnapAnimationTimer = null;
+            clearInterval(timer);
+            snapAnimations.delete(window);
         }
     }, durationMs / steps);
+    snapAnimations.set(window, { timer, target: { x: toXY.x, y: toXY.y } });
 }
 
 const MAIN_WINDOW_MIN_WIDTH = 640;
@@ -226,6 +239,7 @@ function popRailBackToDock() {
         clearTimeout(railMoveSettleTimer);
         railMoveSettleTimer = null;
     }
+    cancelSnapAnimation(railWindow);
     // Re-entrancy guard: without this, a double-click on the reattach
     // button (or a click racing a drag-release-near-slot) schedules two
     // independent hide+notify timers. If a new float begins between the two
@@ -284,7 +298,7 @@ function settleFloatingRailPosition() {
     const display = screen.getDisplayNearestPoint(center);
     const snapped = computeCornerSnap(display.workArea, bounds);
     if (snapped.x !== bounds.x || snapped.y !== bounds.y) {
-        railWindow.setBounds({ ...bounds, x: snapped.x, y: snapped.y });
+        animateWindowPosition(railWindow, bounds, snapped);
     }
     mainWindow?.webContents.send('rail:floatingChanged', true);
 }
@@ -365,7 +379,11 @@ function createRailWindow() {
             mainWindow?.webContents.send('rail:floatingChanged', false);
         }
     });
+    // Captured rather than read off railWindow in 'closed', which runs after
+    // the window is destroyed and railWindow may already be reassigned.
+    const thisRailWindow = railWindow;
     railWindow.on('closed', () => {
+        cancelSnapAnimation(thisRailWindow);
         if (railMoveSettleTimer) {
             clearTimeout(railMoveSettleTimer);
             railMoveSettleTimer = null;
@@ -388,7 +406,9 @@ function createRailWindow() {
     // cursor. Waiting for 120ms of no further movement means this only
     // runs once the drag has actually stopped.
     railWindow.on('moved', () => {
-        if (isRailFloatDragging) return;
+        // The snap slide's own setBounds ticks fire 'moved' too -- they're
+        // the result of a settle, not a new user drag to settle.
+        if (isRailFloatDragging || snapAnimations.has(railWindow)) return;
         if (railMoveSettleTimer) clearTimeout(railMoveSettleTimer);
         railMoveSettleTimer = setTimeout(() => {
             railMoveSettleTimer = null;
@@ -420,9 +440,17 @@ function createRailWindow() {
 ipcMain.handle('rail:setErrorVisible', (_event, visible) => {
     railErrorVisible = !!visible;
     if (!railWindow || railWindow.isDestroyed()) return;
+    // A snap slide still in flight would keep resetting the old height on
+    // every tick -- stop it and resize at the spot it was heading to.
+    const snapTarget = cancelSnapAnimation(railWindow);
     const current = railWindow.getBounds();
     // Resize in place (preserve x/y) rather than recentering.
-    railWindow.setBounds({ x: current.x, y: current.y, width: current.width, height: currentRailHeight() });
+    railWindow.setBounds({
+        x: snapTarget?.x ?? current.x,
+        y: snapTarget?.y ?? current.y,
+        width: current.width,
+        height: currentRailHeight(),
+    });
 });
 
 ipcMain.handle('rail:command', (_event, action) => {
@@ -483,6 +511,9 @@ ipcMain.handle('rail:beginFloatDrag', (_event, slotRect) => {
         clearTimeout(railPopOutTimer);
         railPopOutTimer = null;
     }
+    // Likewise a snap slide left over from the previous float would keep
+    // pulling the window away from the cursor.
+    cancelSnapAnimation(railWindow);
     lastDockSlotClientRect = slotRect;
     const cursor = screen.getCursorScreenPoint();
     railWindow.setBounds(computeCenteredBounds(cursor, RAIL_WIDTH, currentRailHeight()));
@@ -897,10 +928,7 @@ function createWindow() {
             clearTimeout(mainMoveSettleTimer);
             mainMoveSettleTimer = null;
         }
-        if (mainSnapAnimationTimer) {
-            clearInterval(mainSnapAnimationTimer);
-            mainSnapAnimationTimer = null;
-        }
+        cancelSnapAnimation(mainWindow);
         dashboardResizeState = null;
         pendingConsentResolve?.(true);
         pendingConsentResolve = null;

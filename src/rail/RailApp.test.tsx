@@ -31,6 +31,7 @@ function mockHook(overrides: Partial<ReturnType<typeof useThreeTrackSegments>> =
     stop: vi.fn().mockResolvedValue({}),
     error: null,
     micStream: null,
+    systemStream: null,
     ...overrides,
   });
 }

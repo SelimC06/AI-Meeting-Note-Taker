@@ -11,7 +11,9 @@ export default function TitleBar({ onOpenSettings }: Props) {
         </span>
       </div>
 
-      <div className="flex items-center gap-1 pr-1 [-webkit-app-region:no-drag]">
+      {/* No right padding: the Close button's red hover fill should run flush
+          to the window's right edge, like a native title bar. */}
+      <div className="flex items-center gap-1 [-webkit-app-region:no-drag]">
         <ToolButton label="Settings" onClick={onOpenSettings}>
           <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none">
             <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2" />
