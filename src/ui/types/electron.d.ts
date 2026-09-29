@@ -94,7 +94,9 @@ declare global {
       // "Stop && Save" dialog) once the upload handoff (or the
       // empty-recording no-op) has finished — see main.js's
       // stopAndSaveRailRecording / rail:stopAndSaveComplete.
-      notifyStopAndSaveComplete: () => void;
+      // Carries the rail's pending-upload state as of the ack itself --
+      // main.js's cached rail:pushStatus copy lags a re-render behind it.
+      notifyStopAndSaveComplete: (payload: { hasPendingUpload: boolean }) => void;
       onRailStatus: (callback: (status: RailStatus) => void) => () => void;
       // Pull side of the pull+push handshake: onRailStatus alone can miss
       // status pushed before a freshly mounted DockedRail's listener is

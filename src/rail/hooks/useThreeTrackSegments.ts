@@ -36,9 +36,14 @@ function classifyRecordError(err: unknown): ClassifiedError {
   return { kind: "generic", message: `Recording failed: ${message}` };
 }
 
-export function useThreeTrackSegments() {
-  const micOnDataRef = useRef<((b: Blob) => void) | null>(null);
+// The recorder's negotiated mimeType, else whatever the chunks themselves
+// report, else the historical default -- getRecorder() can legitimately
+// report "" when it let the browser choose and the browser hasn't said yet.
+function blobType(rec: StreamRecorder | undefined, chunks: Blob[], fallback: string): string {
+  return rec?.mimeType || chunks[0]?.type || fallback;
+}
 
+export function useThreeTrackSegments() {
   const [status, setStatus] = useState<"idle" | "starting" | "recording" | "paused">("idle");
   const [error, setError] = useState<ClassifiedError | null>(null);
   const [micStream, setMicStream] = useState<MediaStream | null>(null);
@@ -53,6 +58,16 @@ export function useThreeTrackSegments() {
   // starting an orphaned recording no button can reach.
   const abortRequestedRef = useRef(false);
 
+  // Set synchronously on entry to record() and cleared once it settles.
+  // `status` below is a closure value from the last render, so two record()
+  // calls landing before React re-renders (e.g. both clicks queued behind
+  // the first-run consent modal) would both see "idle" -- the second one
+  // used to overwrite streamsRef/recRef, orphaning the first set of
+  // MediaStreams (OS capture indicators stuck on) and leaving its recorders
+  // pushing chunks into every later recording's segsRef.
+  const recordInFlightRef = useRef(false);
+
+  const stopInFlightRef = useRef<Promise<Combined> | null>(null);
 
   const streamsRef = useRef<CaptureStreams | null>(null);
   const recRef = useRef<{
@@ -69,7 +84,18 @@ export function useThreeTrackSegments() {
 
   // ----- RECORD -----
   const record = async () => {
-    if (status !== "idle") return;
+    // recRef/streamsRef/stopInFlightRef catch "already recording" or "still
+    // flushing a stop" even when `status` hasn't caught up yet.
+    if (
+      status !== "idle" ||
+      recordInFlightRef.current ||
+      recRef.current ||
+      streamsRef.current ||
+      stopInFlightRef.current
+    ) {
+      return;
+    }
+    recordInFlightRef.current = true;
     setError(null);
     abortRequestedRef.current = false;
     setStatus("starting");
@@ -99,15 +125,11 @@ export function useThreeTrackSegments() {
 
       recRef.current = { screen: screenRec, system: systemRec, mic: micRec };
 
+      // One callback per recorder -- ondata() replaces rather than adds, so
+      // registering a second one just silently discards the first.
       screenRec?.ondata((b) => segsRef.current.screen.push(b));
       systemRec?.ondata((b) => segsRef.current.systemAudio.push(b));
       micRec?.ondata((b) => segsRef.current.micAudio.push(b));
-
-      const micOnData = (chunk: Blob) => {
-        segsRef.current.micAudio.push(chunk);
-      };
-      micOnDataRef.current = micOnData;
-      micRec?.ondata(micOnData);
 
       screenRec?.start();
       systemRec?.start();
@@ -128,8 +150,9 @@ export function useThreeTrackSegments() {
       setStatus("idle");
       setMicStream(null);
       setSystemStream(null);
+    } finally {
+      recordInFlightRef.current = false;
     }
-
   };
 
   // ----- PAUSE/RESUME -----
@@ -150,8 +173,6 @@ export function useThreeTrackSegments() {
   };
 
   // ----- STOP -----
-  const stopInFlightRef = useRef<Promise<Combined> | null>(null);
-
   const doStop = async (): Promise<Combined> => {
     const s = recRef.current;
     // Captured now, before the finally block below replaces segsRef.current
@@ -187,10 +208,12 @@ export function useThreeTrackSegments() {
       setSystemStream(null);
     }
 
+    // Typed from what each recorder actually produced (see blobType) --
+    // RailApp derives the upload's file extension from these.
     const combined: Combined = {
-      screen: segs.screen.length ? new Blob(segs.screen, { type: "video/webm" }) : undefined,
-      systemAudio: segs.systemAudio.length ? new Blob(segs.systemAudio, { type: "audio/webm" }) : undefined,
-      micAudio: segs.micAudio.length ? new Blob(segs.micAudio, { type: "audio/webm" }) : undefined,
+      screen: segs.screen.length ? new Blob(segs.screen, { type: blobType(s?.screen, segs.screen, "video/webm") }) : undefined,
+      systemAudio: segs.systemAudio.length ? new Blob(segs.systemAudio, { type: blobType(s?.system, segs.systemAudio, "audio/webm") }) : undefined,
+      micAudio: segs.micAudio.length ? new Blob(segs.micAudio, { type: blobType(s?.mic, segs.micAudio, "audio/webm") }) : undefined,
     };
 
     return combined;

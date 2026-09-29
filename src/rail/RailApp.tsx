@@ -5,6 +5,7 @@ import PauseResume from "./components/PauseResume";
 import LevelMeter from "./components/LevelMeter";
 import ErrorToast from "./components/ErrorToast";
 import { useThreeTrackSegments, type ClassifiedError } from './hooks/useThreeTrackSegments';
+import { extensionForMimeType } from './capture/recorder';
 import { useElapsedTime } from './hooks/useElapsedTime';
 import { useMicLevel } from './hooks/useMicLevel';
 import { useAnimationReplayKey } from './hooks/useAnimationReplayKey';
@@ -26,6 +27,18 @@ export default function RailApp() {
     const [resultFlash, setResultFlash] = useState<"success" | null>(null);
     const [isProcessing, setIsProcessing] = useState(false);
     const [processError, setProcessError] = useState<string | null>(null);
+    // Kept apart from processError on purpose: processError is transient
+    // (a failed job, a stop() that threw) and is cleared when a new
+    // recording starts, but an upload failure means a recording that exists
+    // nowhere except this renderer's memory -- its message has to stay up
+    // for as long as pendingUploadsRef still holds it, however many
+    // recordings come after.
+    const [uploadError, setUploadError] = useState<string | null>(null);
+    const [pendingUploadCount, setPendingUploadCount] = useState(0);
+    // True from the first click on Record until record() settles, including
+    // the wait on the first-run consent modal (status is still "idle"
+    // throughout that wait) -- drives the button's disabled state.
+    const [isStartPending, setIsStartPending] = useState(false);
     const [toastDismissed, setToastDismissed] = useState(false);
 
     const elapsed = useElapsedTime(status);
@@ -54,9 +67,25 @@ export default function RailApp() {
     const isRecording = status === "recording";
     const isPaused = status === "paused";
     const isStarting = status === "starting";
+    const uploadErrorMessage =
+        pendingUploadCount === 0
+            ? null
+            : pendingUploadCount === 1
+            ? uploadError
+            : `${pendingUploadCount} recordings failed to upload: ${uploadError}`;
+    // A pending upload outranks processError: the latter is informational,
+    // the former is the only thing standing between the user and losing a
+    // recording, and hiding it behind e.g. a later job failure would also
+    // hide its retry action.
     const displayError = useMemo<ClassifiedError | null>(
-        () => recordError ?? (processError ? { kind: "generic", message: processError } : null),
-        [recordError, processError]
+        () =>
+            recordError ??
+            (uploadErrorMessage
+                ? { kind: "generic", message: uploadErrorMessage }
+                : processError
+                ? { kind: "generic", message: processError }
+                : null),
+        [recordError, uploadErrorMessage, processError]
     );
 
     const hasActiveJobs = jobs.some((j) => j.status === "queued" || j.status === "running");
@@ -83,12 +112,35 @@ export default function RailApp() {
     // /process with it) mid-upload.
     const inFlightUploadRef = useRef<Promise<void> | null>(null);
 
-    // Holds the FormData (and its Blobs) from the most recent failed
-    // upload, so "retry upload" can re-POST the exact same recording
-    // instead of it being lost. Blobs are immutable and safely re-readable
-    // across multiple fetch calls, so the same FormData object can just be
-    // resent as-is. Cleared on a successful upload (initial or retried).
-    const pendingUploadRef = useRef<FormData | null>(null);
+    // Every recording whose upload has failed and not yet succeeded on a
+    // retry, oldest first, so "retry upload" can re-POST the exact same
+    // recordings instead of them being lost. Blobs are immutable and safely
+    // re-readable across multiple fetch calls, so each FormData can just be
+    // resent as-is. A queue rather than a single slot: with one slot, a
+    // second recording's upload -- succeeding (clearing the slot) or failing
+    // (overwriting it) -- silently discarded the first. An entry leaves only
+    // when its own upload succeeds. pendingUploadCount mirrors its length
+    // for rendering.
+    const pendingUploadsRef = useRef<FormData[]>([]);
+
+    // Acks main.js's close/quit handoff (see waitForStopAck there) with the
+    // pending-upload state as of RIGHT NOW, read from the ref -- never from
+    // pendingUploadCount/React state, and not left to the rail:pushStatus
+    // effect below either: both only catch up a re-render later, after main
+    // has already acted on this ack. A stop-for-close whose upload just
+    // failed would otherwise look to main like "nothing pending" and the
+    // close would destroy that recording without offering Retry/Discard.
+    const ackStopAndSave = () => {
+        window.windowControls?.notifyStopAndSaveComplete?.({
+            hasPendingUpload: pendingUploadsRef.current.length > 0,
+        });
+    };
+
+    // Synchronous companion to isStartPending: set before handleRecordClick's
+    // first await so a second click (or a toggleRecord command) in the same
+    // tick, or while the consent modal is up, sees it immediately instead of
+    // a stale status==="idle" and starting a second, concurrent recording.
+    const startingRef = useRef(false);
 
     // Runs `fn` while inFlightUploadRef reflects it for fn's ENTIRE
     // duration -- assigned synchronously, before fn() does anything async,
@@ -133,15 +185,21 @@ export default function RailApp() {
                 throw networkErr;
             }
 
-            pendingUploadRef.current = null;
-            setProcessError(null);
+            // Removes only this recording -- any other still-pending ones stay
+            // queued (and their error stays up) until they succeed too.
+            pendingUploadsRef.current = pendingUploadsRef.current.filter((f) => f !== formData);
+            setPendingUploadCount(pendingUploadsRef.current.length);
             addJob(result.job_id);
         } catch (err) {
             console.error("/process failed", err);
             // Keep the FormData around instead of discarding it -- the
-            // recording it holds is otherwise unrecoverable.
-            pendingUploadRef.current = formData;
-            setProcessError(err instanceof Error ? err.message : String(err));
+            // recording it holds is otherwise unrecoverable. A retry that
+            // fails again keeps its existing place in the queue.
+            if (!pendingUploadsRef.current.includes(formData)) {
+                pendingUploadsRef.current = [...pendingUploadsRef.current, formData];
+            }
+            setPendingUploadCount(pendingUploadsRef.current.length);
+            setUploadError(err instanceof Error ? err.message : String(err));
         } finally {
             setIsProcessing(false);
         }
@@ -165,24 +223,37 @@ export default function RailApp() {
                     return;
                 }
 
+                // Extensions follow each blob's real container (an audio
+                // track can be ogg -- see extensionForMimeType). The backend
+                // stores by field name and ffprobes the content, so the
+                // filename here is descriptive, not load-bearing.
                 const formData = new FormData();
                 if (blobs.screen) {
-                    formData.append("screen", blobs.screen, "screen.webm");
+                    formData.append("screen", blobs.screen, `screen.${extensionForMimeType(blobs.screen.type)}`);
                 }
                 if (blobs.systemAudio) {
-                    formData.append("system", blobs.systemAudio, "system.webm");
+                    formData.append("system", blobs.systemAudio, `system.${extensionForMimeType(blobs.systemAudio.type)}`);
                 }
                 if (blobs.micAudio) {
-                    formData.append("mic", blobs.micAudio, "mic.webm");
+                    formData.append("mic", blobs.micAudio, `mic.${extensionForMimeType(blobs.micAudio.type)}`);
                 }
 
                 await runUpload(formData);
             } finally {
-                window.windowControls?.notifyStopAndSaveComplete?.();
+                ackStopAndSave();
             }
         });
 
-    // Re-POSTs the FormData from the most recent failed upload. Fire-and-
+    // Re-POSTs every queued upload, oldest first, one at a time (each is
+    // a full recording -- no point competing for the same backend). Works
+    // on a snapshot: runUpload edits the queue as each one settles.
+    const retryPendingUploads = async () => {
+        for (const formData of [...pendingUploadsRef.current]) {
+            await runUpload(formData);
+        }
+    };
+
+    // Re-POSTs every failed upload still queued. Fire-and-
     // forget from the caller's perspective (ErrorToast's action.onClick is
     // synchronous) -- trackInFlight covers it via inFlightUploadRef the same
     // as any other upload. Acks on its own once settled, same as
@@ -190,38 +261,47 @@ export default function RailApp() {
     // mid-flight (handleStopForClose's inFlightUploadRef wait below) isn't
     // left waiting on an ack nothing would otherwise ever send.
     const handleRetryUpload = () => {
-        const formData = pendingUploadRef.current;
         // inFlightUploadRef, not isProcessing: same stale-state hole
         // handleRecordClick's guard closes -- trackInFlight sets the ref
         // synchronously, React state a render later.
-        if (!formData || inFlightUploadRef.current) return;
+        if (pendingUploadsRef.current.length === 0 || inFlightUploadRef.current) return;
         void trackInFlight(async () => {
             try {
-                await runUpload(formData);
+                await retryPendingUploads();
             } finally {
-                window.windowControls?.notifyStopAndSaveComplete?.();
+                ackStopAndSave();
             }
         });
     };
 
-    // True only while there's a distinct, currently-displayed upload error
-    // with a FormData still held for it -- not while a permission-denied
-    // recordError (a different failure entirely, nothing to re-upload) is
-    // what's actually showing.
-    const canRetryUpload = !recordError && processError !== null && pendingUploadRef.current !== null;
+    // True only while the upload error is what's actually showing -- not
+    // while a permission-denied recordError (a different failure entirely,
+    // nothing to re-upload) is.
+    const canRetryUpload = !recordError && pendingUploadCount > 0;
 
     const handleRecordClick = async () => {
         if (isProcessing) return;
 
         try {
             if (status === "idle") {
-                // Resolves immediately (true) every time after the first --
-                // only the very first call in the app's lifetime actually
-                // shows anything, in the dashboard window, and waits on it.
-                const canRecord = await window.consentAPI?.ensureRecordingConsent?.() ?? true;
-                if (!canRecord) return;
-                setProcessError(null);
-                await record();
+                // Checked and set before the first await -- see startingRef.
+                if (startingRef.current) return;
+                startingRef.current = true;
+                setIsStartPending(true);
+                try {
+                    // Resolves immediately (true) every time after the first --
+                    // only the very first call in the app's lifetime actually
+                    // shows anything, in the dashboard window, and waits on it.
+                    const canRecord = await window.consentAPI?.ensureRecordingConsent?.() ?? true;
+                    if (!canRecord) return;
+                    // Clears only transient errors -- a failed upload's
+                    // message (uploadError) stays until it's retried.
+                    setProcessError(null);
+                    await record();
+                } finally {
+                    startingRef.current = false;
+                    setIsStartPending(false);
+                }
             } else if (status === "recording" || status === "paused" || status === "starting") {
                 // A stop+upload span is already running (double-click landed in the
                 // recorder-flush window) -- layers below make stop() re-entrant, but
@@ -249,21 +329,20 @@ export default function RailApp() {
             try {
                 await inFlightUploadRef.current;
             } catch {
-                // runUpload already reports its own errors via setProcessError.
+                // runUpload already reports its own errors via setUploadError.
             }
             return;
         }
-        const formData = pendingUploadRef.current;
-        if (!formData) {
+        if (pendingUploadsRef.current.length === 0) {
             // Nothing pending -- either it never failed, or it already
             // resolved (succeeded/discarded) by the time this arrived.
-            window.windowControls?.notifyStopAndSaveComplete?.();
+            ackStopAndSave();
             return;
         }
         try {
-            await trackInFlight(() => runUpload(formData));
+            await trackInFlight(retryPendingUploads);
         } finally {
-            window.windowControls?.notifyStopAndSaveComplete?.();
+            ackStopAndSave();
         }
     };
 
@@ -287,7 +366,7 @@ export default function RailApp() {
             try {
                 await inFlightUploadRef.current;
             } catch {
-                // runUpload already reports its own errors via setProcessError.
+                // runUpload already reports its own errors via setUploadError.
             }
             return;
         }
@@ -295,7 +374,7 @@ export default function RailApp() {
             // Nothing recording and nothing uploading -- ack immediately
             // instead of hanging main's guarded close on an ack that was
             // never coming.
-            window.windowControls?.notifyStopAndSaveComplete?.();
+            ackStopAndSave();
             return;
         }
         try {
@@ -329,14 +408,9 @@ export default function RailApp() {
             level: levels,
             recordError: displayError?.message ?? null,
             isProcessing,
-            hasPendingUpload: pendingUploadRef.current !== null,
+            hasPendingUpload: pendingUploadCount > 0,
         });
-        // pendingUploadRef itself isn't reactive, but every place that
-        // mutates it (runUpload's success/failure branches) also calls
-        // setProcessError in the same synchronous block, so displayError
-        // changing is a reliable proxy for "re-read the ref" -- same
-        // pattern canRetryUpload above already relies on.
-    }, [status, elapsed, levels, displayError, isProcessing]);
+    }, [status, elapsed, levels, displayError, isProcessing, pendingUploadCount]);
 
     const commandHandlersRef = useRef({
         handleRecordClick,
@@ -399,7 +473,7 @@ export default function RailApp() {
                 }
             >
                 <div className="[-webkit-app-region:no-drag]">
-                    <Record onClick={handleRecordClick} isRecording={isRecording} isStarting={isStarting} disabled={isProcessing || isStarting}/>
+                    <Record onClick={handleRecordClick} isRecording={isRecording} isStarting={isStarting} disabled={isProcessing || isStarting || isStartPending}/>
                 </div>
 
                 <span

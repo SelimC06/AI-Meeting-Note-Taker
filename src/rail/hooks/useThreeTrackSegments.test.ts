@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useThreeTrackSegments } from "./useThreeTrackSegments";
 import { getSeparateCapture } from "../capture/capture";
-import { getVideoRecorder } from "../capture/recorder";
+import { getAudioRecorder, getVideoRecorder } from "../capture/recorder";
 
 // jsdom (this project's test environment) does not implement MediaStream.
 // Provide a minimal stub so tests can construct one; production code never
@@ -261,4 +261,107 @@ it("record() releases already-acquired streams if recorder setup fails afterward
 
   expect(stopAll).toHaveBeenCalled();
   expect(result.current.status).toBe("idle");
+});
+
+it("ignores a second record() call made before the first has re-rendered, so only one set of streams is acquired", async () => {
+  // Regression: record() only checked the render-time `status`, so two
+  // calls in the same tick both passed and the second orphaned the first
+  // set of MediaStreams and recorders.
+  vi.mocked(getSeparateCapture).mockResolvedValue({
+    screen: new MediaStream(),
+    stopAll: vi.fn(),
+  });
+
+  const { result } = renderHook(() => useThreeTrackSegments());
+  await act(async () => {
+    const record = result.current.record;
+    await Promise.all([record(), record()]);
+  });
+
+  expect(getSeparateCapture).toHaveBeenCalledTimes(1);
+  expect(getVideoRecorder).toHaveBeenCalledTimes(1);
+  expect(result.current.status).toBe("recording");
+});
+
+it("allows a new record() once the previous one has failed", async () => {
+  vi.mocked(getSeparateCapture)
+    .mockRejectedValueOnce(new Error("first failure"))
+    .mockResolvedValueOnce({ screen: new MediaStream(), stopAll: vi.fn() });
+
+  const { result } = renderHook(() => useThreeTrackSegments());
+  await act(async () => {
+    await result.current.record();
+  });
+  await act(async () => {
+    await result.current.record();
+  });
+
+  expect(getSeparateCapture).toHaveBeenCalledTimes(2);
+  expect(result.current.status).toBe("recording");
+});
+
+it("registers the mic recorder's ondata callback exactly once", async () => {
+  const micOndata = vi.fn();
+  vi.mocked(getSeparateCapture).mockResolvedValueOnce({
+    mic: new MediaStream(),
+    stopAll: vi.fn(),
+  });
+  vi.mocked(getAudioRecorder).mockReturnValueOnce({
+    ondata: micOndata,
+    start: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
+    stop: vi.fn(),
+  } as unknown as ReturnType<typeof getAudioRecorder>);
+
+  const { result } = renderHook(() => useThreeTrackSegments());
+  await act(async () => {
+    await result.current.record();
+  });
+
+  expect(micOndata).toHaveBeenCalledTimes(1);
+});
+
+it("types each Combined blob with its recorder's actual mimeType instead of hard-coded webm", async () => {
+  let micOnData!: (chunk: Blob) => void;
+  let screenOnData!: (chunk: Blob) => void;
+  vi.mocked(getSeparateCapture).mockResolvedValueOnce({
+    screen: new MediaStream(),
+    mic: new MediaStream(),
+    stopAll: vi.fn(),
+  });
+  vi.mocked(getVideoRecorder).mockReturnValueOnce({
+    ondata: (cb: (chunk: Blob) => void) => { screenOnData = cb; },
+    start: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
+    stop: vi.fn().mockResolvedValue(undefined),
+    // "" = the browser chose; falls back to the default below.
+    mimeType: "",
+  } as unknown as ReturnType<typeof getVideoRecorder>);
+  vi.mocked(getAudioRecorder).mockReturnValueOnce({
+    ondata: (cb: (chunk: Blob) => void) => { micOnData = cb; },
+    start: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
+    stop: vi.fn().mockResolvedValue(undefined),
+    mimeType: "audio/ogg;codecs=opus",
+  } as unknown as ReturnType<typeof getAudioRecorder>);
+
+  const { result } = renderHook(() => useThreeTrackSegments());
+  await act(async () => {
+    await result.current.record();
+  });
+  act(() => {
+    screenOnData(new Blob(["v"]));
+    micOnData(new Blob(["a"]));
+  });
+
+  let combined!: Awaited<ReturnType<typeof result.current.stop>>;
+  await act(async () => {
+    combined = await result.current.stop();
+  });
+
+  expect(combined.micAudio?.type).toBe("audio/ogg;codecs=opus");
+  expect(combined.screen?.type).toBe("video/webm");
 });

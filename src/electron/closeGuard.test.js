@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence, beforeQuitStep } from './closeGuard.js';
+import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence, beforeQuitStep, pendingUploadFromAck, runGuardedClose } from './closeGuard.js';
 
 test('shouldPromptBeforeClose is true for starting, recording, and paused', () => {
     assert.equal(shouldPromptBeforeClose('starting'), true);
@@ -113,4 +113,97 @@ test('beforeQuitStep walks guard -> waitForJobs -> keepWaiting -> finish once co
     assert.equal(beforeQuitStep({ closeConfirmed: true, quitConfirmed: false, beforeQuitInFlight: false }), 'waitForJobs');
     assert.equal(beforeQuitStep({ closeConfirmed: true, quitConfirmed: false, beforeQuitInFlight: true }), 'keepWaiting');
     assert.equal(beforeQuitStep({ closeConfirmed: true, quitConfirmed: true, beforeQuitInFlight: false }), 'finish');
+});
+
+test('pendingUploadFromAck trusts a boolean hasPendingUpload in the ack payload', () => {
+    assert.equal(pendingUploadFromAck({ hasPendingUpload: true }, false), true);
+    assert.equal(pendingUploadFromAck({ hasPendingUpload: false }, true), false);
+});
+
+test('pendingUploadFromAck keeps the cached value when the payload is missing or malformed', () => {
+    // A timeout resolves with no payload; an older renderer acks with none.
+    assert.equal(pendingUploadFromAck(undefined, true), true);
+    assert.equal(pendingUploadFromAck(null, false), false);
+    assert.equal(pendingUploadFromAck({}, true), true);
+    assert.equal(pendingUploadFromAck({ hasPendingUpload: 'yes' }, false), false);
+    assert.equal(pendingUploadFromAck({ hasPendingUpload: 1 }, false), false);
+});
+
+// Mirrors main.js: lastRailHasPendingUpload is only refreshed from the ack
+// while stopAndSave is being awaited, the way waitForStopAck does it.
+function guardedCloseHarness({ railStatus, isProcessing = false, cachedHasPendingUpload, ackPayload, pendingChoice = 'discard' }) {
+    const calls = [];
+    let lastRailHasPendingUpload = cachedHasPendingUpload;
+    const run = () => runGuardedClose({
+        railStatus,
+        isProcessing,
+        hasPendingUpload: () => lastRailHasPendingUpload,
+        confirmClose: async () => { calls.push('confirmClose'); return true; },
+        stopAndSave: async () => {
+            calls.push('stopAndSave');
+            lastRailHasPendingUpload = pendingUploadFromAck(ackPayload, lastRailHasPendingUpload);
+        },
+        confirmPendingUpload: async () => { calls.push('confirmPendingUpload'); return pendingChoice; },
+        retryUpload: async () => { calls.push('retryUpload'); },
+    });
+    return { calls, run };
+}
+
+test('runGuardedClose shows the pending-upload dialog when the stop-for-close upload fails, even though the cached push still says false', async () => {
+    // The bug: the ack arrives before the rail's status push, so the cached
+    // flag is stale (false) -- only the ack payload knows the upload failed.
+    const { calls, run } = guardedCloseHarness({
+        railStatus: 'recording',
+        cachedHasPendingUpload: false,
+        ackPayload: { hasPendingUpload: true },
+        pendingChoice: 'retry',
+    });
+    assert.equal(await run(), true);
+    assert.deepEqual(calls, ['confirmClose', 'stopAndSave', 'confirmPendingUpload', 'retryUpload']);
+});
+
+test('runGuardedClose shows the pending-upload dialog after waiting out an in-flight upload that then fails', async () => {
+    const { calls, run } = guardedCloseHarness({
+        railStatus: 'idle',
+        isProcessing: true,
+        cachedHasPendingUpload: false,
+        ackPayload: { hasPendingUpload: true },
+    });
+    assert.equal(await run(), true);
+    assert.deepEqual(calls, ['stopAndSave', 'confirmPendingUpload']);
+});
+
+test('runGuardedClose skips the pending-upload dialog when the ack says nothing is pending, even if the cached push said otherwise', async () => {
+    const { calls, run } = guardedCloseHarness({
+        railStatus: 'recording',
+        cachedHasPendingUpload: true,
+        ackPayload: { hasPendingUpload: false },
+    });
+    assert.equal(await run(), true);
+    assert.deepEqual(calls, ['confirmClose', 'stopAndSave']);
+});
+
+test('runGuardedClose falls back to the cached flag when the ack carries no payload (e.g. timeout)', async () => {
+    const { calls, run } = guardedCloseHarness({
+        railStatus: 'recording',
+        cachedHasPendingUpload: true,
+        ackPayload: undefined,
+    });
+    await run();
+    assert.deepEqual(calls, ['confirmClose', 'stopAndSave', 'confirmPendingUpload']);
+});
+
+test('runGuardedClose returns false without stopping when the user cancels the recording dialog', async () => {
+    const calls = [];
+    const proceed = await runGuardedClose({
+        railStatus: 'recording',
+        isProcessing: false,
+        hasPendingUpload: () => true,
+        confirmClose: async () => { calls.push('confirmClose'); return false; },
+        stopAndSave: async () => { calls.push('stopAndSave'); },
+        confirmPendingUpload: async () => { calls.push('confirmPendingUpload'); return 'discard'; },
+        retryUpload: async () => { calls.push('retryUpload'); },
+    });
+    assert.equal(proceed, false);
+    assert.deepEqual(calls, ['confirmClose']);
 });

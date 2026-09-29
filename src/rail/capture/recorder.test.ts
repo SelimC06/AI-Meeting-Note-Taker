@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { getRecorder } from "./recorder";
+import { extensionForMimeType, getRecorder } from "./recorder";
 
 // jsdom does not implement MediaStream/MediaRecorder. This stub mirrors the
 // real MediaRecorder state machine closely enough to reproduce the bug:
@@ -102,4 +102,13 @@ it("ignores an ondataavailable event with a zero-size (or missing) data payload"
   rec.mediaRecorder.ondataavailable?.({ data: undefined } as unknown as BlobEvent);
 
   expect(received).toEqual([]);
+});
+
+it("extensionForMimeType maps a recorder mimeType to its container's file extension", () => {
+  expect(extensionForMimeType("audio/ogg;codecs=opus")).toBe("ogg");
+  expect(extensionForMimeType("audio/webm;codecs=opus")).toBe("webm");
+  expect(extensionForMimeType("video/mp4")).toBe("mp4");
+  expect(extensionForMimeType("")).toBe("webm");
+  expect(extensionForMimeType(undefined)).toBe("webm");
+  expect(extensionForMimeType("application/x-unknown")).toBe("webm");
 });

@@ -74,7 +74,7 @@ it("does not auto-clear the error dot after 2 seconds", async () => {
   vi.useRealTimers();
 });
 
-it("shows a persistent tooltip when the /process request fails, and clears it on the next record attempt", async () => {
+it("shows a persistent tooltip when the /process request fails, and keeps it through the next record attempt", async () => {
   const record = vi.fn().mockResolvedValue(undefined);
   const stop = vi.fn().mockResolvedValue({ screen: new Blob(["x"]) });
   mockHook({ status: "recording", record, stop, error: null });
@@ -98,7 +98,8 @@ it("shows a persistent tooltip when the /process request fails, and clears it on
     expect(dot).toHaveAttribute("title", "boom");
   });
 
-  // Starting a new recording clears the stale processing error.
+  // Starting a new recording must NOT clear it -- the failed recording is
+  // still only in memory, and hiding its error hid its retry action too.
   mockHook({ status: "idle", record, stop, error: null });
   rerender(<RailApp />);
   const recordButtonAgain = container.querySelectorAll("button")[0];
@@ -107,8 +108,8 @@ it("shows a persistent tooltip when the /process request fails, and clears it on
   await waitFor(() => {
     expect(record).toHaveBeenCalledTimes(1);
   });
-  const dotAfterReset = container.querySelector("span[title]");
-  expect(dotAfterReset).toBeNull();
+  const dotAfterRecord = container.querySelector("span[title]") as HTMLElement;
+  expect(dotAfterRecord).toHaveAttribute("title", "boom");
 });
 
 it("offers a retry action when /process fails, and retry re-POSTs the same recording and succeeds", async () => {
@@ -1050,4 +1051,221 @@ it("plays the pop-in animation class by default, switches to pop-out on a pop-ou
   act(() => popCallback?.({ popped: false }));
   expect(getByRole("timer").parentElement?.className).toContain("rail-pop-in");
   expect(getByRole("timer").parentElement?.className).not.toContain("rail-pop-out");
+});
+
+it("starts only one recording when Record is clicked again while the first-run consent notice is still pending", async () => {
+  // Regression: handleRecordClick only checked the (stale) status==="idle"
+  // closure value, and the button stayed enabled during the consent wait --
+  // main.js chains pending consent promises, so both clicks resolved true
+  // and record() ran twice, orphaning the first set of MediaStreams.
+  let resolveConsent!: (value: boolean) => void;
+  const ensureRecordingConsent = vi.fn(
+    () => new Promise<boolean>((resolve) => { resolveConsent = resolve; })
+  );
+  vi.stubGlobal("consentAPI", { ensureRecordingConsent });
+  const record = vi.fn().mockResolvedValue(undefined);
+  mockHook({ status: "idle", record });
+
+  const { getByLabelText } = render(<RailApp />);
+  const recordButton = getByLabelText("Start recording");
+  fireEvent.click(recordButton);
+  // Same tick, before any re-render -- only the ref guard can catch this one.
+  fireEvent.click(recordButton);
+
+  await waitFor(() => expect(recordButton).toBeDisabled());
+  fireEvent.click(recordButton);
+
+  await act(async () => {
+    resolveConsent(true);
+  });
+
+  await waitFor(() => expect(record).toHaveBeenCalledTimes(1));
+  expect(ensureRecordingConsent).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(recordButton).not.toBeDisabled());
+});
+
+it("ignores a second toggleRecord command that arrives while the first is still starting", async () => {
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  vi.stubGlobal("windowControls", { pushRailStatus: vi.fn(), onRailCommand });
+  let resolveRecord!: () => void;
+  const record = vi.fn(() => new Promise<void>((resolve) => { resolveRecord = resolve; }));
+  mockHook({ status: "idle", record });
+
+  render(<RailApp />);
+  commandCallback?.("toggleRecord");
+  await waitFor(() => expect(record).toHaveBeenCalledTimes(1));
+  // record() hasn't settled and the mocked status is still "idle".
+  commandCallback?.("toggleRecord");
+  await act(() => Promise.resolve());
+  expect(record).toHaveBeenCalledTimes(1);
+
+  await act(async () => resolveRecord());
+});
+
+it("keeps an earlier failed upload queued when a later recording uploads successfully, and retry re-POSTs it", async () => {
+  // Regression: pendingUploadRef held a single FormData, so recording B's
+  // successful upload nulled it and recording A was silently lost.
+  const pushRailStatus = vi.fn();
+  vi.stubGlobal("windowControls", { pushRailStatus, onRailCommand: vi.fn(() => () => {}) });
+
+  const screenA = new Blob(["recording A"]);
+  const screenB = new Blob(["recording B"]);
+  const stop = vi.fn()
+    .mockResolvedValueOnce({ screen: screenA })
+    .mockResolvedValueOnce({ screen: screenB });
+  mockHook({ status: "recording", stop, error: null });
+
+  const ok = (jobId: string) => ({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ job_id: jobId, session_id: "s" }),
+  });
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce({ ok: false, status: 500, text: () => Promise.resolve("A failed") })
+    .mockResolvedValueOnce(ok("job-b"))
+    .mockResolvedValueOnce(ok("job-a"));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { container, getByRole } = render(<RailApp />);
+  fireEvent.click(container.querySelectorAll("button")[0]); // A -> fails
+  await waitFor(() => getByRole("button", { name: "retry upload" }));
+
+  fireEvent.click(container.querySelectorAll("button")[0]); // B -> succeeds
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(container.querySelectorAll("button")[0]).not.toBeDisabled());
+
+  // A is still pending: its error, retry action and close-guard flag all remain.
+  expect(container.querySelector("span[title]")).toHaveAttribute("title", "A failed");
+  expect(pushRailStatus).toHaveBeenLastCalledWith(expect.objectContaining({ hasPendingUpload: true }));
+
+  fireEvent.click(getByRole("button", { name: "retry upload" }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+  expect(await ((fetchMock.mock.calls[2][1].body as FormData).get("screen") as File).text()).toBe("recording A");
+
+  await waitFor(() => {
+    expect(pushRailStatus).toHaveBeenLastCalledWith(expect.objectContaining({ hasPendingUpload: false }));
+  });
+});
+
+it("queues both recordings when two uploads fail in a row, and retry re-POSTs each, oldest first", async () => {
+  // Regression: the second failure used to overwrite the first's FormData.
+  vi.stubGlobal("windowControls", { pushRailStatus: vi.fn(), onRailCommand: vi.fn(() => () => {}) });
+
+  const screenA = new Blob(["recording A"]);
+  const screenB = new Blob(["recording B"]);
+  const stop = vi.fn()
+    .mockResolvedValueOnce({ screen: screenA })
+    .mockResolvedValueOnce({ screen: screenB });
+  mockHook({ status: "recording", stop, error: null });
+
+  const ok = { ok: true, status: 200, json: () => Promise.resolve({ job_id: "j", session_id: "s" }) };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce({ ok: false, status: 500, text: () => Promise.resolve("A failed") })
+    .mockResolvedValueOnce({ ok: false, status: 500, text: () => Promise.resolve("B failed") })
+    .mockResolvedValue(ok);
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { container, getByRole, queryByRole } = render(<RailApp />);
+  fireEvent.click(container.querySelectorAll("button")[0]);
+  await waitFor(() => getByRole("button", { name: "retry upload" }));
+  fireEvent.click(container.querySelectorAll("button")[0]);
+
+  await waitFor(() => {
+    expect(container.querySelector("span[title]")).toHaveAttribute(
+      "title",
+      "2 recordings failed to upload: B failed"
+    );
+  });
+
+  fireEvent.click(getByRole("button", { name: "retry upload" }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+  expect(await ((fetchMock.mock.calls[2][1].body as FormData).get("screen") as File).text()).toBe("recording A");
+  expect(await ((fetchMock.mock.calls[3][1].body as FormData).get("screen") as File).text()).toBe("recording B");
+  await waitFor(() => expect(queryByRole("button", { name: "retry upload" })).toBeNull());
+});
+
+it("names each uploaded file after its blob's real container (e.g. an ogg mic track isn't sent as .webm)", async () => {
+  const stop = vi.fn().mockResolvedValue({
+    screen: new Blob(["v"], { type: "video/webm;codecs=vp9" }),
+    micAudio: new Blob(["a"], { type: "audio/ogg;codecs=opus" }),
+  });
+  mockHook({ status: "recording", stop, error: null });
+  const fetchMock = vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ job_id: "j", session_id: "s" }),
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { container } = render(<RailApp />);
+  fireEvent.click(container.querySelectorAll("button")[0]);
+
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+  const body = fetchMock.mock.calls[0][1].body as FormData;
+  expect((body.get("screen") as File).name).toBe("screen.webm");
+  expect((body.get("mic") as File).name).toBe("mic.ogg");
+});
+
+it("acks a stopForClose whose upload fails with hasPendingUpload: true, read at ack time (not from the later status push)", async () => {
+  // Regression: main.js used to read hasPendingUpload only from the
+  // rail:pushStatus copy, which the effect sends a re-render AFTER this ack
+  // -- so a failed stop-for-close upload looked like "nothing pending" and
+  // the close destroyed the recording without the Retry/Discard dialog.
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  const pushRailStatus = vi.fn();
+  let pushedHasPendingAtAck: boolean | undefined;
+  const notifyStopAndSaveComplete = vi.fn(() => {
+    pushedHasPendingAtAck = pushRailStatus.mock.calls.at(-1)?.[0]?.hasPendingUpload;
+  });
+  vi.stubGlobal("windowControls", { pushRailStatus, onRailCommand, notifyStopAndSaveComplete });
+
+  const stop = vi.fn().mockResolvedValue({ screen: new Blob(["x"]) });
+  mockHook({ status: "recording", stop, error: null });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({ ok: false, status: 500, text: () => Promise.resolve("boom") })
+  );
+
+  render(<RailApp />);
+  commandCallback?.("stopForClose");
+
+  await waitFor(() => expect(notifyStopAndSaveComplete).toHaveBeenCalledTimes(1));
+  expect(notifyStopAndSaveComplete).toHaveBeenCalledWith({ hasPendingUpload: true });
+  // Proves the ack couldn't have relied on the status push: at ack time the
+  // last push still said false.
+  expect(pushedHasPendingAtAck).toBe(false);
+});
+
+it("acks with hasPendingUpload: false when a stopForClose upload succeeds and nothing else is queued", async () => {
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  const notifyStopAndSaveComplete = vi.fn();
+  vi.stubGlobal("windowControls", { pushRailStatus: vi.fn(), onRailCommand, notifyStopAndSaveComplete });
+
+  const stop = vi.fn().mockResolvedValue({ screen: new Blob(["x"]) });
+  mockHook({ status: "recording", stop, error: null });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ job_id: "j", session_id: "s" }),
+    })
+  );
+
+  render(<RailApp />);
+  commandCallback?.("stopForClose");
+
+  await waitFor(() => expect(notifyStopAndSaveComplete).toHaveBeenCalledWith({ hasPendingUpload: false }));
 });

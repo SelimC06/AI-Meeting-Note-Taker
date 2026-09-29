@@ -21,7 +21,7 @@ import {
 import { computeResizedBounds } from './resizeGeometry.js';
 import { sanitizeCaptureSourceTypes } from './captureSources.js';
 import { distReactPath } from './paths.js';
-import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence, beforeQuitStep } from './closeGuard.js';
+import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence, beforeQuitStep, pendingUploadFromAck, runGuardedClose } from './closeGuard.js';
 import { sanitizeRailStatus, isValidSlotRect } from './railValidation.js';
 import { armProcessCrashLogging, logRendererCrash, logRendererError } from './crashLog.js';
 import { hasSeenRecordingConsentNotice, markRecordingConsentNoticeSeen } from './consentStore.js';
@@ -500,8 +500,9 @@ ipcMain.handle('rail:getStatus', () => lastFullRailStatus);
 // Acked by RailApp.tsx once a stop triggered by stopAndSaveRailRecording()
 // below (the "Stop && Save" dialog choice) has finished its upload handoff
 // -- or immediately, on the empty-recording no-op path.
-ipcMain.on('rail:stopAndSaveComplete', () => {
-    pendingStopAck?.resolve();
+// Carries { hasPendingUpload } read at ack time -- see waitForStopAck.
+ipcMain.on('rail:stopAndSaveComplete', (_event, payload) => {
+    pendingStopAck?.resolve(payload);
 });
 
 ipcMain.handle('rail:beginFloatDrag', (_event, slotRect) => {
@@ -689,11 +690,22 @@ ipcMain.handle('diagnostics:openLogsFolder', async () => {
 // upload completes (RailApp.tsx), which can take a while for a large
 // screen recording -- too short a cap here would destroy the rail window
 // mid-upload and silently discard the very recording the user chose to save.
+//
+// The ack's payload refreshes lastRailHasPendingUpload before anything
+// awaiting this reads it: the rail:pushStatus copy lags a re-render behind
+// the ack, so after a stop-for-close upload that just FAILED it would still
+// read false, and performGuardedClose would skip the Retry/Discard dialog
+// and destroy the only copy of that recording. A timeout (no payload)
+// keeps the cached value -- see pendingUploadFromAck.
 function waitForStopAck(timeoutMs = 120000) {
+    let timer;
     return new Promise((resolve) => {
         pendingStopAck = { resolve };
-        setTimeout(resolve, timeoutMs);
+        timer = setTimeout(resolve, timeoutMs);
+    }).then((payload) => {
+        lastRailHasPendingUpload = pendingUploadFromAck(payload, lastRailHasPendingUpload);
     }).finally(() => {
+        clearTimeout(timer);
         pendingStopAck = null;
     });
 }
@@ -773,7 +785,7 @@ async function confirmPendingUploadDialog() {
         cancelId: 1,
         title: 'Recording not uploaded',
         message: "A recording hasn't been uploaded yet",
-        detail: 'This recording failed to upload and is only held in memory. Retry and wait for it to finish, or discard it and close now.',
+        detail: 'One or more recordings failed to upload and are only held in memory. Retry and wait for them to finish, or discard them and close now.',
     });
     return result.response === 0 ? 'retry' : 'discard';
 }
@@ -789,35 +801,16 @@ async function performGuardedClose() {
     // stale copies of its last push (e.g. a discarded pending upload), which
     // would otherwise re-prompt on the quit that follows a guarded close.
     if (!railWindow || railWindow.isDestroyed()) return true;
-    if (shouldPromptBeforeClose(lastRailStatus)) {
-        const proceed = await confirmCloseWithDialog();
-        if (!proceed) return false;
-        await stopAndSaveRailRecording();
-        return true;
-    }
-    if (lastRailIsProcessing) {
-        // The recording itself already stopped (by the user's own manual
-        // stop, not this close) and its upload is mid-flight -- there's
-        // nothing to confirm here (no "keep recording" to cancel back into),
-        // so just wait for that same upload to finish before windows get
-        // destroyed, the same way before-quit silently waits out a
-        // transcription job rather than popping a dialog for it.
-        await stopAndSaveRailRecording();
-        return true;
-    }
-    if (lastRailHasPendingUpload) {
-        // Nothing is actively recording or uploading right now -- this is a
-        // PREVIOUSLY failed upload whose blob would otherwise be silently
-        // discarded when the rail window is destroyed (G3).
-        const choice = await confirmPendingUploadDialog();
-        if (choice === 'retry') {
-            await retryRailUploadAndWait();
-        }
-        // 'discard' (or a retry that fails again) proceeds to close either
-        // way -- the user already chose to close, this dialog only decided
-        // whether to wait out one more attempt first.
-    }
-    return true;
+    return runGuardedClose({
+        railStatus: lastRailStatus,
+        isProcessing: lastRailIsProcessing,
+        // Read lazily, after stopAndSave's ack has refreshed it.
+        hasPendingUpload: () => lastRailHasPendingUpload,
+        confirmClose: confirmCloseWithDialog,
+        stopAndSave: stopAndSaveRailRecording,
+        confirmPendingUpload: confirmPendingUploadDialog,
+        retryUpload: retryRailUploadAndWait,
+    });
 }
 
 // Hiding a fullscreen window on macOS leaves a black, empty Space behind,

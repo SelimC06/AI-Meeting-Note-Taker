@@ -39,7 +39,9 @@ contextBridge.exposeInMainWorld('windowControls', {
   },
 
   pushRailStatus: (status) => ipcRenderer.invoke('rail:pushStatus', status),
-  notifyStopAndSaveComplete: () => ipcRenderer.send('rail:stopAndSaveComplete'),
+  // { hasPendingUpload } rides along with the ack -- main.js trusts it over
+  // its cached rail:pushStatus copy, which lags a re-render behind.
+  notifyStopAndSaveComplete: (payload) => ipcRenderer.send('rail:stopAndSaveComplete', payload),
   onRailStatus: (callback) => {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('rail:status', listener);

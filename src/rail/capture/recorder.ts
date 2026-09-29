@@ -15,6 +15,20 @@ export type StreamRecorder = {
   mimeType: string;
 };
 
+// File extension matching a recorder's actual container, so an upload is
+// named for what it really is -- getAudioRecorder() falls back to
+// audio/ogg on some Chromium builds, which used to be uploaded as ".webm"
+// regardless. The backend saves by form field name and ffprobes the bytes,
+// so this doesn't change how it's decoded, only what the file claims to be.
+export function extensionForMimeType(mimeType: string | undefined, fallback = "webm"): string {
+  const container = mimeType?.split(";")[0].trim().toLowerCase();
+  if (!container) return fallback;
+  if (container.endsWith("/ogg")) return "ogg";
+  if (container.endsWith("/mp4")) return "mp4";
+  if (container.endsWith("/webm")) return "webm";
+  return fallback;
+}
+
 /** Pick the first supported MIME from a list */
 function pickSupported(mimes: string[]): string {
   for (const m of mimes) {
