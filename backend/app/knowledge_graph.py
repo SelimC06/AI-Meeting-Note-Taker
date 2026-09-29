@@ -31,6 +31,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import List
 
+from .corrupt_files import preserve_corrupt_copy
+
 KNOWLEDGE_GRAPH_FILENAME = "knowledge_graph.json"
 
 ALLOWED_TYPES = {"person", "project", "decision", "action_item", "topic", "organization"}
@@ -82,7 +84,15 @@ def _graph_path(store_dir: Path) -> Path:
 
 def load_graph(store_dir: Path) -> dict:
     """Read the graph file. Missing, unreadable, corrupt, or wrong-shaped
-    file -> empty graph shape, same resilience convention as load_sessions.
+    file -> empty graph shape.
+
+    Unlike the sessions index, a corrupt graph is safe to treat as empty:
+    it's derived data -- every session missing from indexed_sessions gets
+    re-queued by graph_jobs.backfill_unindexed and re-extracted from its
+    notes. It's still copied aside first (once per corrupt version, see
+    corrupt_files.preserve_corrupt_copy), because the next merge_extraction
+    overwrites it and re-extraction with a local model isn't guaranteed to
+    reproduce the same graph.
     """
     path = _graph_path(store_dir)
     if not path.exists():
@@ -90,13 +100,14 @@ def load_graph(store_dir: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError):
-        return empty_graph()
+        data = None
     if (
         not isinstance(data, dict)
         or not isinstance(data.get("nodes"), dict)
         or not isinstance(data.get("edges"), list)
         or not isinstance(data.get("indexed_sessions"), list)
     ):
+        preserve_corrupt_copy(path)
         return empty_graph()
     return data
 
@@ -215,3 +226,51 @@ def merge_extraction(store_dir: Path, session_id: str, extraction: dict) -> None
 
         graph["indexed_sessions"].append(session_id)
         _write_graph_atomic(store_dir, graph)
+
+
+def remove_session(store_dir: Path, session_id: str) -> bool:
+    """Strip everything a (permanently deleted) session contributed: its
+    edges, its id from every node's sessions list, any node left with no
+    sessions at all, edges touching those nodes, and its indexed_sessions
+    entry. Returns False (no write) if the graph held nothing for it.
+
+    A node shared with other meetings is kept -- those meetings still
+    reference it -- even though its name/aliases may partly have come from
+    this one; aliases aren't tracked per session, so they can't be
+    attributed back.
+
+    graph_jobs.index_session re-checks that the session still exists while
+    holding _GRAPH_LOCK before merging, so an extraction already in flight
+    when the session is deleted can't write it back after this runs.
+    """
+    with _GRAPH_LOCK:
+        graph = load_graph(store_dir)
+        changed = session_id in graph["indexed_sessions"]
+        graph["indexed_sessions"] = [s for s in graph["indexed_sessions"] if s != session_id]
+
+        removed_nodes = set()
+        for nid, node in list(graph["nodes"].items()):
+            sessions = node.get("sessions", [])
+            if session_id not in sessions:
+                continue
+            changed = True
+            remaining = [s for s in sessions if s != session_id]
+            if remaining:
+                node["sessions"] = remaining
+            else:
+                del graph["nodes"][nid]
+                removed_nodes.add(nid)
+
+        kept_edges = [
+            e for e in graph["edges"]
+            if e.get("session_id") != session_id
+            and e.get("source") not in removed_nodes
+            and e.get("target") not in removed_nodes
+        ]
+        if len(kept_edges) != len(graph["edges"]):
+            changed = True
+        graph["edges"] = kept_edges
+
+        if changed:
+            _write_graph_atomic(store_dir, graph)
+        return changed

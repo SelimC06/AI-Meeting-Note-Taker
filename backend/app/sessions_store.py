@@ -3,11 +3,15 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from . import knowledge_graph
+from .corrupt_files import preserve_corrupt_copy
 
 SESSIONS_INDEX_FILENAME = "sessions_index.json"
 
@@ -41,43 +45,50 @@ def _index_path(store_dir: Path) -> Path:
     return store_dir / SESSIONS_INDEX_FILENAME
 
 
-def _preserve_corrupt_index(path: Path) -> None:
-    """Best-effort: copy an unparseable index aside before it's overwritten
-    or ignored, so a corrupted file (e.g. truncated by a power loss during
-    the old fsync-less write) doesn't silently erase the user's meeting
-    history without leaving a trace to recover from.
+# Copy of the last index this process successfully wrote, refreshed after
+# every write (see _write_sessions_atomic). recover_sessions_index restores
+# from it, so a damaged index can come back with every title, status, and
+# trashed_at intact instead of re-adopting each folder as "Recovered".
+SESSIONS_BACKUP_FILENAME = "sessions_index.backup.json"
+
+
+class SessionsIndexCorruptError(Exception):
+    """sessions_index.json exists but can't be read back as a JSON list.
+
+    Raised by load_sessions (and so by every writer, which all read first)
+    instead of folding the file into an empty list: a writer that treated
+    it as [] would write that back and replace the user's whole library,
+    and a reader returning [] makes the library silently look wiped.
+    server.py turns this into a 503 the UI shows with a recover action.
     """
-    try:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        dest = path.with_name(f"{path.stem}.corrupt-{timestamp}{path.suffix}")
-        shutil.copy2(path, dest)
-    except OSError as e:
-        print(f"[sessions_store] failed to preserve corrupt index {path}: {e}", flush=True)
+
+    def __init__(self, path: Path, preserved_path: Optional[Path]):
+        self.path = path
+        self.preserved_path = preserved_path
+        where = f" A copy was saved as {preserved_path.name}." if preserved_path else ""
+        super().__init__(
+            f"The meeting library index ({path.name}) is damaged and can't be read.{where} "
+            "Nothing has been changed; use Recover library to restore it."
+        )
 
 
 def _index_exists_but_is_corrupt(store_dir: Path) -> bool:
     """True if sessions_index.json exists but can't be read back as a JSON
-    list. Deliberately independent of load_sessions (which folds this same
-    condition into a plain [] -- indistinguishable from "no sessions yet")
-    so sweep_orphaned_sessions can tell "genuinely nothing indexed" apart
-    from "can't trust the index right now" (see there for why that
-    distinction matters). Preserves the corrupt file aside itself (same as
-    load_sessions) so this doesn't depend on some other caller's
-    load_sessions() call having already done so first.
+    list, so sweep_orphaned_sessions can tell "genuinely nothing indexed"
+    apart from "can't trust the index right now" (see there for why that
+    distinction matters).
     """
-    path = _index_path(store_dir)
-    if not path.exists():
-        return False
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        _preserve_corrupt_index(path)
+        load_sessions(store_dir)
+    except SessionsIndexCorruptError:
         return True
-    return not isinstance(data, list)
+    return False
 
 
 def load_sessions(store_dir: Path) -> List[dict]:
-    """Read the sessions index. Missing or corrupt file -> empty list.
+    """Read the sessions index. Missing file -> empty list; a file that
+    exists but won't parse (or isn't a list) -> SessionsIndexCorruptError,
+    after copying it aside once (see corrupt_files.preserve_corrupt_copy).
 
     Cached on the index file's mtime (see _index_cache) -- a cache hit
     returns copies of the cached records (callers mutate what they get back)
@@ -104,25 +115,39 @@ def load_sessions(store_dir: Path) -> List[dict]:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (ValueError, OSError):
-            _preserve_corrupt_index(path)
-            _index_cache.pop(key, None)
-            return []
+            data = None
         if not isinstance(data, list):
             _index_cache.pop(key, None)
-            return []
+            raise SessionsIndexCorruptError(path, preserve_corrupt_copy(path))
 
         _index_cache[key] = (mtime_ns, data)
         return [dict(r) for r in data]
 
 
-def _write_sessions_atomic(store_dir: Path, sessions: List[dict]) -> None:
-    """Atomically write the full sessions list to the index file.
+def _write_json_atomic(final_path: Path, text: str) -> None:
+    """Temp file in the same directory, fsync, then os.replace(). Without
+    the fsync, a power loss between write and replace could leave an
+    empty/truncated file behind.
+    """
+    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, final_path)
 
-    Writes to a temp file in the same directory, fsyncs it so the data is
-    actually on disk (not just in the OS write cache) before the rename, then
-    swaps it into place with os.replace(). Without the fsync, a power loss
-    between write and replace could leave an empty/truncated index behind.
-    Callers must hold _APPEND_LOCK.
+
+def _write_sessions_atomic(store_dir: Path, sessions: List[dict]) -> None:
+    """Atomically write the full sessions list to the index file (see
+    _write_json_atomic). Callers must hold _APPEND_LOCK.
+
+    Every caller reaches this through load_sessions() first, which raises
+    on a corrupt index -- so this never overwrites a damaged index with a
+    list built from nothing.
+
+    Then refreshes SESSIONS_BACKUP_FILENAME with the same content, best-
+    effort: the backup is only there for recover_sessions_index, and a
+    failure writing it must not fail a write that already succeeded.
 
     Refreshes _index_cache with the just-written records afterward so the
     next load_sessions() call (by this process) doesn't have to reparse what
@@ -130,12 +155,12 @@ def _write_sessions_atomic(store_dir: Path, sessions: List[dict]) -> None:
     stat fails, so a reparse happens rather than serving stale data.
     """
     final_path = _index_path(store_dir)
-    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(json.dumps(sessions, ensure_ascii=False, indent=2))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, final_path)
+    text = json.dumps(sessions, ensure_ascii=False, indent=2)
+    _write_json_atomic(final_path, text)
+    try:
+        _write_json_atomic(store_dir / SESSIONS_BACKUP_FILENAME, text)
+    except OSError as e:
+        print(f"[sessions_store] failed to refresh index backup in {store_dir}: {e}", flush=True)
 
     key = str(store_dir)
     try:
@@ -236,6 +261,17 @@ def remove_session_permanently(store_dir: Path, session_id: str) -> bool:
             # itself deleted it, so sweep_orphaned_sessions retries the
             # removal on next startup instead of adopting it back.
             _write_tombstone(session_dir)
+
+    # The knowledge graph holds entity names, aliases, and relations
+    # extracted from this meeting's notes -- "permanently deleted" has to
+    # cover those too, not just the index record and the folder. Best-
+    # effort: the index record and folder are already gone, so a failure
+    # here is logged rather than turned into a 500 for a delete that
+    # otherwise happened.
+    try:
+        knowledge_graph.remove_session(store_dir, session_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"[sessions_store] failed to remove {session_id} from knowledge graph: {e}", flush=True)
     return True
 
 
@@ -432,13 +468,12 @@ def sweep_orphaned_sessions(store_dir: Path) -> dict:
     the sweep.
 
     If the index file EXISTS but fails to parse, this skips entirely
-    (returns the empty result) instead of running -- load_sessions() folds
-    a corrupt index into a plain [], which would otherwise make every real
-    session dir look unindexed and get adopted as "recovered", losing their
-    real titles/notes and resurrecting trashed sessions as active. The
-    corrupt file is already preserved aside (see
-    _index_exists_but_is_corrupt / load_sessions); this just leaves the
-    session directories untouched until it's resolved.
+    (returns the empty result) instead of running -- treating a corrupt
+    index as empty would make every real session dir look unindexed and get
+    adopted as "recovered", losing their real titles/notes and resurrecting
+    trashed sessions as active. The corrupt file is already preserved aside
+    (see load_sessions); this just leaves the session directories untouched
+    until recover_sessions_index resolves it.
     """
     result: dict = {"adopted": [], "deleted": []}
     if not store_dir.exists():
@@ -479,6 +514,56 @@ def sweep_orphaned_sessions(store_dir: Path) -> dict:
             continue
 
     return result
+
+
+def recover_sessions_index(store_dir: Path) -> dict:
+    """User-triggered repair for a corrupt sessions index (POST
+    /sessions/recover-index). No-op if the index isn't actually corrupt.
+
+    Restores from SESSIONS_BACKUP_FILENAME when it parses -- it mirrors the
+    last index this app wrote, so titles, failed statuses, and trash state
+    all come back exactly. Without a usable backup it falls back to an
+    empty index. Either way sweep_orphaned_sessions then adopts any session
+    folder the restored index doesn't list (all of them, in the fallback
+    case) as "Recovered", titled from its notes.md -- the same path the
+    boot sweep uses, and it still honors tombstones, so permanently
+    deleted meetings never come back.
+
+    Refuses (raises OSError) if the corrupt file can't be copied aside
+    first: replacing it is only safe once a copy exists.
+
+    Returns {"source": "none"|"backup"|"rebuild", "restored": n,
+    "adopted": n, "preserved_copy": str|None}.
+    """
+    path = _index_path(store_dir)
+    with _APPEND_LOCK:
+        if not _index_exists_but_is_corrupt(store_dir):
+            return {"source": "none", "restored": 0, "adopted": 0, "preserved_copy": None}
+        preserved = preserve_corrupt_copy(path)
+        if preserved is None:
+            raise OSError(f"Couldn't save a copy of the damaged {path.name}; not replacing it")
+
+        records: List[dict] = []
+        source = "rebuild"
+        backup_path = store_dir / SESSIONS_BACKUP_FILENAME
+        try:
+            backup = json.loads(backup_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            backup = None
+        if isinstance(backup, list) and all(isinstance(r, dict) and r.get("id") for r in backup):
+            # Skip anything tombstoned since the backup was written (a
+            # permanent delete whose index write is exactly what got lost).
+            records = [r for r in backup if not _is_tombstoned(store_dir / r["id"])]
+            source = "backup"
+        _write_sessions_atomic(store_dir, records)
+
+    swept = sweep_orphaned_sessions(store_dir)
+    return {
+        "source": source,
+        "restored": len(records),
+        "adopted": len(swept["adopted"]),
+        "preserved_copy": str(preserved),
+    }
 
 
 # server.py's POST /process stages the screen upload here (via
@@ -680,19 +765,37 @@ def load_speaker_names(session_dir: Path) -> Dict[str, str]:
     return data
 
 
+# Serializes write_speaker_names' read-merge-write, same reasoning as
+# _APPEND_LOCK: FastAPI runs sync handlers in a threadpool, so two PATCH
+# /speaker-names requests really are concurrent, and without this both read
+# the same map and the second write drops the first rename.
+_SPEAKER_NAMES_LOCK = threading.Lock()
+
+
 def write_speaker_names(session_dir: Path, updates: Dict[str, str]) -> None:
     """Merge `updates` into a session's speaker name map and atomically
     write the result -- a partial PATCH (renaming one speaker) must not
     clobber names already set for other speakers in the same session.
 
-    Same fsync-before-replace pattern as write_transcript_segments.
+    Same fsync-before-replace pattern as write_transcript_segments, but
+    with a unique temp name (mkstemp): a fixed ".tmp" shared between two
+    writers lets one os.replace() the other's half-written file, or find
+    it already moved and fail with FileNotFoundError.
     """
     session_dir.mkdir(parents=True, exist_ok=True)
-    merged = {**load_speaker_names(session_dir), **updates}
     final_path = session_dir / SPEAKER_NAMES_FILENAME
-    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(json.dumps(merged, ensure_ascii=False, indent=2))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, final_path)
+    with _SPEAKER_NAMES_LOCK:
+        merged = {**load_speaker_names(session_dir), **updates}
+        fd, tmp_name = tempfile.mkstemp(dir=session_dir, prefix=f".{SPEAKER_NAMES_FILENAME}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(merged, ensure_ascii=False, indent=2))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, final_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise

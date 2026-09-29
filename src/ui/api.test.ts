@@ -4,8 +4,13 @@ import {
   backendFetch,
   checkHealth,
   exportSessionZipUrl,
+  getHealthStatus,
   getSessionTranscript,
+  getSessions,
   getSettings,
+  recoverSessionsIndex,
+  SESSIONS_INDEX_CORRUPT,
+  type ApiError,
   listJobs,
   startProcessing,
   updateSettings,
@@ -328,4 +333,64 @@ it("updateSpeakerNames throws on a failed request", async () => {
   await expect(updateSpeakerNames("missing", { SPEAKER_00: "Alice" })).rejects.toThrow(
     "Failed to update speaker names: 404"
   );
+});
+
+it("getSessions surfaces the damaged-index 503 message and code", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ detail: { code: "sessions_index_corrupt", message: "The meeting library index is damaged" } }),
+        { status: 503 }
+      )
+    )
+  );
+
+  const err = (await getSessions().catch((e) => e)) as ApiError;
+  expect(err.message).toBe("The meeting library index is damaged");
+  expect(err.code).toBe(SESSIONS_INDEX_CORRUPT);
+});
+
+it("getSessions keeps the generic message for other failures", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
+
+  const err = (await getSessions().catch((e) => e)) as ApiError;
+  expect(err.message).toBe("Failed to load sessions: 500");
+  expect(err.code).toBeUndefined();
+});
+
+it("recoverSessionsIndex posts to /sessions/recover-index and surfaces a failure detail", async () => {
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ source: "backup", restored: 3, adopted: 0, preserved_copy: "x" }), { status: 200 })
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "Wait for processing to finish before recovering the library" }), {
+        status: 409,
+      })
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  await expect(recoverSessionsIndex()).resolves.toMatchObject({ source: "backup", restored: 3 });
+  expect(fetchMock.mock.calls[0][0]).toMatch(/\/sessions\/recover-index$/);
+  expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("POST");
+  await expect(recoverSessionsIndex()).rejects.toThrow("Wait for processing to finish");
+});
+
+it("getHealthStatus passes settings_error through, defaulting to null", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, backend: true, ollama: false, settings_error: "damaged" }), {
+          status: 200,
+        })
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, backend: true, ollama: false }), { status: 200 }))
+  );
+
+  expect((await getHealthStatus()).settings_error).toBe("damaged");
+  expect((await getHealthStatus()).settings_error).toBeNull();
 });

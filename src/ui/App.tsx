@@ -29,7 +29,12 @@ function App() {
   };
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarView, setSidebarView] = useState<"active" | "trash">("active");
-  const { sessions, error: sessionsError, reload: reloadSessions } = useSessions(true, false);
+  const {
+    sessions,
+    error: sessionsError,
+    indexCorrupt: sessionsIndexCorrupt,
+    reload: reloadSessions,
+  } = useSessions(true, false);
   const chatSessions = useChatSessions();
   const health = useBackendHealth(true);
   const backendUp = health?.backend ?? false;
@@ -121,6 +126,21 @@ function App() {
         <TitleBar onOpenSettings={() => setSettingsOpen(true)} />
         <main className="flex-1 min-h-0 overflow-hidden [-webkit-app-region:no-drag] relative flex flex-col">
           <BackendStatusBanner />
+          {/* The backend found settings.json damaged at startup and is
+              running on defaults (or just the salvaged storage folder) --
+              otherwise a custom-folder user would only see an empty
+              library with no explanation. Clears once a setting is saved. */}
+          {health?.settings_error && (
+            <div
+              role="alert"
+              className="shrink-0 px-3 py-1.5 text-xs flex items-center justify-between gap-2 bg-panel border-b border-red-500 text-red-400"
+            >
+              <span>{health.settings_error}</span>
+              <button className="text-signal underline shrink-0" onClick={() => setSettingsOpen(true)}>
+                open settings
+              </button>
+            </div>
+          )}
 
           <div className="flex-1 min-h-0 flex flex-row relative">
             <ErrorBoundary>
@@ -129,6 +149,7 @@ function App() {
                 collapsed={sidebarCollapsed}
                 sessions={sessions}
                 sessionsError={sessionsError}
+                sessionsIndexCorrupt={sessionsIndexCorrupt}
                 reloadSessions={reloadSessions}
                 selectedId={selectedId}
                 onSelect={setSelectedId}

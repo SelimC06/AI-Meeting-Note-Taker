@@ -4135,3 +4135,138 @@ def test_raw_transcript_fallback_does_not_mark_a_short_transcript(client, monkey
 
     assert "Alice: short" in job["notes"]
     assert "Transcript truncated" not in job["notes"]
+
+
+# ---------- corrupt data files ----------
+
+def _write_index(store: Path, records) -> None:
+    from app.sessions_store import append_session
+    for r in records:
+        append_session(store, r)
+
+
+def _index_record(sid, **fields):
+    return {"id": sid, "created_at": "2026-08-01T10:00:00+00:00", "title": f"Title {sid}",
+            "notes": "", "video_path": "", "trashed_at": None, **fields}
+
+
+def test_get_sessions_with_corrupt_index_returns_503_with_code(client: TestClient, tmp_path):
+    (tmp_path / "sessions_index.json").write_text("[{trunc", encoding="utf-8")
+
+    for _ in range(3):
+        resp = client.get("/sessions")
+        assert resp.status_code == 503
+        detail = resp.json()["detail"]
+        assert detail["code"] == "sessions_index_corrupt"
+        assert "Recover library" in detail["message"]
+
+    # One preserved copy, not one per poll.
+    assert len(list(tmp_path.glob("sessions_index.corrupt-*.json"))) == 1
+
+
+def test_writes_with_corrupt_index_return_503_and_leave_it_untouched(client: TestClient, tmp_path):
+    (tmp_path / "sessions_index.json").write_text("[{trunc", encoding="utf-8")
+
+    assert client.patch("/sessions/abc", json={"title": "New"}).status_code == 503
+    assert client.post("/sessions/abc/restore").status_code == 503
+    assert client.delete("/sessions/abc").status_code == 503
+
+    assert (tmp_path / "sessions_index.json").read_text(encoding="utf-8") == "[{trunc"
+
+
+def test_recover_index_endpoint_restores_the_library(client: TestClient, tmp_path):
+    sid = "d" * 32
+    (tmp_path / sid).mkdir()
+    (tmp_path / sid / "final.webm").write_bytes(b"video")
+    _write_index(tmp_path, [_index_record(sid, title="Quarterly review")])
+    (tmp_path / "sessions_index.json").write_text("[{trunc", encoding="utf-8")
+
+    resp = client.post("/sessions/recover-index")
+
+    assert resp.status_code == 200
+    assert resp.json()["source"] == "backup"
+    sessions = client.get("/sessions").json()
+    assert [s["title"] for s in sessions] == ["Quarterly review"]
+
+
+def test_recover_index_endpoint_refuses_while_a_job_is_running(client: TestClient, tmp_path, monkeypatch):
+    (tmp_path / "sessions_index.json").write_text("[{trunc", encoding="utf-8")
+    monkeypatch.setattr(server_module.jobs, "is_busy", lambda: True)
+
+    assert client.post("/sessions/recover-index").status_code == 409
+    assert (tmp_path / "sessions_index.json").read_text(encoding="utf-8") == "[{trunc"
+
+
+def test_health_reports_settings_error_until_settings_are_saved(client: TestClient, monkeypatch):
+    monkeypatch.setattr(server_module, "SETTINGS_ERROR", "Your settings file (settings.json) is damaged")
+    monkeypatch.setattr(server_module, "STORE_UNTRUSTED", True)
+
+    assert client.get("/health").json()["settings_error"] == "Your settings file (settings.json) is damaged"
+
+    assert client.patch("/settings", json={}).status_code == 200
+
+    assert client.get("/health").json()["settings_error"] is None
+    assert server_module.STORE_UNTRUSTED is False
+
+
+def test_health_settings_error_is_null_normally(client: TestClient, monkeypatch):
+    monkeypatch.setattr(server_module, "SETTINGS_ERROR", None)
+    assert client.get("/health").json()["settings_error"] is None
+
+
+def test_delete_session_removes_it_from_the_knowledge_graph(client: TestClient, tmp_path):
+    from app import knowledge_graph
+
+    _write_index(tmp_path, [_index_record("s1")])
+    knowledge_graph.merge_extraction(tmp_path, "s1", {
+        "entities": [{"id": 1, "type": "person", "name": "Sarah Klein", "aliases": []}],
+        "relations": [],
+    })
+
+    assert client.delete("/sessions/s1").status_code == 200
+
+    assert knowledge_graph.load_graph(tmp_path) == knowledge_graph.empty_graph()
+
+
+@pytest.mark.parametrize("salvageable", [False, True])
+def test_startup_with_corrupt_settings_reports_it_and_guards_the_sweeps(tmp_path, monkeypatch, salvageable):
+    """A damaged settings.json used to be silently replaced with defaults,
+    so a custom-folder user got an empty library and the startup purge and
+    orphan sweep ran against the default folder instead.
+    """
+    import importlib
+    import app.sessions_store as sessions_store_module
+
+    app_data = tmp_path / "app-data"
+    app_data.mkdir()
+    custom = tmp_path / "custom-store"
+    custom.mkdir()
+    damaged = '{"whisper_model": "base.en", "storage_dir": ' + (json.dumps(str(custom)) if salvageable else '"/nope')
+    (app_data / "settings.json").write_text(damaged, encoding="utf-8")
+    monkeypatch.setenv("APP_DATA_DIR", str(app_data))
+
+    swept = []
+    monkeypatch.setattr(sessions_store_module, "purge_expired_trash", lambda store: swept.append(("purge", store)))
+    monkeypatch.setattr(sessions_store_module, "sweep_orphaned_sessions", lambda store: swept.append(("sweep", store)))
+
+    try:
+        reloaded = importlib.reload(server_module)
+        client = TestClient(
+            reloaded.app,
+            base_url="http://127.0.0.1",
+            headers={reloaded.API_TOKEN_HEADER: reloaded.API_TOKEN},
+        )
+        assert "damaged" in client.get("/health").json()["settings_error"]
+        # Damaged file kept in place (and copied aside), not overwritten.
+        assert (app_data / "settings.json").read_text(encoding="utf-8") == damaged
+        assert len(list(app_data.glob("settings.corrupt-*.json"))) == 1
+        if salvageable:
+            assert reloaded.STORE == custom
+            assert swept == [("purge", custom), ("sweep", custom)]
+        else:
+            assert reloaded.STORE == app_data / "uploads"
+            assert swept == []
+    finally:
+        monkeypatch.delenv("APP_DATA_DIR", raising=False)
+        monkeypatch.undo()
+        importlib.reload(server_module)

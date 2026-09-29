@@ -13,6 +13,7 @@ from app.sessions_store import (
     append_session,
     update_session_fields,
     sweep_stale_partial_mux_files,
+    SessionsIndexCorruptError,
 )
 
 
@@ -63,34 +64,58 @@ def test_append_and_load_round_trip(tmp_path: Path):
     assert {r["id"] for r in loaded} == {"aaa", "bbb"}
 
 
-def test_load_sessions_tolerates_corrupt_file(tmp_path: Path):
+def test_load_sessions_raises_on_corrupt_file(tmp_path: Path):
+    """A corrupt index used to read back as [] -- the library looked wiped,
+    and the next writer persisted that [] over the user's whole history.
+    """
     (tmp_path / "sessions_index.json").write_text("not json", encoding="utf-8")
-    assert load_sessions(tmp_path) == []
+    with pytest.raises(SessionsIndexCorruptError):
+        load_sessions(tmp_path)
 
 
-def test_load_sessions_tolerates_non_utf8_file(tmp_path: Path):
+def test_load_sessions_raises_on_non_utf8_file(tmp_path: Path):
     (tmp_path / "sessions_index.json").write_bytes(b"\xff\xfe\x00\x01garbage")
-    assert load_sessions(tmp_path) == []
+    with pytest.raises(SessionsIndexCorruptError):
+        load_sessions(tmp_path)
+
+
+def test_load_sessions_raises_on_wrong_shape(tmp_path: Path):
+    (tmp_path / "sessions_index.json").write_text('{"not": "a list"}', encoding="utf-8")
+    with pytest.raises(SessionsIndexCorruptError):
+        load_sessions(tmp_path)
 
 
 def test_load_sessions_preserves_corrupt_file_aside_instead_of_discarding_it(tmp_path: Path):
-    """Regression test for brief 10: an unparseable index used to be
-    silently treated as an empty history with no trace of the original
-    bytes -- it must now be copied aside first so the data isn't lost.
+    """Regression test for brief 10: the original bytes of an unparseable
+    index must be copied aside so the data isn't lost.
     """
     (tmp_path / "sessions_index.json").write_text("not json at all", encoding="utf-8")
 
-    assert load_sessions(tmp_path) == []
+    with pytest.raises(SessionsIndexCorruptError) as excinfo:
+        load_sessions(tmp_path)
 
     preserved = list(tmp_path.glob("sessions_index.corrupt-*.json"))
     assert len(preserved) == 1
     assert preserved[0].read_text(encoding="utf-8") == "not json at all"
-    # The original path is untouched -- still there, still corrupt, so a
-    # repeated read keeps behaving the same way rather than raising later.
-    assert (tmp_path / "sessions_index.json").exists()
+    assert excinfo.value.preserved_path == preserved[0]
+    # The original path is untouched -- still there, still corrupt.
+    assert (tmp_path / "sessions_index.json").read_text(encoding="utf-8") == "not json at all"
 
 
-def test_load_sessions_corrupt_preservation_failure_does_not_raise(
+def test_repeated_reads_of_a_corrupt_index_keep_a_single_preserved_copy(tmp_path: Path):
+    """Every /sessions poll reads the index; while it stays corrupt that
+    used to write a fresh .corrupt-<now> copy each time.
+    """
+    (tmp_path / "sessions_index.json").write_text("not json", encoding="utf-8")
+
+    for _ in range(3):
+        with pytest.raises(SessionsIndexCorruptError):
+            load_sessions(tmp_path)
+
+    assert len(list(tmp_path.glob("sessions_index.corrupt-*.json"))) == 1
+
+
+def test_load_sessions_corrupt_preservation_failure_still_raises_corrupt_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     (tmp_path / "sessions_index.json").write_text("not json", encoding="utf-8")
@@ -98,11 +123,28 @@ def test_load_sessions_corrupt_preservation_failure_does_not_raise(
     def boom(*args, **kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr("app.sessions_store.shutil.copy2", boom)
+    monkeypatch.setattr("app.corrupt_files.shutil.copy2", boom)
 
-    # Preserving the corrupt file aside is best-effort; a failure there must
-    # not prevent load_sessions from returning its normal empty-list result.
-    assert load_sessions(tmp_path) == []
+    # Preserving is best-effort; a failure there must surface as the same
+    # corrupt-index error (with no copy path), not an OSError.
+    with pytest.raises(SessionsIndexCorruptError) as excinfo:
+        load_sessions(tmp_path)
+    assert excinfo.value.preserved_path is None
+
+
+@pytest.mark.parametrize("write", [
+    lambda d: append_session(d, {"id": "new", "created_at": "", "title": "T"}),
+    lambda d: update_session_fields(d, "aaa", title="Renamed"),
+    lambda d: sessions_store.remove_session_permanently(d, "aaa"),
+    lambda d: sessions_store.rewrite_index_paths(d, d / "old", d / "new"),
+])
+def test_writers_refuse_to_overwrite_a_corrupt_index(tmp_path: Path, write):
+    (tmp_path / "sessions_index.json").write_text('[{"id": "aaa", "title": "trunc', encoding="utf-8")
+
+    with pytest.raises(SessionsIndexCorruptError):
+        write(tmp_path)
+
+    assert (tmp_path / "sessions_index.json").read_text(encoding="utf-8") == '[{"id": "aaa", "title": "trunc'
 
 
 def test_append_session_fsyncs_before_replace(
@@ -120,7 +162,8 @@ def test_append_session_fsyncs_before_replace(
         "title": "T", "notes": "", "video_path": "", "trashed_at": None,
     })
 
-    assert len(calls) == 1
+    # Once for the index, once for its backup copy (SESSIONS_BACKUP_FILENAME).
+    assert len(calls) == 2
 
 
 def test_append_session_no_leftover_tmp_file(tmp_path: Path):
@@ -1183,3 +1226,233 @@ def test_write_speaker_names_no_leftover_tmp_file(tmp_path: Path):
 
     assert not (session_dir / "speaker_names.json.tmp").exists()
     assert (session_dir / "speaker_names.json").exists()
+
+
+# ---------- corrupt index recovery ----------
+
+def _rec(sid, **fields):
+    return {"id": sid, "created_at": "2026-08-01T10:00:00+00:00", "title": f"Title {sid}",
+            "notes": f"# Title {sid}\n", "video_path": "", "trashed_at": None, **fields}
+
+
+def _session_dir(store: Path, sid: str) -> Path:
+    d = store / sid
+    d.mkdir()
+    (d / "final.webm").write_bytes(b"video")
+    (d / "notes.md").write_text(f"# Notes heading {sid}\n", encoding="utf-8")
+    return d
+
+
+A_ID = "a" * 32
+B_ID = "b" * 32
+C_ID = "c" * 32
+
+
+def test_every_index_write_refreshes_the_backup_copy(tmp_path: Path):
+    append_session(tmp_path, _rec(A_ID))
+    update_session_fields(tmp_path, A_ID, title="Renamed")
+
+    backup = json.loads((tmp_path / sessions_store.SESSIONS_BACKUP_FILENAME).read_text(encoding="utf-8"))
+    assert backup == load_sessions(tmp_path)
+    assert backup[0]["title"] == "Renamed"
+
+
+def test_recover_sessions_index_restores_metadata_from_backup(tmp_path: Path):
+    _session_dir(tmp_path, A_ID)
+    _session_dir(tmp_path, B_ID)
+    append_session(tmp_path, _rec(A_ID, title="Board review", status="failed"))
+    append_session(tmp_path, _rec(B_ID, trashed_at="2026-08-02T10:00:00+00:00"))
+    (tmp_path / "sessions_index.json").write_text("[{trunc", encoding="utf-8")
+
+    result = sessions_store.recover_sessions_index(tmp_path)
+
+    assert result["source"] == "backup"
+    assert result["restored"] == 2 and result["adopted"] == 0
+    by_id = {r["id"]: r for r in load_sessions(tmp_path)}
+    # Titles, failed status, and trash state all survive -- the old boot
+    # sweep path re-adopted all of these as active "Recovered" sessions.
+    assert by_id[A_ID]["title"] == "Board review"
+    assert by_id[A_ID]["status"] == "failed"
+    assert by_id[B_ID]["trashed_at"] == "2026-08-02T10:00:00+00:00"
+    # The damaged original is kept.
+    assert Path(result["preserved_copy"]).read_text(encoding="utf-8") == "[{trunc"
+
+
+def test_recover_sessions_index_adopts_folders_missing_from_the_backup(tmp_path: Path):
+    _session_dir(tmp_path, A_ID)
+    append_session(tmp_path, _rec(A_ID))
+    _session_dir(tmp_path, B_ID)  # recorded, but its index write is what got lost
+    (tmp_path / "sessions_index.json").write_text("garbage", encoding="utf-8")
+
+    result = sessions_store.recover_sessions_index(tmp_path)
+
+    assert result == {**result, "source": "backup", "restored": 1, "adopted": 1}
+    assert {r["id"] for r in load_sessions(tmp_path)} == {A_ID, B_ID}
+
+
+def test_recover_sessions_index_rebuilds_from_folders_without_a_backup(tmp_path: Path):
+    _session_dir(tmp_path, A_ID)
+    _session_dir(tmp_path, B_ID)
+    tomb = _session_dir(tmp_path, C_ID)
+    (tomb / sessions_store.TOMBSTONE_FILENAME).touch()
+    (tmp_path / "sessions_index.json").write_text("garbage", encoding="utf-8")
+
+    result = sessions_store.recover_sessions_index(tmp_path)
+
+    assert result["source"] == "rebuild"
+    records = load_sessions(tmp_path)
+    assert {r["id"] for r in records} == {A_ID, B_ID}  # tombstoned C stays deleted
+    assert all(r["status"] == "recovered" for r in records)
+    assert {r["title"] for r in records} == {f"Notes heading {A_ID}", f"Notes heading {B_ID}"}
+
+
+def test_recover_sessions_index_skips_backup_records_tombstoned_since(tmp_path: Path):
+    _session_dir(tmp_path, A_ID)
+    b_dir = _session_dir(tmp_path, B_ID)
+    append_session(tmp_path, _rec(A_ID))
+    append_session(tmp_path, _rec(B_ID))
+    (b_dir / sessions_store.TOMBSTONE_FILENAME).touch()
+    (tmp_path / "sessions_index.json").write_text("garbage", encoding="utf-8")
+
+    sessions_store.recover_sessions_index(tmp_path)
+
+    assert [r["id"] for r in load_sessions(tmp_path)] == [A_ID]
+
+
+def test_recover_sessions_index_is_a_noop_on_a_healthy_index(tmp_path: Path):
+    append_session(tmp_path, _rec(A_ID))
+    before = (tmp_path / "sessions_index.json").read_text(encoding="utf-8")
+
+    assert sessions_store.recover_sessions_index(tmp_path)["source"] == "none"
+    assert (tmp_path / "sessions_index.json").read_text(encoding="utf-8") == before
+
+
+def test_recover_sessions_index_refuses_when_the_corrupt_file_cannot_be_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / "sessions_index.json").write_text("garbage", encoding="utf-8")
+    monkeypatch.setattr(sessions_store, "preserve_corrupt_copy", lambda path: None)
+
+    with pytest.raises(OSError):
+        sessions_store.recover_sessions_index(tmp_path)
+    assert (tmp_path / "sessions_index.json").read_text(encoding="utf-8") == "garbage"
+
+
+# ---------- knowledge graph cleanup on permanent delete ----------
+
+def _index_in_graph(store: Path, sid: str, name: str) -> None:
+    from app import knowledge_graph
+    knowledge_graph.merge_extraction(store, sid, {
+        "entities": [
+            {"id": 1, "type": "person", "name": name, "aliases": []},
+            {"id": 2, "type": "project", "name": f"Project of {sid}", "aliases": []},
+        ],
+        "relations": [{"source_id": 1, "relation": "owns", "target_id": 2}],
+    })
+
+
+def test_remove_session_permanently_removes_its_knowledge_graph_data(tmp_path: Path):
+    from app import knowledge_graph
+
+    append_session(tmp_path, _rec(A_ID))
+    append_session(tmp_path, _rec(B_ID))
+    _index_in_graph(tmp_path, A_ID, "Sarah Klein")
+    _index_in_graph(tmp_path, B_ID, "Sarah Klein")
+
+    sessions_store.remove_session_permanently(tmp_path, A_ID)
+
+    graph = knowledge_graph.load_graph(tmp_path)
+    assert graph["indexed_sessions"] == [B_ID]
+    assert all(e["session_id"] != A_ID for e in graph["edges"])
+    assert all(A_ID not in n["sessions"] for n in graph["nodes"].values())
+    # A's own project node is gone; the person shared with B is kept.
+    assert {n["name"] for n in graph["nodes"].values()} == {"Sarah Klein", f"Project of {B_ID}"}
+    assert A_ID not in (tmp_path / "knowledge_graph.json").read_text(encoding="utf-8")
+
+
+def test_purge_expired_trash_removes_knowledge_graph_data(tmp_path: Path):
+    from app import knowledge_graph
+
+    old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    append_session(tmp_path, _rec(A_ID, trashed_at=old))
+    _index_in_graph(tmp_path, A_ID, "Sarah Klein")
+
+    assert sessions_store.purge_expired_trash(tmp_path) == 1
+
+    assert knowledge_graph.load_graph(tmp_path) == knowledge_graph.empty_graph()
+
+
+def test_remove_session_permanently_survives_a_knowledge_graph_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from app import knowledge_graph
+
+    append_session(tmp_path, _rec(A_ID))
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(knowledge_graph, "remove_session", boom)
+
+    assert sessions_store.remove_session_permanently(tmp_path, A_ID) is True
+    assert load_sessions(tmp_path) == []
+
+
+# ---------- speaker names concurrency ----------
+
+def test_concurrent_speaker_name_writes_keep_every_rename(tmp_path: Path):
+    from app.sessions_store import write_speaker_names, load_speaker_names
+
+    session_dir = tmp_path / "sess"
+    errors = []
+    barrier = threading.Barrier(16)
+
+    def rename(i):
+        try:
+            barrier.wait()
+            write_speaker_names(session_dir, {f"SPEAKER_{i:02d}": f"Name {i}"})
+        except Exception as e:  # pragma: no cover - asserted below
+            errors.append(e)
+
+    threads = [threading.Thread(target=rename, args=(i,)) for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert load_speaker_names(session_dir) == {f"SPEAKER_{i:02d}": f"Name {i}" for i in range(16)}
+    assert list(session_dir.glob("*.tmp")) == []
+
+
+def test_write_speaker_names_uses_a_unique_temp_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from app.sessions_store import write_speaker_names
+
+    session_dir = tmp_path / "sess"
+    replaced_from = []
+    real_replace = os.replace
+    monkeypatch.setattr(
+        "app.sessions_store.os.replace",
+        lambda src, dst: (replaced_from.append(Path(src).name), real_replace(src, dst))[1],
+    )
+
+    write_speaker_names(session_dir, {"SPEAKER_00": "Alice"})
+    write_speaker_names(session_dir, {"SPEAKER_01": "Bob"})
+
+    assert len(set(replaced_from)) == 2
+    assert "speaker_names.json.tmp" not in replaced_from
+
+
+def test_write_speaker_names_cleans_up_temp_file_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from app.sessions_store import write_speaker_names
+
+    session_dir = tmp_path / "sess"
+
+    def boom(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("app.sessions_store.os.replace", boom)
+
+    with pytest.raises(OSError):
+        write_speaker_names(session_dir, {"SPEAKER_00": "Alice"})
+    assert list(session_dir.iterdir()) == []

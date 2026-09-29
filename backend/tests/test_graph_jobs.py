@@ -89,6 +89,26 @@ def test_index_session_skips_unknown_trashed_and_already_indexed(tmp_path, monke
     assert len(calls) == 1
 
 
+def test_index_session_does_not_merge_a_session_deleted_during_extraction(tmp_path, monkeypatch):
+    """Extraction runs for minutes against a local model; a permanent
+    delete landing in that window must not have its graph data written
+    back afterwards.
+    """
+    from app.sessions_store import remove_session_permanently
+
+    append_session(tmp_path, _record("s1"))
+
+    def extract_then_user_deletes(notes, model, client=None):
+        remove_session_permanently(tmp_path, "s1")
+        return SAMPLE_EXTRACTION
+
+    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", extract_then_user_deletes)
+
+    graph_jobs.index_session(tmp_path, "s1", "m")
+
+    assert knowledge_graph.load_graph(tmp_path) == knowledge_graph.empty_graph()
+
+
 def test_index_session_leaves_session_unindexed_on_empty_extraction(tmp_path, monkeypatch):
     append_session(tmp_path, _record("s1"))
     monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", lambda notes, model, client=None: Extraction())

@@ -209,3 +209,22 @@ it("blurs whatever got auto-focused on the first window-focus event after launch
   fireEvent(window, new Event("focus"));
   expect(document.activeElement).toBe(settingsButton);
 });
+
+it("shows the backend's damaged-settings warning with a way into settings", async () => {
+  vi.mocked(getHealthStatus).mockResolvedValue({
+    ok: true,
+    backend: true,
+    ollama: true,
+    settings_error: "Your settings file (settings.json) is damaged",
+  });
+  render(<App />);
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Your settings file (settings.json) is damaged");
+});
+
+it("shows no settings warning when the backend reports none", async () => {
+  render(<App />);
+  await waitFor(() => expect(getHealthStatus).toHaveBeenCalled());
+  expect(screen.queryByText(/settings file/)).not.toBeInTheDocument();
+});

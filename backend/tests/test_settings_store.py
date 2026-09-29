@@ -1,5 +1,7 @@
 import json
+import os
 import shutil
+import stat
 from pathlib import Path
 
 import pytest
@@ -8,6 +10,7 @@ from app.settings_store import (
     WHISPER_MODEL_CHOICES,
     WHISPER_MODEL_VALUES,
     default_settings,
+    load_checked,
     load_or_init,
     save,
     StorageMoveError,
@@ -128,8 +131,86 @@ def test_load_or_init_preserves_corrupt_file_aside(tmp_path):
     assert corrupt_siblings[0].read_text(encoding="utf-8") == (
         "not json, and holds the user's real storage_dir clue"
     )
-    # The original path now holds the freshly-seeded defaults.
-    assert json.loads(settings_path.read_text(encoding="utf-8"))["storage_dir"] == str(storage)
+    # The damaged original is NOT replaced with defaults -- that would make
+    # the next launch look healthy while silently using the default folder.
+    assert settings_path.read_text(encoding="utf-8") == (
+        "not json, and holds the user's real storage_dir clue"
+    )
+
+
+def test_load_checked_reports_corrupt_file_and_keeps_a_single_copy(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("{oops", encoding="utf-8")
+    storage = tmp_path / "uploads"
+
+    for _ in range(3):
+        settings, error = load_checked(settings_path, storage)
+
+    assert settings["storage_dir"] == str(storage)
+    assert error["storage_dir_recovered"] is False
+    assert "default recordings folder" in error["message"]
+    assert len(list(tmp_path.glob("settings.corrupt-*.json"))) == 1
+
+
+def test_load_checked_salvages_storage_dir_from_a_truncated_file(tmp_path):
+    custom = tmp_path / 'My Recordings "quoted"'
+    custom.mkdir()
+    full = json.dumps({"whisper_model": "small.en", "storage_dir": str(custom), "custom_api_key": "sk-1"})
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(full[: full.index("custom_api_key")], encoding="utf-8")
+
+    settings, error = load_checked(settings_path, tmp_path / "uploads")
+
+    assert settings["storage_dir"] == str(custom)
+    assert error["storage_dir_recovered"] is True
+    assert str(custom) in error["message"]
+
+
+def test_load_checked_ignores_a_salvaged_storage_dir_that_does_not_exist(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        '{"storage_dir": "' + str(tmp_path / "gone") + '", "whisper', encoding="utf-8"
+    )
+
+    settings, error = load_checked(settings_path, tmp_path / "uploads")
+
+    assert settings["storage_dir"] == str(tmp_path / "uploads")
+    assert error["storage_dir_recovered"] is False
+
+
+def test_load_checked_valid_or_missing_file_reports_no_error(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    assert load_checked(settings_path, tmp_path / "uploads")[1] is None  # seeds defaults
+    assert load_checked(settings_path, tmp_path / "uploads")[1] is None  # reads them back
+
+
+def test_save_over_a_corrupt_file_rewrites_it_and_clears_the_error(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("{oops", encoding="utf-8")
+    storage = tmp_path / "uploads"
+
+    save(settings_path, {"whisper_model": "base.en"}, storage)
+
+    settings, error = load_checked(settings_path, storage)
+    assert error is None
+    assert settings["whisper_model"] == "base.en"
+    assert len(list(tmp_path.glob("settings.corrupt-*.json"))) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_settings_file_is_written_owner_only(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    # A leftover temp file with loose permissions must not carry them over.
+    tmp_file = tmp_path / "settings.json.tmp"
+    tmp_file.write_text("", encoding="utf-8")
+    os.chmod(tmp_file, 0o644)
+    old_umask = os.umask(0o022)
+    try:
+        save(settings_path, {"custom_api_key": "sk-secret"}, tmp_path / "uploads")
+    finally:
+        os.umask(old_umask)
+
+    assert stat.S_IMODE(settings_path.stat().st_mode) == 0o600
 
 
 def test_load_or_init_missing_file_creates_no_corrupt_sibling(tmp_path):

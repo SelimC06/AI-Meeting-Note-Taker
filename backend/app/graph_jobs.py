@@ -85,7 +85,14 @@ def index_session(store_dir: Path, session_id: str, model: str, client=None) -> 
     extraction = graph_extract.extract_from_notes(record.get("notes") or "", model=model, client=client)
     if not extraction.entities:
         return
-    knowledge_graph.merge_extraction(store_dir, session_id, extraction.model_dump())
+    # Extraction can take minutes; the session may have been permanently
+    # deleted meanwhile. Re-check under _GRAPH_LOCK (the lock
+    # knowledge_graph.remove_session takes) so a delete either lands before
+    # this check -- and we skip -- or waits and then removes what we merge.
+    with knowledge_graph._GRAPH_LOCK:
+        if not any(r.get("id") == session_id for r in load_sessions(store_dir)):
+            return
+        knowledge_graph.merge_extraction(store_dir, session_id, extraction.model_dump())
 
 
 def start_worker(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse, Response, FileResponse
+from fastapi.responses import StreamingResponse, Response, FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 from .audit import AuditMiddleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,6 +47,8 @@ from .sessions_store import (
     load_action_items,
     write_speaker_names,
     load_speaker_names,
+    recover_sessions_index,
+    SessionsIndexCorruptError,
     STAGING_DIR_PREFIX,
 )
 from .diarization import merge_track_segments, align_speaker_turns
@@ -55,7 +57,7 @@ from .settings_store import (
     WHISPER_MODEL_CHOICES,
     WHISPER_MODEL_VALUES,
     StorageMoveError,
-    load_or_init as load_settings,
+    load_checked as load_settings_checked,
     move_storage_dir,
     save as save_settings,
 )
@@ -116,6 +118,8 @@ async def _daily_trash_purge_loop() -> None:
     """
     while True:
         await asyncio.sleep(_DAILY_PURGE_INTERVAL_SECONDS)
+        if STORE_UNTRUSTED:
+            continue
         try:
             await asyncio.to_thread(purge_expired_trash, STORE)
         except Exception as e:
@@ -354,17 +358,29 @@ def _sweep_stale_export_zips(max_age_seconds: int = 3600) -> None:
             continue
 
 
-_settings = load_settings(SETTINGS_PATH, ROOT / "uploads")
+_settings, _settings_error = load_settings_checked(SETTINGS_PATH, ROOT / "uploads")
+# Shown to the user via GET /health (see settings_store.load_checked) until
+# a successful PATCH /settings rewrites the file.
+SETTINGS_ERROR: Optional[str] = _settings_error["message"] if _settings_error else None
+# True when settings.json was damaged AND its storage_dir couldn't be
+# salvaged, so STORE is the default folder rather than necessarily the
+# user's. The destructive maintenance passes (trash purge, orphan
+# adoption/deletion) skip until then -- they'd otherwise run against a
+# folder the user may never have chosen.
+STORE_UNTRUSTED = bool(_settings_error and not _settings_error["storage_dir_recovered"])
+if SETTINGS_ERROR:
+    print(f"[server] {SETTINGS_ERROR}", flush=True)
 STORE = Path(_settings["storage_dir"])
 STORE.mkdir(parents=True, exist_ok=True)
-try:
-    purge_expired_trash(STORE)
-except Exception as e:
-    print(f"[server] startup trash purge failed (continuing): {e}", flush=True)
-try:
-    sweep_orphaned_sessions(STORE)
-except Exception as e:
-    print(f"[server] startup orphan sweep failed (continuing): {e}", flush=True)
+if not STORE_UNTRUSTED:
+    try:
+        purge_expired_trash(STORE)
+    except Exception as e:
+        print(f"[server] startup trash purge failed (continuing): {e}", flush=True)
+    try:
+        sweep_orphaned_sessions(STORE)
+    except Exception as e:
+        print(f"[server] startup orphan sweep failed (continuing): {e}", flush=True)
 # Independent of the sessions index entirely -- runs regardless of whether
 # the sweep above skipped due to a corrupt index.
 try:
@@ -621,7 +637,29 @@ def _ollama_health_cached() -> bool:
 @app.get("/health")
 @app.get("/healthz")
 def health():
-    return {"ok": True, "backend": True, "ollama": _ollama_health_cached()}
+    # settings_error rides along on the health poll the UI already runs
+    # every few seconds, so a damaged settings.json is visible app-wide
+    # without another request.
+    return {
+        "ok": True,
+        "backend": True,
+        "ollama": _ollama_health_cached(),
+        "settings_error": SETTINGS_ERROR,
+    }
+
+
+SESSIONS_INDEX_CORRUPT_CODE = "sessions_index_corrupt"
+
+
+@app.exception_handler(SessionsIndexCorruptError)
+async def _sessions_index_corrupt_handler(request, exc: SessionsIndexCorruptError):
+    # Any endpoint that touches the index (reads included -- an empty list
+    # would make the library look wiped) lands here. The code lets the UI
+    # tell this apart from other 503s and offer POST /sessions/recover-index.
+    return JSONResponse(
+        status_code=503,
+        content={"detail": {"code": SESSIONS_INDEX_CORRUPT_CODE, "message": str(exc)}},
+    )
 
 @app.get("/")
 def root():
@@ -684,6 +722,16 @@ def restore_session(session_id: str):
     # report the same 404 a request that arrived slightly later would get,
     # instead of an IndexError -> 500.
     return _get_session_or_404(store, session_id)
+
+
+@app.post("/sessions/recover-index")
+def recover_index():
+    if jobs.is_busy():
+        raise HTTPException(409, "Wait for processing to finish before recovering the library")
+    try:
+        return recover_sessions_index(STORE)
+    except OSError as e:
+        raise HTTPException(500, f"Recovering the library failed: {e}")
 
 
 @app.delete("/sessions/{session_id}")
@@ -750,6 +798,7 @@ def patch_settings(body: SettingsUpdate):
     global STORE, WHISPER_MODEL, OLLAMA_CHAT_MODEL, CUSTOM_VOCABULARY, move_in_progress
     global ADVANCED_DIARIZATION_ENABLED, HUGGINGFACE_TOKEN
     global AI_PROVIDER, CUSTOM_API_BASE_URL, CUSTOM_API_KEY, CUSTOM_MODEL_NAME
+    global SETTINGS_ERROR, STORE_UNTRUSTED
 
     if body.whisper_model is not None and body.whisper_model not in WHISPER_MODEL_VALUES:
         raise HTTPException(400, f"Invalid whisper_model: {body.whisper_model!r}")
@@ -860,6 +909,11 @@ def patch_settings(body: SettingsUpdate):
         CUSTOM_API_BASE_URL = settings["custom_api_base_url"]
         CUSTOM_API_KEY = settings["custom_api_key"]
         CUSTOM_MODEL_NAME = settings["custom_model_name"]
+        # settings.json was just rewritten from the live values, so any
+        # damaged-file warning no longer applies, and the user has now
+        # seen and accepted STORE.
+        SETTINGS_ERROR = None
+        STORE_UNTRUSTED = False
 
     return _public_settings(settings)
 

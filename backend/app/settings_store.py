@@ -1,11 +1,13 @@
 from __future__ import annotations
 import json
 import os
+import re
 import shutil
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
+
+from .corrupt_files import preserve_corrupt_copy
 
 SAVE_LOCK = threading.RLock()
 
@@ -57,38 +59,99 @@ def _write_json_dict(path: Path, data: Dict[str, Any]) -> None:
     # the OS write cache) before it's swapped into place -- without it, a
     # power loss between write and replace could leave an empty/truncated
     # settings.json behind.
+    #
+    # Created 0600: the file holds the custom API key and HuggingFace token
+    # in plaintext, and the default umask would leave it readable by every
+    # account on the machine. fchmod too, since O_CREAT's mode is ignored
+    # for a leftover .tmp that already exists. On Windows the mode bits
+    # only control read-only and fchmod doesn't exist, so this is a no-op
+    # there.
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(json.dumps(data, ensure_ascii=False, indent=2))
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp_path, path)
 
 
-def load_or_init(path: Path, default_storage_dir: Path) -> Dict[str, Any]:
-    """Load settings from `path`, seeding+persisting defaults if missing/corrupt.
+# Pulls the "storage_dir" string out of a settings.json that no longer
+# parses as a whole (truncated, a stray edit) -- it's the one setting where
+# falling back to the default is actively harmful, see load_checked.
+_STORAGE_DIR_RE = re.compile(r'"storage_dir"\s*:\s*("(?:[^"\\]|\\.)*")')
 
-    An existing file's keys always win over defaults; any keys missing from
-    an older/partial file are filled in from the defaults so callers always
-    get all three settings back.
+
+def _salvage_storage_dir(path: Path) -> Optional[str]:
+    try:
+        match = _STORAGE_DIR_RE.search(path.read_text(encoding="utf-8", errors="replace"))
+        value = json.loads(match.group(1)) if match else None
+    except (ValueError, OSError):
+        return None
+    # Only trust it if it still names a real folder -- never create one
+    # from a guess.
+    if isinstance(value, str) and Path(value).is_absolute() and Path(value).is_dir():
+        return value
+    return None
+
+
+def load_checked(path: Path, default_storage_dir: Path) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Load settings, reporting a corrupt file instead of hiding it.
+
+    Returns (settings, error). error is None normally. For a settings.json
+    that exists but won't parse, it's {"message": str, "storage_dir_recovered":
+    bool}, and:
+    - the file is copied aside once (corrupt_files.preserve_corrupt_copy)
+      and otherwise left alone -- NOT replaced with defaults, so the problem
+      is still reported on the next launch instead of the defaults quietly
+      becoming the user's settings. Saving any setting (save()) is what
+      rewrites it.
+    - storage_dir is salvaged from the damaged text when possible. Silently
+      falling back to the default folder would show a user with a custom
+      folder an empty library and point the startup sweeps at the wrong
+      folder; server.py skips those sweeps when storage_dir_recovered is
+      False.
+
+    A missing file is not an error: defaults are seeded and persisted.
     """
     defaults = default_settings(default_storage_dir)
     existing = _read_json_dict(path)
-    if existing is None:
-        if path.exists():
-            # Unparseable, not missing: the old file may hold the user's
-            # real storage_dir -- move it aside (same pattern as
-            # sessions_store._preserve_corrupt_index) instead of destroying
-            # the only clue to where their recordings actually live.
-            try:
-                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                preserved = path.with_name(f"{path.stem}.corrupt-{timestamp}{path.suffix}")
-                path.replace(preserved)
-            except OSError:
-                pass
+    if existing is not None:
+        return {**defaults, **existing}, None
+    if not path.exists():
         _write_json_dict(path, defaults)
-        return defaults
-    return {**defaults, **existing}
+        return defaults, None
+
+    preserved = preserve_corrupt_copy(path)
+    salvaged = _salvage_storage_dir(path)
+    settings = dict(defaults)
+    copy_note = f" A copy of the damaged file was saved as {preserved.name}." if preserved else ""
+    if salvaged:
+        settings["storage_dir"] = salvaged
+        message = (
+            f"Your settings file ({path.name}) is damaged. Your recordings folder was recovered "
+            f"({salvaged}), but other settings are temporarily back to defaults.{copy_note} "
+            "Saving any setting rewrites the file and clears this warning."
+        )
+    else:
+        message = (
+            f"Your settings file ({path.name}) is damaged, so DeskRecap is using the default "
+            f"recordings folder ({defaults['storage_dir']}). Meetings saved in a custom folder won't "
+            f"appear until the file is fixed.{copy_note} Repair {path} and restart, or save any "
+            "setting to keep the defaults."
+        )
+    return settings, {"message": message, "storage_dir_recovered": salvaged is not None}
+
+
+def load_or_init(path: Path, default_storage_dir: Path) -> Dict[str, Any]:
+    """load_checked without the error report: settings only.
+
+    An existing file's keys always win over defaults; any keys missing from
+    an older/partial file are filled in from the defaults so callers always
+    get every setting back.
+    """
+    return load_checked(path, default_storage_dir)[0]
 
 
 def save(path: Path, updates: Dict[str, Any], default_storage_dir: Path) -> Dict[str, Any]:

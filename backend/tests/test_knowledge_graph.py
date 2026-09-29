@@ -71,6 +71,38 @@ def test_load_graph_wrong_shape_returns_empty_shape(tmp_path):
     assert knowledge_graph.load_graph(tmp_path) == knowledge_graph.empty_graph()
 
 
+def test_load_graph_preserves_a_corrupt_file_once(tmp_path):
+    (tmp_path / "knowledge_graph.json").write_text("{not json!!", encoding="utf-8")
+
+    for _ in range(3):
+        knowledge_graph.load_graph(tmp_path)
+
+    preserved = list(tmp_path.glob("knowledge_graph.corrupt-*.json"))
+    assert len(preserved) == 1
+    assert preserved[0].read_text(encoding="utf-8") == "{not json!!"
+
+
+def test_load_graph_preserves_a_wrong_shaped_file(tmp_path):
+    (tmp_path / "knowledge_graph.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    knowledge_graph.load_graph(tmp_path)
+    assert len(list(tmp_path.glob("knowledge_graph.corrupt-*.json"))) == 1
+
+
+def test_merge_over_a_corrupt_graph_keeps_the_preserved_copy(tmp_path):
+    (tmp_path / "knowledge_graph.json").write_text("{not json!!", encoding="utf-8")
+
+    knowledge_graph.merge_extraction(tmp_path, "s1", _ext([_person(1, "Sarah Klein")]))
+
+    assert knowledge_graph.load_graph(tmp_path)["indexed_sessions"] == ["s1"]
+    preserved = list(tmp_path.glob("knowledge_graph.corrupt-*.json"))
+    assert [p.read_text(encoding="utf-8") for p in preserved] == ["{not json!!"]
+
+
+def test_load_graph_missing_file_creates_no_corrupt_copy(tmp_path):
+    knowledge_graph.load_graph(tmp_path)
+    assert list(tmp_path.glob("knowledge_graph.corrupt-*")) == []
+
+
 def test_merge_creates_nodes_edges_and_marks_session_indexed(tmp_path):
     extraction = _ext(
         [_person(0, "Sarah Klein"), {"id": 1, "type": "project", "name": "pricing page", "aliases": []}],
@@ -205,3 +237,60 @@ def test_concurrent_merges_do_not_lose_data(tmp_path):
     graph = knowledge_graph.load_graph(tmp_path)
     assert len(graph["nodes"]) == 8
     assert sorted(graph["indexed_sessions"]) == sorted(f"s{i}" for i in range(8))
+
+
+# ---------- remove_session ----------
+
+def _two_meeting_graph(tmp_path):
+    knowledge_graph.merge_extraction(tmp_path, "s1", _ext(
+        [_person(1, "Sarah Klein"), {"id": 2, "type": "project", "name": "Apollo", "aliases": []}],
+        [{"source_id": 1, "relation": "leads", "target_id": 2}],
+    ))
+    knowledge_graph.merge_extraction(tmp_path, "s2", _ext(
+        [_person(1, "Sarah Klein"), {"id": 2, "type": "decision", "name": "Ship in May", "aliases": []}],
+        [{"source_id": 1, "relation": "decided", "target_id": 2}],
+    ))
+
+
+def test_remove_session_strips_edges_nodes_and_index_entry(tmp_path):
+    _two_meeting_graph(tmp_path)
+
+    assert knowledge_graph.remove_session(tmp_path, "s1") is True
+
+    graph = knowledge_graph.load_graph(tmp_path)
+    assert graph["indexed_sessions"] == ["s2"]
+    assert [e["relation"] for e in graph["edges"]] == ["decided"]
+    names = {n["name"]: n for n in graph["nodes"].values()}
+    assert set(names) == {"Sarah Klein", "Ship in May"}  # Apollo only came from s1
+    assert names["Sarah Klein"]["sessions"] == ["s2"]
+
+
+def test_remove_session_last_meeting_leaves_an_empty_graph(tmp_path):
+    _two_meeting_graph(tmp_path)
+    knowledge_graph.remove_session(tmp_path, "s1")
+    knowledge_graph.remove_session(tmp_path, "s2")
+    assert knowledge_graph.load_graph(tmp_path) == knowledge_graph.empty_graph()
+
+
+def test_remove_session_unknown_session_does_not_write(tmp_path):
+    _two_meeting_graph(tmp_path)
+    path = tmp_path / "knowledge_graph.json"
+    before = path.stat().st_mtime_ns
+
+    assert knowledge_graph.remove_session(tmp_path, "nope") is False
+    assert path.stat().st_mtime_ns == before
+
+
+def test_remove_session_missing_graph_is_a_noop(tmp_path):
+    assert knowledge_graph.remove_session(tmp_path, "s1") is False
+    assert not (tmp_path / "knowledge_graph.json").exists()
+
+
+def test_remove_session_allows_the_session_to_be_reindexed(tmp_path):
+    """indexed_sessions must drop the id too -- otherwise merge_extraction
+    would treat a (hypothetically) re-created session id as already done.
+    """
+    _two_meeting_graph(tmp_path)
+    knowledge_graph.remove_session(tmp_path, "s1")
+    knowledge_graph.merge_extraction(tmp_path, "s1", _ext([_person(1, "Marcus Lee")]))
+    assert "s1" in knowledge_graph.load_graph(tmp_path)["indexed_sessions"]

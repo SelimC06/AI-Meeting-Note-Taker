@@ -5,6 +5,7 @@ import {
   restoreSession,
   deleteSessionForever,
   renameSession,
+  recoverSessionsIndex,
   type Session,
 } from "../api";
 import { useSessions } from "../hooks/useSessions";
@@ -45,6 +46,10 @@ interface Props {
   // instead of ever surfacing the real error (re-review-12-13 H1/L1).
   // Defaults false.
   backendFailed?: boolean;
+  // True when sessionsError is the backend's damaged-index error (see
+  // useSessions' indexCorrupt) -- shows a "recover library" action next to
+  // it. Defaults false.
+  sessionsIndexCorrupt?: boolean;
 }
 
 // Distinguishes "the fetch itself never landed" (offline/backend down --
@@ -73,6 +78,7 @@ const Sidebar: React.FC<Props> = ({
   onSessionDeleted,
   backendUp = true,
   backendFailed = false,
+  sessionsIndexCorrupt = false,
 }) => {
   const [query, setQuery] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -81,6 +87,7 @@ const Sidebar: React.FC<Props> = ({
   const [contextMenu, setContextMenu] = useState<{ session: Session; x: number; y: number } | null>(null);
   const [notesSession, setNotesSession] = useState<Session | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [recovering, setRecovering] = useState(false);
   const undoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const actionErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -138,6 +145,7 @@ const Sidebar: React.FC<Props> = ({
   // suppression is lifted and the real error (if any) is shown instead of
   // loading forever (re-review-12-13 H1/L1).
   const listError = backendUp || backendFailed ? (view === "trash" ? trashList.error : sessionsError) : null;
+  const listIndexCorrupt = view === "trash" ? trashList.indexCorrupt : sessionsIndexCorrupt;
   const filtered =
     list?.filter((s) => s.title.toLowerCase().includes(query.trim().toLowerCase())) ?? null;
 
@@ -197,6 +205,21 @@ const Sidebar: React.FC<Props> = ({
       console.error("[Sidebar] delete forever failed:", e);
       if (wasSelected) onSelect(s.id);
       showActionError(describeActionError("delete", e));
+    }
+  };
+
+  const handleRecoverLibrary = async () => {
+    setRecovering(true);
+    try {
+      await recoverSessionsIndex();
+    } catch (e) {
+      console.error("[Sidebar] recover library failed:", e);
+      showActionError(describeActionError("recover library", e));
+    } finally {
+      setRecovering(false);
+      // Both lists read the same index, so both need refetching.
+      reloadSessions();
+      trashList.reload();
     }
   };
 
@@ -332,6 +355,18 @@ const Sidebar: React.FC<Props> = ({
             )}
 
             {listError && <div className="p-3 text-xs text-red-400">failed to load: {listError}</div>}
+
+            {listError && listIndexCorrupt && (
+              <div className="px-3 pb-3 text-xs">
+                <button
+                  onClick={handleRecoverLibrary}
+                  disabled={recovering}
+                  className="text-signal hover:underline disabled:text-dim disabled:no-underline focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                >
+                  {recovering ? "recovering…" : "[recover library]"}
+                </button>
+              </div>
+            )}
 
             {!listError && list === null && (
               <div className="p-3 text-xs text-dim">

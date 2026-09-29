@@ -55,6 +55,28 @@ it("sets error on failure", async () => {
   expect(result.current.sessions).toBeNull();
 });
 
+it("flags the damaged-index error so the sidebar can offer recovery", async () => {
+  vi.mocked(getSessions).mockRejectedValue(
+    Object.assign(new Error("The meeting library index is damaged"), { code: "sessions_index_corrupt" })
+  );
+  const { result } = renderHook(() => useSessions(true, false));
+  await waitFor(() => expect(result.current.error).toBe("The meeting library index is damaged"));
+  expect(result.current.indexCorrupt).toBe(true);
+});
+
+it("does not flag other errors as a damaged index, and clears the flag on reload", async () => {
+  vi.mocked(getSessions).mockRejectedValueOnce(
+    Object.assign(new Error("damaged"), { code: "sessions_index_corrupt" })
+  );
+  vi.mocked(getSessions).mockRejectedValueOnce(new Error("boom"));
+  const { result } = renderHook(() => useSessions(true, false));
+  await waitFor(() => expect(result.current.indexCorrupt).toBe(true));
+
+  act(() => result.current.reload());
+  await waitFor(() => expect(result.current.error).toBe("boom"));
+  expect(result.current.indexCorrupt).toBe(false);
+});
+
 it("reload() re-fetches", async () => {
   vi.mocked(getSessions).mockResolvedValue([sessionA]);
   const { result } = renderHook(() => useSessions(true, false));

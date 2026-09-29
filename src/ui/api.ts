@@ -51,15 +51,49 @@ export function backendFetch(input: string, init: RequestInit = {}): Promise<Res
   return fetch(input, { ...init, headers });
 }
 
+// `code` on the Error getSessions throws when the backend's sessions index
+// exists but is damaged (503). The backend refuses every read and write
+// until it's recovered via recoverSessionsIndex(), rather than showing an
+// empty library or overwriting it -- the UI offers that action for this
+// code specifically.
+export const SESSIONS_INDEX_CORRUPT = "sessions_index_corrupt";
+
+export type ApiError = Error & { code?: string };
+
 export async function getSessions(includeTrashed = false): Promise<Session[]> {
   const url = includeTrashed
     ? `${BACKEND_URL}/sessions?include_trashed=true`
     : `${BACKEND_URL}/sessions`;
   const resp = await backendFetch(url);
   if (!resp.ok) {
+    const body = await resp.json().catch(() => null);
+    const detail = body?.detail;
+    if (detail && typeof detail === "object" && typeof detail.message === "string") {
+      const err: ApiError = new Error(detail.message);
+      err.code = typeof detail.code === "string" ? detail.code : undefined;
+      throw err;
+    }
     throw new Error(`Failed to load sessions: ${resp.status}`);
   }
   return (await resp.json()) as Session[];
+}
+
+export type RecoverIndexResult = {
+  source: "none" | "backup" | "rebuild";
+  restored: number;
+  adopted: number;
+  preserved_copy: string | null;
+};
+
+export async function recoverSessionsIndex(): Promise<RecoverIndexResult> {
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/recover-index`, { method: "POST" });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null);
+    throw new Error(
+      typeof body?.detail === "string" ? body.detail : `Failed to recover library: ${resp.status}`
+    );
+  }
+  return (await resp.json()) as RecoverIndexResult;
 }
 
 export async function checkHealth(): Promise<boolean> {
@@ -75,6 +109,10 @@ export type HealthStatus = {
   ok: boolean;
   backend: boolean;
   ollama: boolean;
+  // Set when the backend found settings.json damaged at startup (it keeps
+  // running on defaults, or on the salvaged storage folder) -- cleared once
+  // any setting is saved. Optional: older backends don't send it.
+  settings_error?: string | null;
 };
 
 export async function getHealthStatus(): Promise<HealthStatus> {
@@ -86,6 +124,7 @@ export async function getHealthStatus(): Promise<HealthStatus> {
       ok: data.ok ?? false,
       backend: data.backend ?? false,
       ollama: data.ollama ?? false,
+      settings_error: typeof data.settings_error === "string" ? data.settings_error : null,
     };
   } catch {
     return { ok: false, backend: false, ollama: false };

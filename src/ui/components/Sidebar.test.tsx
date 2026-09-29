@@ -11,6 +11,7 @@ import {
   renameSession,
   listJobs,
   getJobStatus,
+  recoverSessionsIndex,
   type Session,
 } from "../api";
 
@@ -444,4 +445,41 @@ it("hides the all-meetings nav item when there are no sessions", () => {
 it("hides the all-meetings nav item in the trash view", () => {
   renderSidebar({ view: "trash" });
   expect(screen.queryByRole("button", { name: /all meetings/i })).not.toBeInTheDocument();
+});
+
+it("offers [recover library] for a damaged index and reloads both lists after recovering", async () => {
+  vi.mocked(getSessions).mockResolvedValue([]);
+  vi.mocked(recoverSessionsIndex).mockResolvedValue({
+    source: "backup",
+    restored: 2,
+    adopted: 0,
+    preserved_copy: "x",
+  });
+  const { reloadSessions } = renderSidebar({
+    sessions: null,
+    sessionsError: "The meeting library index is damaged",
+    sessionsIndexCorrupt: true,
+  });
+
+  expect(screen.getByText(/The meeting library index is damaged/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "[recover library]" }));
+
+  await waitFor(() => expect(recoverSessionsIndex).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(reloadSessions).toHaveBeenCalled());
+});
+
+it("shows the recover failure as an action error", async () => {
+  vi.mocked(recoverSessionsIndex).mockRejectedValue(new Error("Wait for processing to finish"));
+  renderSidebar({ sessions: null, sessionsError: "damaged", sessionsIndexCorrupt: true });
+
+  fireEvent.click(screen.getByRole("button", { name: "[recover library]" }));
+
+  expect(
+    await screen.findByText("Couldn't recover library — Wait for processing to finish")
+  ).toBeInTheDocument();
+});
+
+it("does not offer recovery for an ordinary load error", () => {
+  renderSidebar({ sessions: null, sessionsError: "Failed to load sessions: 500" });
+  expect(screen.queryByRole("button", { name: "[recover library]" })).not.toBeInTheDocument();
 });
