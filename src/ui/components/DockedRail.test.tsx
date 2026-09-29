@@ -291,7 +291,7 @@ it("renders a click-to-reattach button while floating, and calls reattachRail on
   expect(reattachRail).toHaveBeenCalledTimes(1);
 });
 
-it("renders the disabled pill instead of flashing the reattach button while settling after a drop (brief 12 #3)", () => {
+it("keeps the hidden drag placeholder instead of flashing the reattach button or the pill while settling after a drop (brief 12 #3)", () => {
   // Regression test: isDragging clears immediately on pointerUp but
   // isFloating stays true until main's onRailFloating(false) arrives
   // (~160ms later on a successful dock) -- without isSettling, the
@@ -308,6 +308,9 @@ it("renders the disabled pill instead of flashing the reattach button while sett
   expect(endRailFloatDrag).toHaveBeenCalledTimes(1);
   expect(screen.queryByText("[reattach rail]")).not.toBeInTheDocument();
   expect(screen.getByLabelText("Start recording")).toBeDisabled();
+  // The pill itself must stay invisible too -- showing it here flashed it
+  // in the sidebar on every drop that ends up floating (corner/edge snap).
+  expect(handle.parentElement).toHaveClass("opacity-0");
 });
 
 it("clears the settling state once onRailFloating arrives, resuming normal float/dock rendering", () => {

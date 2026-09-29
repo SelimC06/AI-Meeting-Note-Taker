@@ -275,19 +275,25 @@ export default function DockedRail({ collapsed = false }: Props) {
         );
     }
 
+    // Settling keeps the same invisible placeholder as the drag itself until
+    // main decides dock vs. float. Showing the pill here instead flashed it
+    // for one IPC round-trip on every drop that stays floating (corner/edge
+    // snap) before the reattach button replaced it.
+    const isPlaceholder = isDragging || isSettling;
+
     return (
         <div
             key={dockGeneration}
             ref={containerRef}
             className={
                 "relative h-10 w-full flex-none rounded-full rail-pop-in " +
-                (isDragging ? "border border-dashed border-signal/60" : "")
+                (isPlaceholder ? "border border-dashed border-signal/60" : "")
             }
         >
             <div
                 className={
                     "flex h-10 w-full flex-none items-center gap-2 rounded-full border border-signal/40 bg-void px-2 select-none " +
-                    (isDragging ? "opacity-0" : "")
+                    (isPlaceholder ? "opacity-0" : "")
                 }
             >
                 <div
