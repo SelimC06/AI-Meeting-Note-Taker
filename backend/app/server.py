@@ -13,7 +13,9 @@ from typing import Optional, List
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 import asyncio
+import hmac
 import json
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -141,9 +143,43 @@ class ChatRequest(BaseModel):
     message: str
     history: List[ChatMessage] = []
 
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000,http://127.0.0.1:8000")
+# Empty by default: the packaged renderers are loaded from file://, and
+# Electron sends no Origin header at all for their fetches (and applies no
+# CORS to them), so the app itself needs no CORS allowance. The old default
+# listed localhost:5173/:3000 -- the stock ports of nearly every Vite/CRA/
+# Next dev server -- which let any unrelated local project read this API.
+# The plain-browser `npm run dev:react` workflow opts in explicitly
+# (ALLOWED_ORIGINS=http://localhost:5173, see README). The literal "null"
+# origin is never honoured, even if listed: sandboxed iframes on any site
+# send it.
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "")
 
-ORIGINS = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
+ORIGINS = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip() and o.strip() != "null"]
+
+# Per-launch shared secret. Electron generates a fresh random value on every
+# launch and passes it in this env var; every request must echo it back in
+# API_TOKEN_HEADER. Binding to 127.0.0.1 alone doesn't stop a web page the
+# user visits from POSTing here: multipart/form-data and bodies with no
+# Content-Type are "simple" requests the browser sends cross-origin without
+# a preflight, so CORS never gets a say before the handler runs. A page
+# can't read the token, and setting a custom header forces a preflight that
+# CORS then refuses.
+API_TOKEN_ENV = "DESKRECAP_API_TOKEN"
+API_TOKEN_HEADER = "X-DeskRecap-Token"
+API_TOKEN = os.getenv(API_TOKEN_ENV, "")
+if not API_TOKEN:
+    # Run directly by a developer (python -m app.server), not by Electron.
+    # Stay locked down rather than falling back to "no auth": make up a
+    # token for this process and print it, so it can still be used with
+    # curl or a dev renderer. Set the env var to pin a stable value.
+    API_TOKEN = secrets.token_hex(32)
+    print(
+        f"[server] WARNING: {API_TOKEN_ENV} is not set, so a random API token was "
+        f"generated for this run. Every request must send the header "
+        f"'{API_TOKEN_HEADER}: {API_TOKEN}'. Set {API_TOKEN_ENV} yourself to use a fixed "
+        f"token (and VITE_DESKRECAP_API_TOKEN to the same value for `npm run dev:react`).",
+        flush=True,
+    )
 
 _DEFAULT_MAX_UPLOAD_MB = 2048
 try:
@@ -208,7 +244,57 @@ class MaxUploadSizeMiddleware:
         await self.app(scope, limited_receive, send)
 
 
-# Outermost middleware (added first): CORS with an explicit origin list is
+class ApiAuthMiddleware:
+    """Rejects any request that isn't from this app's own renderers.
+
+    Two independent checks, both before a route (or the upload-size
+    middleware) ever reads the body:
+      * an Origin header, when present, must be in ORIGINS -- a browser
+        page's simple POST still carries its Origin, so this refuses it
+        even though CORS itself never blocks sending one;
+      * the per-launch API_TOKEN must be echoed in API_TOKEN_HEADER.
+    /health is deliberately NOT exempt: Electron's startup/watchdog probes
+    send the token too, and a 200 from /health then also proves the port is
+    held by the backend this launch spawned rather than some other process.
+    CORS preflights never reach this -- CORSMiddleware sits outside it and
+    answers them itself (they can't carry the custom header anyway).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or [])
+        origin = headers.get(b"origin")
+        if origin is not None and origin.decode("latin-1") not in ORIGINS:
+            response = PlainTextResponse("Origin not allowed", status_code=403)
+            await response(scope, receive, send)
+            return
+
+        # API_TOKEN is read from the module global at request time (not
+        # captured at construction) so tests can monkeypatch it. Compared as
+        # bytes in constant time, so response timing leaks nothing about
+        # how much of a guess was right.
+        supplied = headers.get(API_TOKEN_HEADER.lower().encode("latin-1"), b"")
+        if not hmac.compare_digest(supplied, API_TOKEN.encode("latin-1")):
+            response = PlainTextResponse("Missing or invalid API token", status_code=401)
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
+
+
+# Middleware runs in reverse order of registration (add_middleware
+# prepends), so the effective stack is Audit -> CORS -> ApiAuth ->
+# MaxUploadSize -> TrustedHost -> routes. CORS must sit outside ApiAuth so
+# it can answer preflights (which carry no token) and add CORS headers to a
+# 401/403 for an allowed dev origin.
+#
+# CORS with an explicit origin list is
 # a browser-enforced check only -- it does nothing against DNS rebinding
 # (attacker.com resolving to 127.0.0.1), where the browser treats the
 # request as same-origin and never applies CORS at all. TrustedHostMiddleware
@@ -218,12 +304,19 @@ class MaxUploadSizeMiddleware:
 # validation (wildcards are only allowed as a leading "*.").
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
 app.add_middleware(MaxUploadSizeMiddleware)
+app.add_middleware(ApiAuthMiddleware)
+# Only relevant to an explicitly allow-listed dev origin (see
+# ALLOWED_ORIGINS); the packaged app's file:// renderers bypass CORS. No
+# credentials: the API uses no cookies, the token travels in a header.
+# Content-Disposition is exposed so a dev-browser export still gets its
+# filename (SessionContextMenu's exportViaFetch reads it).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ORIGINS,  # ["http://localhost:1420", "http://localhost:5173", "tauri://localhost"]
-    allow_credentials=True,
+    allow_origins=ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type", API_TOKEN_HEADER],
+    expose_headers=["Content-Disposition"],
 )
 app.add_middleware(AuditMiddleware)
 
@@ -615,6 +708,21 @@ class SettingsUpdate(BaseModel):
     custom_model_name: Optional[str] = None
 
 
+# Settings whose values never leave the backend once saved. Responses carry
+# a "<key>_set" boolean instead, so the UI can show that one is configured
+# (and offer to replace/clear it) without the secret itself being readable
+# by anything that manages to call GET /settings.
+SECRET_SETTING_KEYS = ("huggingface_token", "custom_api_key")
+
+
+def _public_settings(settings: dict) -> dict:
+    public = {k: v for k, v in settings.items() if k not in SECRET_SETTING_KEYS}
+    for key in SECRET_SETTING_KEYS:
+        public[f"{key}_set"] = bool(settings.get(key))
+    public["whisper_model_choices"] = WHISPER_MODEL_CHOICES
+    return public
+
+
 @app.get("/settings")
 def get_settings():
     # Return the live in-memory globals rather than re-reading settings.json:
@@ -623,7 +731,7 @@ def get_settings():
     # back to ROOT/"uploads") even though STORE still correctly points at
     # the user's actual chosen folder, causing this endpoint to report the
     # wrong value and a subsequent PATCH to merge onto the stale re-seed.
-    return {
+    return _public_settings({
         "whisper_model": WHISPER_MODEL,
         "storage_dir": str(STORE),
         "ollama_chat_model": OLLAMA_CHAT_MODEL,
@@ -634,8 +742,7 @@ def get_settings():
         "custom_api_base_url": CUSTOM_API_BASE_URL,
         "custom_api_key": CUSTOM_API_KEY,
         "custom_model_name": CUSTOM_MODEL_NAME,
-        "whisper_model_choices": WHISPER_MODEL_CHOICES,
-    }
+    })
 
 
 @app.patch("/settings")
@@ -754,7 +861,7 @@ def patch_settings(body: SettingsUpdate):
         CUSTOM_API_KEY = settings["custom_api_key"]
         CUSTOM_MODEL_NAME = settings["custom_model_name"]
 
-    return {**settings, "whisper_model_choices": WHISPER_MODEL_CHOICES}
+    return _public_settings(settings)
 
 
 @app.get("/storage/usage")

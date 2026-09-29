@@ -42,16 +42,35 @@ is shown in-app under Settings → Privacy.
 
 ## Security model
 
-The backend has no authentication on its API. This is intentional: the
-server binds to `127.0.0.1` only (see `main()` in `backend/app/server.py`)
-and is designed to run entirely locally for a single user, the same way most
-local dev servers and tools like VS Code's local server work. Because there's
-no token check, any other process running on the same machine could in
-principle reach `127.0.0.1:8000` and read, export, or delete session data, or
-trigger recording/chat requests. This is an accepted tradeoff for a
-local-only tool — **the app should never be exposed to a network** (don't
-change the bind host to `0.0.0.0`, port-forward it, or put it behind a
-reverse proxy without adding real authentication first).
+The backend binds to `127.0.0.1` only (see `main()` in
+`backend/app/server.py`), but that alone doesn't make it private: every web
+page open in the user's browser can also send requests to `127.0.0.1`. A
+multipart upload to `/process`, for example, is sent cross-origin without any
+CORS preflight. So the API requires a **per-launch token**:
+
+- On every launch Electron generates a random 256-bit token
+  (`generateBackendToken` in `src/electron/backend.js`). It passes the token
+  to the backend in the `DESKRECAP_API_TOKEN` env var, and to its own two
+  windows through the preload bridge (`window.BACKEND_CONFIG.token`). The
+  token is never written to disk.
+- Every request, `/health` included, must send it as the
+  `X-DeskRecap-Token` header, or it gets `401`. `src/ui/api.ts`'s
+  `backendFetch` adds the header for the renderers. Electron's own
+  health/watchdog/quit-guard probes send it too.
+- A request with an `Origin` header that isn't in `ALLOWED_ORIGINS` gets
+  `403`, even when it has a valid token.
+- `ALLOWED_ORIGINS` is empty by default. The packaged app loads its pages
+  from `file://`, and Electron sends no `Origin` header (and applies no CORS)
+  for those requests, so it needs no CORS allowance. `"null"` is never
+  honoured, because sandboxed iframes on any site send `Origin: null`.
+- Saved secrets (the HuggingFace token and the custom-provider API key) are
+  write-only. `GET`/`PATCH /settings` return only `huggingface_token_set` /
+  `custom_api_key_set` booleans, never the values.
+
+Other processes running as the same OS user are out of scope: they can read
+the backend's environment or the settings file directly. **The app should
+never be exposed to a network** (don't change the bind host to `0.0.0.0`,
+port-forward it, or put it behind a reverse proxy).
 
 ## Getting started (development)
 
@@ -83,6 +102,25 @@ which calls `main()` and binds the server to `127.0.0.1` only (port `8000` by
 default, override with the `PORT` env var). Prefer this over hand-typing
 `uvicorn app.server:app --reload --port 8000`, since that command does not
 enforce the localhost-only bind.
+
+Run this way, without Electron, there is no `DESKRECAP_API_TOKEN`. The
+backend then prints a warning at startup together with a random token it
+generated for that run, and still rejects any request that doesn't send it.
+To use a fixed token instead, set it yourself:
+
+```
+cd backend && DESKRECAP_API_TOKEN=dev-token python -m app.server
+curl -H 'X-DeskRecap-Token: dev-token' http://127.0.0.1:8000/health
+```
+
+To point the plain-browser Vite dev server (`npm run dev:react`) at that
+backend, allow its origin on the backend and give the renderer the same
+token:
+
+```
+cd backend && DESKRECAP_API_TOKEN=dev-token ALLOWED_ORIGINS=http://localhost:5173 python -m app.server
+VITE_DESKRECAP_API_TOKEN=dev-token npm run dev:react
+```
 
 ## Building an installer
 

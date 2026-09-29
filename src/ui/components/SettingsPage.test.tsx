@@ -17,10 +17,10 @@ const baseSettings: Settings = {
   ollama_chat_model: "gemma3:4b",
   custom_vocabulary: "",
   advanced_diarization_enabled: false,
-  huggingface_token: "",
+  huggingface_token_set: false,
   ai_provider: "ollama",
   custom_api_base_url: "",
-  custom_api_key: "",
+  custom_api_key_set: false,
   custom_model_name: "",
   whisper_model_choices: [
     { value: "tiny.en", label: "Tiny", description: "Fastest, lower accuracy" },
@@ -404,7 +404,7 @@ it("rolls back the diarization toggle and shows an error when the save fails", a
 it("saves an edited HuggingFace token", async () => {
   vi.mocked(updateSettings).mockResolvedValue({
     ...baseSettings,
-    huggingface_token: "hf_abc123",
+    huggingface_token_set: true,
   });
 
   render(<SettingsPage active />);
@@ -418,13 +418,38 @@ it("saves an edited HuggingFace token", async () => {
   await waitFor(() => {
     expect(updateSettings).toHaveBeenCalledWith({ huggingface_token: "hf_abc123" });
   });
+  // The saved value is never echoed back into the field.
+  await waitFor(() => expect(tokenInput).toHaveValue(""));
+  expect(screen.getByText(/a token is saved/i)).toBeInTheDocument();
+});
+
+it("shows a saved HuggingFace token as set without its value, and can clear it", async () => {
+  vi.mocked(getSettings).mockResolvedValue({ ...baseSettings, huggingface_token_set: true });
+  vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, huggingface_token_set: false });
+
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("Diarization");
+
+  const tokenInput = await screen.findByLabelText(/huggingface access token/i);
+  expect(tokenInput).toHaveValue("");
+  expect(tokenInput).toHaveAttribute("placeholder", expect.stringMatching(/saved/i));
+  expect(screen.getByRole("button", { name: /save token/i })).toBeDisabled();
+
+  fireEvent.click(screen.getByRole("button", { name: /clear token/i }));
+  await waitFor(() => {
+    expect(updateSettings).toHaveBeenCalledWith({ huggingface_token: "" });
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("button", { name: /clear token/i })).not.toBeInTheDocument();
+  });
 });
 
 it("does not warn about a missing token once diarization is enabled and a token is already saved", async () => {
   vi.mocked(getSettings).mockResolvedValue({
     ...baseSettings,
     advanced_diarization_enabled: true,
-    huggingface_token: "hf_existing",
+    huggingface_token_set: true,
   });
 
   render(<SettingsPage active />);
@@ -482,7 +507,7 @@ it("saves the custom provider connection fields together", async () => {
     ...baseSettings,
     ai_provider: "custom",
     custom_api_base_url: "https://api.openai.com/v1",
-    custom_api_key: "sk-test",
+    custom_api_key_set: true,
     custom_model_name: "gpt-4o-mini",
   });
 
@@ -502,5 +527,59 @@ it("saves the custom provider connection fields together", async () => {
       custom_api_key: "sk-test",
       custom_model_name: "gpt-4o-mini",
     });
+  });
+  await waitFor(() => expect(screen.getByLabelText(/^api key$/i)).toHaveValue(""));
+  expect(screen.getByText(/an api key is saved/i)).toBeInTheDocument();
+});
+
+it("keeps a saved API key when the connection is saved with the key field left empty", async () => {
+  vi.mocked(getSettings).mockResolvedValue({
+    ...baseSettings,
+    ai_provider: "custom",
+    custom_api_key_set: true,
+  });
+  vi.mocked(updateSettings).mockResolvedValue({
+    ...baseSettings,
+    ai_provider: "custom",
+    custom_api_key_set: true,
+    custom_model_name: "gpt-4o",
+  });
+
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("AI Model");
+
+  const keyInput = await screen.findByLabelText(/^api key$/i);
+  expect(keyInput).toHaveValue("");
+  expect(keyInput).toHaveAttribute("placeholder", expect.stringMatching(/saved/i));
+  fireEvent.change(screen.getByLabelText(/model name/i), { target: { value: "gpt-4o" } });
+  fireEvent.click(screen.getByRole("button", { name: /save connection/i }));
+
+  await waitFor(() => {
+    expect(updateSettings).toHaveBeenCalledWith({
+      custom_api_base_url: "",
+      custom_model_name: "gpt-4o",
+    });
+  });
+});
+
+it("clears a saved API key", async () => {
+  vi.mocked(getSettings).mockResolvedValue({
+    ...baseSettings,
+    ai_provider: "custom",
+    custom_api_key_set: true,
+  });
+  vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, ai_provider: "custom" });
+
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("AI Model");
+
+  fireEvent.click(await screen.findByRole("button", { name: /clear key/i }));
+  await waitFor(() => {
+    expect(updateSettings).toHaveBeenCalledWith({ custom_api_key: "" });
+  });
+  await waitFor(() => {
+    expect(screen.queryByText(/an api key is saved/i)).not.toBeInTheDocument();
   });
 });

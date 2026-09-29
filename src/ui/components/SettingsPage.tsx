@@ -116,9 +116,10 @@ export default function SettingsPage({ active }: { active: boolean }) {
         if (!cancelled) {
           setSettings(s);
           setVocabularyDraft(s.custom_vocabulary);
-          setTokenDraft(s.huggingface_token);
+          // No token/API-key drafts to seed: the backend never sends the
+          // saved secrets back (only *_set flags), so those inputs always
+          // start empty and only ever carry a replacement value.
           setBaseUrlDraft(s.custom_api_base_url);
-          setApiKeyDraft(s.custom_api_key);
           setCustomModelDraft(s.custom_model_name);
         }
       })
@@ -232,13 +233,27 @@ export default function SettingsPage({ active }: { active: boolean }) {
     try {
       const updated = await updateSettings({
         custom_api_base_url: baseUrlDraft,
-        custom_api_key: apiKeyDraft,
+        // An empty key field means "keep the saved key" (it's never shown,
+        // so the field is always empty until the user types a new one);
+        // clearing it goes through handleClearApiKey instead.
+        ...(apiKeyDraft ? { custom_api_key: apiKeyDraft } : {}),
         custom_model_name: customModelDraft,
       });
       setSettings(updated);
       setBaseUrlDraft(updated.custom_api_base_url);
-      setApiKeyDraft(updated.custom_api_key);
+      setApiKeyDraft("");
       setCustomModelDraft(updated.custom_model_name);
+    } catch (e) {
+      setConnectionSaveError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleClearApiKey = async () => {
+    setConnectionSaveError(null);
+    try {
+      const updated = await updateSettings({ custom_api_key: "" });
+      setSettings(updated);
+      setApiKeyDraft("");
     } catch (e) {
       setConnectionSaveError(e instanceof Error ? e.message : String(e));
     }
@@ -268,12 +283,13 @@ export default function SettingsPage({ active }: { active: boolean }) {
     }
   };
 
-  const handleSaveToken = async () => {
+  // "" clears the saved token; any other value replaces it.
+  const saveToken = async (value: string) => {
     setTokenSaveError(null);
     try {
-      const updated = await updateSettings({ huggingface_token: tokenDraft });
+      const updated = await updateSettings({ huggingface_token: value });
       setSettings(updated);
-      setTokenDraft(updated.huggingface_token);
+      setTokenDraft("");
     } catch (e) {
       setTokenSaveError(e instanceof Error ? e.message : String(e));
     }
@@ -317,7 +333,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
     (usage.free_bytes < 5 * 1024 ** 3 || usage.free_bytes / usage.total_bytes < 0.1);
 
   const diarizationNeedsToken =
-    settings.advanced_diarization_enabled && !settings.huggingface_token;
+    settings.advanced_diarization_enabled && !settings.huggingface_token_set;
 
   const dotFor = (id: SectionId): DotTone => {
     switch (id) {
@@ -569,9 +585,20 @@ export default function SettingsPage({ active }: { active: boolean }) {
                   type="password"
                   value={apiKeyDraft}
                   onChange={(e) => setApiKeyDraft(e.target.value)}
-                  placeholder="sk-..."
+                  placeholder={settings.custom_api_key_set ? "Saved -- type a new key to replace it" : "sk-..."}
                   className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                 />
+                {settings.custom_api_key_set && (
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs text-dim">An API key is saved.</p>
+                    <button
+                      onClick={handleClearApiKey}
+                      className="px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                    >
+                      Clear key
+                    </button>
+                  </div>
+                )}
                 <label htmlFor="custom-model-name" className="text-xs text-dim">
                   Model name
                 </label>
@@ -639,15 +666,27 @@ export default function SettingsPage({ active }: { active: boolean }) {
               type="password"
               value={tokenDraft}
               onChange={(e) => setTokenDraft(e.target.value)}
-              placeholder="hf_..."
+              placeholder={settings.huggingface_token_set ? "Saved -- type a new token to replace it" : "hf_..."}
               className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
             />
-            <button
-              onClick={handleSaveToken}
-              className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-            >
-              Save token
-            </button>
+            {settings.huggingface_token_set && <p className="text-xs text-dim">A token is saved.</p>}
+            <div className="flex gap-2">
+              <button
+                onClick={() => saveToken(tokenDraft)}
+                disabled={!tokenDraft}
+                className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor disabled:opacity-40 disabled:hover:text-dim focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+              >
+                Save token
+              </button>
+              {settings.huggingface_token_set && (
+                <button
+                  onClick={() => saveToken("")}
+                  className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                >
+                  Clear token
+                </button>
+              )}
+            </div>
             {tokenSaveError && <p className="text-xs text-red-400">{tokenSaveError}</p>}
           </section>
         )}

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -5,6 +6,23 @@ import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+
+// Per-launch shared secret between this process, the backend and the
+// renderers (see ApiAuthMiddleware in backend/app/server.py): the backend
+// listens on 127.0.0.1, which every web page the user visits can also
+// reach, so it only trusts requests that echo this back in
+// BACKEND_TOKEN_HEADER. Handed to the backend via BACKEND_TOKEN_ENV and to
+// the renderers via preload.js; never written to disk.
+export const BACKEND_TOKEN_ENV = 'DESKRECAP_API_TOKEN';
+export const BACKEND_TOKEN_HEADER = 'X-DeskRecap-Token';
+
+export function generateBackendToken() {
+    return crypto.randomBytes(32).toString('hex');
+}
+
+export function backendAuthHeaders(token) {
+    return token ? { [BACKEND_TOKEN_HEADER]: token } : {};
+}
 
 export function resolveVenvPython(projectRoot, platform = process.platform) {
     const venvDir = path.join(projectRoot, '.venv');
@@ -252,7 +270,10 @@ export async function ensurePortFree(
 
 export const HEALTH_ATTEMPT_TIMEOUT_MS = 3000;
 
-export function waitForHealth(url, timeoutMs, childProcess = null) {
+// authToken is required against a real backend -- /health is not exempt
+// from the token check, which also means a 200 here proves the port is held
+// by the backend this launch spawned, not some other process.
+export function waitForHealth(url, timeoutMs, childProcess = null, authToken = null) {
     const start = Date.now();
     return new Promise((resolve, reject) => {
         let settled = false;
@@ -293,7 +314,10 @@ export function waitForHealth(url, timeoutMs, childProcess = null) {
             const remainingMs = timeoutMs - (Date.now() - start);
             const attemptTimeoutMs = Math.max(1, Math.min(HEALTH_ATTEMPT_TIMEOUT_MS, remainingMs));
             try {
-                const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(attemptTimeoutMs) });
+                const res = await fetch(`${url}/health`, {
+                    headers: backendAuthHeaders(authToken),
+                    signal: AbortSignal.timeout(attemptTimeoutMs),
+                });
                 if (res.ok) {
                     finish(resolve);
                     return;

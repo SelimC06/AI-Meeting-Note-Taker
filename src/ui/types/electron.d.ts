@@ -75,7 +75,9 @@ declare global {
     // The port the backend actually bound to -- normally 8000, but a fallback
     // port when that was held by a foreign process (see main.js's
     // resolveBackendPort / ensurePortFree). null outside Electron (e.g. tests).
-    BACKEND_CONFIG?: { port: number | null };
+    // token: the per-launch backend API token, sent on every request as
+    // X-DeskRecap-Token (see api.ts's backendFetch).
+    BACKEND_CONFIG?: { port: number | null; token?: string | null };
     windowControls?: {
       minimize: () => void;
       close: () => void;

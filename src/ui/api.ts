@@ -30,11 +30,32 @@ export const BACKEND_URL =
   import.meta.env.VITE_MEETING_API_URL ??
   `http://127.0.0.1:${window.BACKEND_CONFIG?.port ?? 8000}`;
 
+export const BACKEND_TOKEN_HEADER = "X-DeskRecap-Token";
+
+// The backend rejects (401) every request without the per-launch token main.js
+// generated -- 127.0.0.1 is reachable from any web page the user visits, so
+// the token is what proves a request came from this app. Electron hands it
+// over via window.BACKEND_CONFIG (preload.js); VITE_DESKRECAP_API_TOKEN covers
+// the plain-vite-dev-server case (matching DESKRECAP_API_TOKEN on the backend,
+// see README). Read per call rather than once at import so a test can set it.
+function backendToken(): string | null {
+  return window.BACKEND_CONFIG?.token ?? import.meta.env.VITE_DESKRECAP_API_TOKEN ?? null;
+}
+
+// Every request to the backend goes through this -- including the streaming
+// chat and export downloads -- so none of them can forget the token header.
+export function backendFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const token = backendToken();
+  if (token) headers.set(BACKEND_TOKEN_HEADER, token);
+  return fetch(input, { ...init, headers });
+}
+
 export async function getSessions(includeTrashed = false): Promise<Session[]> {
   const url = includeTrashed
     ? `${BACKEND_URL}/sessions?include_trashed=true`
     : `${BACKEND_URL}/sessions`;
-  const resp = await fetch(url);
+  const resp = await backendFetch(url);
   if (!resp.ok) {
     throw new Error(`Failed to load sessions: ${resp.status}`);
   }
@@ -43,7 +64,7 @@ export async function getSessions(includeTrashed = false): Promise<Session[]> {
 
 export async function checkHealth(): Promise<boolean> {
   try {
-    const resp = await fetch(`${BACKEND_URL}/health`);
+    const resp = await backendFetch(`${BACKEND_URL}/health`);
     return resp.ok;
   } catch {
     return false;
@@ -58,7 +79,7 @@ export type HealthStatus = {
 
 export async function getHealthStatus(): Promise<HealthStatus> {
   try {
-    const resp = await fetch(`${BACKEND_URL}/health`);
+    const resp = await backendFetch(`${BACKEND_URL}/health`);
     if (!resp.ok) return { ok: false, backend: false, ollama: false };
     const data = (await resp.json()) as Partial<HealthStatus>;
     return {
@@ -79,7 +100,7 @@ export async function* streamChatReply(
   history: ChatTurn[],
   signal?: AbortSignal
 ): AsyncGenerator<string> {
-  const resp = await fetch(`${BACKEND_URL}/chat/${sessionId}`, {
+  const resp = await backendFetch(`${BACKEND_URL}/chat/${sessionId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, history }),
@@ -150,7 +171,7 @@ export async function* streamGraphChatReply(
   history: ChatTurn[],
   signal?: AbortSignal
 ): AsyncGenerator<GraphChatEvent> {
-  const resp = await fetch(`${BACKEND_URL}/graph/chat`, {
+  const resp = await backendFetch(`${BACKEND_URL}/graph/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, history }),
@@ -228,19 +249,27 @@ export type Settings = {
   // optional, heavier feature that requires a HuggingFace access token to
   // download the (gated) model weights.
   advanced_diarization_enabled: boolean;
-  huggingface_token: string;
+  // Secrets are write-only: the backend never returns their values, only
+  // whether one is saved. Send the value via updateSettings to replace it,
+  // or "" to clear it.
+  huggingface_token_set: boolean;
   // Custom (3rd-party, OpenAI-compatible) LLM provider. Off by default --
   // Ollama stays the default provider for chat, summarization, and
   // knowledge-graph extraction.
   ai_provider: "ollama" | "custom";
   custom_api_base_url: string;
-  custom_api_key: string;
+  custom_api_key_set: boolean;
   custom_model_name: string;
   whisper_model_choices: WhisperModelChoice[];
 };
 
+export type SettingsSecrets = {
+  huggingface_token: string;
+  custom_api_key: string;
+};
+
 export async function getSettings(): Promise<Settings> {
-  const resp = await fetch(`${BACKEND_URL}/settings`);
+  const resp = await backendFetch(`${BACKEND_URL}/settings`);
   if (!resp.ok) {
     throw new Error(`Failed to load settings: ${resp.status}`);
   }
@@ -256,15 +285,14 @@ export async function updateSettings(
       | "ollama_chat_model"
       | "custom_vocabulary"
       | "advanced_diarization_enabled"
-      | "huggingface_token"
       | "ai_provider"
       | "custom_api_base_url"
-      | "custom_api_key"
       | "custom_model_name"
-    >
+    > &
+      SettingsSecrets
   >
 ): Promise<Settings> {
-  const resp = await fetch(`${BACKEND_URL}/settings`, {
+  const resp = await backendFetch(`${BACKEND_URL}/settings`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(partial),
@@ -284,7 +312,7 @@ export type OllamaModelsResult = {
 
 export async function getOllamaModels(): Promise<OllamaModelsResult> {
   try {
-    const resp = await fetch(`${BACKEND_URL}/ollama/models`);
+    const resp = await backendFetch(`${BACKEND_URL}/ollama/models`);
     if (!resp.ok) {
       return { ok: false, models: [], error: `Request failed: ${resp.status}` };
     }
@@ -295,7 +323,7 @@ export async function getOllamaModels(): Promise<OllamaModelsResult> {
 }
 
 export async function renameSession(id: string, title: string): Promise<Session> {
-  const resp = await fetch(`${BACKEND_URL}/sessions/${id}`, {
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
@@ -308,7 +336,7 @@ export async function renameSession(id: string, title: string): Promise<Session>
 }
 
 export async function trashSession(id: string): Promise<Session> {
-  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/trash`, { method: "POST" });
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}/trash`, { method: "POST" });
   if (!resp.ok) {
     throw new Error(`Failed to trash session: ${resp.status}`);
   }
@@ -316,7 +344,7 @@ export async function trashSession(id: string): Promise<Session> {
 }
 
 export async function restoreSession(id: string): Promise<Session> {
-  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/restore`, { method: "POST" });
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}/restore`, { method: "POST" });
   if (!resp.ok) {
     throw new Error(`Failed to restore session: ${resp.status}`);
   }
@@ -324,7 +352,7 @@ export async function restoreSession(id: string): Promise<Session> {
 }
 
 export async function deleteSessionForever(id: string): Promise<void> {
-  const resp = await fetch(`${BACKEND_URL}/sessions/${id}`, { method: "DELETE" });
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}`, { method: "DELETE" });
   if (!resp.ok) {
     throw new Error(`Failed to delete session: ${resp.status}`);
   }
@@ -351,7 +379,7 @@ export type TranscriptSegment = {
 };
 
 export async function getSessionTranscript(id: string): Promise<TranscriptSegment[]> {
-  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/transcript`);
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}/transcript`);
   if (!resp.ok) {
     throw new Error(`Failed to load transcript: ${resp.status}`);
   }
@@ -367,7 +395,7 @@ export async function updateSpeakerNames(
   id: string,
   names: Record<string, string>
 ): Promise<Record<string, string>> {
-  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/speaker-names`, {
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}/speaker-names`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ names }),
@@ -392,7 +420,7 @@ export type ActionItem = {
 };
 
 export async function getSessionActionItems(id: string): Promise<ActionItem[] | null> {
-  const resp = await fetch(`${BACKEND_URL}/sessions/${id}/action-items`);
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}/action-items`);
   if (!resp.ok) {
     throw new Error(`Failed to load action items: ${resp.status}`);
   }
@@ -417,7 +445,7 @@ export type StorageUsage = {
 };
 
 export async function getStorageUsage(): Promise<StorageUsage> {
-  const resp = await fetch(`${BACKEND_URL}/storage/usage`);
+  const resp = await backendFetch(`${BACKEND_URL}/storage/usage`);
   if (!resp.ok) {
     throw new Error(`Failed to load storage usage: ${resp.status}`);
   }
@@ -438,7 +466,7 @@ export type JobStatus = {
 export async function startProcessing(
   formData: FormData
 ): Promise<{ job_id: string; session_id: string }> {
-  const resp = await fetch(`${BACKEND_URL}/process`, {
+  const resp = await backendFetch(`${BACKEND_URL}/process`, {
     method: "POST",
     body: formData,
   });
@@ -459,7 +487,7 @@ export async function startProcessing(
 }
 
 export async function getJobStatus(jobId: string): Promise<JobStatus> {
-  const resp = await fetch(`${BACKEND_URL}/jobs/${jobId}`);
+  const resp = await backendFetch(`${BACKEND_URL}/jobs/${jobId}`);
   if (!resp.ok) {
     throw new Error(`Failed to fetch job status: ${resp.status}`);
   }
@@ -467,7 +495,7 @@ export async function getJobStatus(jobId: string): Promise<JobStatus> {
 }
 
 export async function listJobs(): Promise<JobStatus[]> {
-  const resp = await fetch(`${BACKEND_URL}/jobs`);
+  const resp = await backendFetch(`${BACKEND_URL}/jobs`);
   if (!resp.ok) {
     throw new Error(`Failed to list jobs: ${resp.status}`);
   }

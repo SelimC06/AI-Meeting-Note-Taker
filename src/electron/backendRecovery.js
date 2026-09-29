@@ -23,6 +23,10 @@ export async function attemptRecovery({
     cwd,
     env,
     backendUrl,
+    // The same per-launch token is reused for every respawn (it's already
+    // in `env`): the renderers read it once at load, so a new token here
+    // would lock them out of the recovered backend.
+    authToken = null,
     mainWindow,
     logDir,
     crashInfo = null,
@@ -72,13 +76,13 @@ export async function attemptRecovery({
                     await stopBackend();
                     return;
                 }
-                await waitForHealth(backendUrl, healthTimeoutMs, child);
+                await waitForHealth(backendUrl, healthTimeoutMs, child, authToken);
                 if (isShuttingDown()) {
                     await stopBackend();
                     return;
                 }
                 armCrashMonitor(child, (code, signal) => {
-                    attemptRecovery({ pythonExe, args, cwd, env, backendUrl, mainWindow, logDir, crashInfo: { exitCode: code, signal }, delays, healthTimeoutMs, isShuttingDown, onStatus });
+                    attemptRecovery({ pythonExe, args, cwd, env, backendUrl, authToken, mainWindow, logDir, crashInfo: { exitCode: code, signal }, delays, healthTimeoutMs, isShuttingDown, onStatus });
                 });
                 publish({ state: 'up' });
                 return;

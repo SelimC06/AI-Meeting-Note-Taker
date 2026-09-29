@@ -14,6 +14,9 @@ from fastapi.testclient import TestClient
 import app.server as server_module
 from app.server import app
 
+TEST_API_TOKEN = "test-token-" + "0" * 53
+AUTH_HEADERS = {server_module.API_TOKEN_HEADER: TEST_API_TOKEN}
+
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
@@ -46,10 +49,36 @@ def client(tmp_path, monkeypatch):
     # itself monkeypatch llava_extract_action_items again after this fixture
     # runs.
     monkeypatch.setattr(server_module, "llava_extract_action_items", lambda **kwargs: None)
+    # Pin the per-launch API token so every request below can send it --
+    # ApiAuthMiddleware 401s anything without it, /health included.
+    monkeypatch.setattr(server_module, "API_TOKEN", TEST_API_TOKEN)
     # base_url must be an allowed TrustedHostMiddleware host -- the default
     # "http://testserver" would otherwise get rejected with 400 before
     # reaching any route, since only localhost/127.0.0.1 are allowed.
-    return TestClient(app, base_url="http://127.0.0.1")
+    return TestClient(app, base_url="http://127.0.0.1", headers=AUTH_HEADERS)
+
+
+@pytest.fixture()
+def allow_origin(monkeypatch):
+    """Allow-lists an origin the way ALLOWED_ORIGINS would at startup.
+
+    Patches both server_module.ORIGINS (read per request by
+    ApiAuthMiddleware) and, in place, the list CORSMiddleware was handed
+    when `app` was built -- a module reload elsewhere in this file rebinds
+    ORIGINS to a new list the already-built middleware never sees.
+    """
+    from fastapi.middleware.cors import CORSMiddleware
+
+    cors = next(m for m in app.user_middleware if m.cls is CORSMiddleware)
+    cors_origins = cors.kwargs["allow_origins"]
+    saved = list(cors_origins)
+
+    def _allow(origin: str) -> None:
+        monkeypatch.setattr(server_module, "ORIGINS", [origin])
+        cors_origins[:] = [origin]
+
+    yield _allow
+    cors_origins[:] = saved
 
 
 import time
@@ -158,7 +187,11 @@ def test_health_survives_a_purge_expired_trash_failure_at_import_time(tmp_path, 
 
     try:
         reloaded = importlib.reload(server_module)
-        client = TestClient(reloaded.app, base_url="http://127.0.0.1")
+        client = TestClient(
+            reloaded.app,
+            base_url="http://127.0.0.1",
+            headers={reloaded.API_TOKEN_HEADER: reloaded.API_TOKEN},
+        )
         resp = client.get("/health")
         assert resp.status_code == 200
     finally:
@@ -220,11 +253,99 @@ def test_trusted_host_middleware_allows_localhost_and_127_0_0_1(client: TestClie
         assert resp.status_code == 200, f"Host: {host} was unexpectedly rejected"
 
 
-def test_lifespan_starts_and_cleanly_cancels_the_daily_purge_task():
+def test_requests_without_the_api_token_are_rejected(client: TestClient):
+    """Any web page the user visits can reach 127.0.0.1 -- the per-launch
+    token is what proves a request came from this app's own renderers.
+    /health is covered too (Electron's own probes send the token).
+    """
+    for path in ("/health", "/sessions", "/settings", "/jobs"):
+        resp = client.get(path, headers={server_module.API_TOKEN_HEADER: ""})
+        assert resp.status_code == 401, path
+    resp = client.get("/settings", headers={server_module.API_TOKEN_HEADER: "wrong"})
+    assert resp.status_code == 401
+    # A header-less TestClient, i.e. nothing sent at all.
+    bare = TestClient(app, base_url="http://127.0.0.1")
+    assert bare.get("/health").status_code == 401
+
+
+def test_cross_site_multipart_upload_is_rejected_before_the_handler_runs(client: TestClient, monkeypatch):
+    """The CSRF this guards against: a malicious page POSTs multipart/form-data
+    to /process. Browsers send that cross-origin with no preflight, so it
+    must be refused on the server side -- by the Origin check and, even
+    without an Origin, by the missing token.
+    """
+    def upload():
+        return {"screen": ("screen.webm", io.BytesIO(b"x" * 100), "video/webm")}
+
+    # Token-less, the way a malicious page's request actually arrives.
+    resp = client.post(
+        "/process",
+        files=upload(),
+        headers={"Origin": "https://evil.example", server_module.API_TOKEN_HEADER: ""},
+    )
+    assert resp.status_code == 403
+    # Even a valid token doesn't help a foreign origin.
+    resp = client.post("/process", files=upload(), headers={"Origin": "https://evil.example"})
+    assert resp.status_code == 403
+    # No Origin at all (e.g. a non-browser client) still needs the token.
+    resp = client.post("/process", files=upload(), headers={server_module.API_TOKEN_HEADER: ""})
+    assert resp.status_code == 401
+
+    assert client.get("/sessions").json() == []
+    assert client.get("/jobs").json() == []
+
+
+def test_disallowed_origin_is_rejected_even_with_a_valid_token(client: TestClient):
+    for origin in ("https://evil.example", "http://localhost:5173", "http://localhost:3000", "null"):
+        resp = client.get("/settings", headers={"Origin": origin})
+        assert resp.status_code == 403, origin
+
+
+def test_allow_listed_origin_passes_and_gets_cors_headers(client: TestClient, allow_origin):
+    allow_origin("http://localhost:5173")
+    resp = client.get("/settings", headers={"Origin": "http://localhost:5173"})
+    assert resp.status_code == 200
+    assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+def test_default_allowed_origins_are_empty_and_never_include_null(monkeypatch):
+    import importlib
+
+    monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
+    try:
+        reloaded = importlib.reload(server_module)
+        assert reloaded.ORIGINS == []
+        monkeypatch.setenv("ALLOWED_ORIGINS", "null, http://localhost:5173")
+        reloaded = importlib.reload(server_module)
+        assert reloaded.ORIGINS == ["http://localhost:5173"]
+    finally:
+        monkeypatch.undo()
+        importlib.reload(server_module)
+
+
+def test_api_token_comes_from_env_or_is_generated(monkeypatch, capsys):
+    import importlib
+
+    try:
+        monkeypatch.setenv("DESKRECAP_API_TOKEN", "from-electron")
+        assert importlib.reload(server_module).API_TOKEN == "from-electron"
+
+        monkeypatch.delenv("DESKRECAP_API_TOKEN")
+        capsys.readouterr()
+        generated = importlib.reload(server_module).API_TOKEN
+        assert len(generated) == 64
+        assert "WARNING: DESKRECAP_API_TOKEN is not set" in capsys.readouterr().out
+    finally:
+        monkeypatch.undo()
+        importlib.reload(server_module)
+
+
+def test_lifespan_starts_and_cleanly_cancels_the_daily_purge_task(monkeypatch):
     """The daily-purge background task must not prevent clean startup/
     shutdown, and must not leak as a still-running task after shutdown.
     """
-    with TestClient(app, base_url="http://127.0.0.1") as c:
+    monkeypatch.setattr(server_module, "API_TOKEN", TEST_API_TOKEN)
+    with TestClient(app, base_url="http://127.0.0.1", headers=AUTH_HEADERS) as c:
         resp = c.get("/health")
         assert resp.status_code == 200
 
@@ -1245,7 +1366,7 @@ def test_process_rejects_oversized_upload_without_content_length(client, monkeyp
     assert resp.status_code == 413
 
 
-def test_process_413_response_includes_cors_header(client, monkeypatch):
+def test_process_413_response_includes_cors_header(client, monkeypatch, allow_origin):
     """
     Regression test: the 413 short-circuit from MaxUploadSizeMiddleware must
     still carry CORS headers, otherwise the browser blocks the response
@@ -1253,6 +1374,9 @@ def test_process_413_response_includes_cors_header(client, monkeypatch):
     the 413 status.
     """
     monkeypatch.setattr(server_module, "MAX_UPLOAD_BYTES", 10)  # tiny cap for the test
+    # localhost:5173 is no longer allowed by default -- opt in the way a
+    # `npm run dev:react` setup does via ALLOWED_ORIGINS.
+    allow_origin("http://localhost:5173")
     resp = client.post(
         "/process",
         files={"screen": ("screen.webm", io.BytesIO(b"x" * 1000), "video/webm")},
@@ -1682,7 +1806,8 @@ def test_get_settings_includes_advanced_diarization_fields(client: TestClient):
     resp = client.get("/settings")
     body = resp.json()
     assert body["advanced_diarization_enabled"] is False
-    assert body["huggingface_token"] == ""
+    assert "huggingface_token" not in body
+    assert body["huggingface_token_set"] is False
 
 
 def test_patch_settings_updates_advanced_diarization_enabled(client: TestClient):
@@ -1700,13 +1825,21 @@ def test_patch_settings_updates_advanced_diarization_enabled(client: TestClient)
 def test_patch_settings_updates_huggingface_token(client: TestClient):
     resp = client.patch("/settings", json={"huggingface_token": "hf_abc123"})
     assert resp.status_code == 200
-    assert resp.json()["huggingface_token"] == "hf_abc123"
+    # Saved, but never echoed back -- only its "is set" flag is.
+    assert "hf_abc123" not in resp.text
+    assert resp.json()["huggingface_token_set"] is True
 
     import app.server as server_module
     assert server_module.HUGGINGFACE_TOKEN == "hf_abc123"
 
     resp2 = client.get("/settings")
-    assert resp2.json()["huggingface_token"] == "hf_abc123"
+    assert "hf_abc123" not in resp2.text
+    assert resp2.json()["huggingface_token_set"] is True
+
+    # An empty string clears it.
+    resp3 = client.patch("/settings", json={"huggingface_token": ""})
+    assert resp3.json()["huggingface_token_set"] is False
+    assert server_module.HUGGINGFACE_TOKEN == ""
 
 
 def test_patch_settings_updates_ollama_chat_model(client: TestClient):
@@ -1723,7 +1856,8 @@ def test_get_settings_includes_custom_provider_fields(client: TestClient):
     body = resp.json()
     assert body["ai_provider"] == "ollama"
     assert body["custom_api_base_url"] == ""
-    assert body["custom_api_key"] == ""
+    assert "custom_api_key" not in body
+    assert body["custom_api_key_set"] is False
     assert body["custom_model_name"] == ""
 
 
@@ -1741,7 +1875,8 @@ def test_patch_settings_updates_custom_provider_fields(client: TestClient):
     body = resp.json()
     assert body["ai_provider"] == "custom"
     assert body["custom_api_base_url"] == "https://api.openai.com/v1"
-    assert body["custom_api_key"] == "sk-test"
+    assert "sk-test" not in resp.text
+    assert body["custom_api_key_set"] is True
     assert body["custom_model_name"] == "gpt-4o-mini"
 
     import app.server as server_module

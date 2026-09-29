@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { exportSessionNotesUrl, exportSessionZipUrl, type Session } from "../api";
+import { backendFetch, exportSessionNotesUrl, exportSessionZipUrl, type Session } from "../api";
 
 interface Props {
   session: Session;
@@ -25,7 +25,9 @@ const MENU_HEIGHT_ESTIMATE = 200;
 // downloaded through a throwaway object-URL link instead.
 async function exportViaFetch(url: string, label: string, onExportError: (message: string) => void) {
   try {
-    const resp = await fetch(url);
+    // backendFetch, not fetch: the export endpoints need the API token too
+    // (another reason a plain <a href> can't work -- it can't send headers).
+    const resp = await backendFetch(url);
     if (!resp.ok) {
       onExportError(`Couldn't export ${label} — request failed: ${resp.status}`);
       return;

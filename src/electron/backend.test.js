@@ -6,7 +6,41 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { resolveVenvPython, resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, waitForHealth, HEALTH_ATTEMPT_TIMEOUT_MS, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree, getProcessExecutablePath, findPidsListeningOnPort } from './backend.js';
+import { resolveVenvPython, resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, waitForHealth, HEALTH_ATTEMPT_TIMEOUT_MS, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree, getProcessExecutablePath, findPidsListeningOnPort, generateBackendToken, backendAuthHeaders, BACKEND_TOKEN_HEADER, BACKEND_TOKEN_ENV } from './backend.js';
+
+test('generateBackendToken returns a fresh 256-bit hex token each call', () => {
+    const a = generateBackendToken();
+    const b = generateBackendToken();
+    assert.match(a, /^[0-9a-f]{64}$/);
+    assert.notEqual(a, b);
+});
+
+test('backendAuthHeaders carries the token under the header the backend checks', () => {
+    // Must match API_TOKEN_HEADER / API_TOKEN_ENV in backend/app/server.py.
+    assert.equal(BACKEND_TOKEN_HEADER, 'X-DeskRecap-Token');
+    assert.equal(BACKEND_TOKEN_ENV, 'DESKRECAP_API_TOKEN');
+    assert.deepEqual(backendAuthHeaders('abc'), { 'X-DeskRecap-Token': 'abc' });
+    assert.deepEqual(backendAuthHeaders(null), {});
+});
+
+test('waitForHealth sends the backend token on its /health probe', async () => {
+    const seen = [];
+    const server = http.createServer((req, res) => {
+        seen.push(req.headers['x-deskrecap-token']);
+        res.writeHead(req.headers['x-deskrecap-token'] === 'tok' ? 200 : 401);
+        res.end();
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const url = `http://127.0.0.1:${server.address().port}`;
+    try {
+        await waitForHealth(url, 2000, null, 'tok');
+        assert.equal(seen[0], 'tok');
+        // Without the token the backend's 401 never counts as healthy.
+        await assert.rejects(waitForHealth(url, 700), /did not become healthy/);
+    } finally {
+        server.close();
+    }
+});
 
 function makeTmpProjectRoot() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'backend-test-'));

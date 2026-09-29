@@ -7,8 +7,20 @@ const { contextBridge, ipcRenderer} = require('electron');
 // (src/ui/api.ts) can point at wherever the backend actually ended up.
 const backendPortParam = new URL(location.href).searchParams.get('backendPort');
 
+// The per-launch backend token (see backend.js's generateBackendToken) --
+// every request the renderer makes must send it, or the backend answers
+// 401. Fetched synchronously so it's in place before api.ts first reads
+// BACKEND_CONFIG; main.js only answers this for its own windows.
+let backendToken = null;
+try {
+  backendToken = ipcRenderer.sendSync('backend:getToken');
+} catch (e) {
+  console.warn("[preload] backend getToken failed:", e);
+}
+
 contextBridge.exposeInMainWorld('BACKEND_CONFIG', {
   port: backendPortParam ? Number(backendPortParam) : null,
+  token: backendToken,
 });
 
 contextBridge.exposeInMainWorld('windowControls', {

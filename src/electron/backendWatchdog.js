@@ -7,6 +7,8 @@
 // path (attemptRecovery in backendRecovery.js) to kill and restart it once
 // enough consecutive probes fail.
 
+import { backendAuthHeaders } from './backend.js';
+
 export const WATCHDOG_FAILURE_THRESHOLD = 3;
 export const WATCHDOG_PROBE_TIMEOUT_MS = 3000;
 export const WATCHDOG_INTERVAL_MS = 5000;
@@ -29,9 +31,14 @@ export function nextWatchdogState(prevConsecutiveFailures, probeOk, threshold = 
 // AbortSignal.timeout guards against the exact gap this module exists to
 // close: a hung backend that accepts the TCP connection but never responds
 // would otherwise leave a plain fetch() pending forever.
-export async function probeHealthOnce(backendUrl, timeoutMs = WATCHDOG_PROBE_TIMEOUT_MS) {
+// authToken: the per-launch backend token -- without it /health answers 401,
+// which would read as "unhealthy" and get a perfectly fine backend killed.
+export async function probeHealthOnce(backendUrl, timeoutMs = WATCHDOG_PROBE_TIMEOUT_MS, authToken = null) {
     try {
-        const res = await fetch(`${backendUrl}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+        const res = await fetch(`${backendUrl}/health`, {
+            headers: backendAuthHeaders(authToken),
+            signal: AbortSignal.timeout(timeoutMs),
+        });
         return res.ok;
     } catch {
         return false;

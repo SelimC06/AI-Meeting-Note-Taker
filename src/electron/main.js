@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, ensurePortFree } from './backend.js';
+import { resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, ensurePortFree, generateBackendToken, backendAuthHeaders, BACKEND_TOKEN_ENV } from './backend.js';
 import { attemptRecovery, isRecovering } from './backendRecovery.js';
 import { nextWatchdogState, probeHealthOnce, WATCHDOG_INTERVAL_MS } from './backendWatchdog.js';
 import { armAutoUpdate, getLastStatus, installUpdate } from './updater.js';
@@ -152,6 +152,13 @@ let shuttingDown = false;
 // nearby fallback port was used instead. Threaded into each window's loadFile
 // query so the renderer's BACKEND_URL (src/ui/api.ts) points at the right port.
 let resolvedBackendPort = null;
+// Fresh on every launch and kept only in memory (see backend.js's
+// generateBackendToken for why the backend needs it). Deliberately NOT
+// threaded through loadFile's query string like the port above: the URL
+// ends up in crash logs, devtools and history, the token shouldn't.
+// Renderers fetch it over the synchronous backend:getToken IPC in
+// preload.js instead.
+const backendAuthToken = generateBackendToken();
 
 // Mirrors the height calculation in the rail:setErrorVisible handler below,
 // so the floating window sized during a drag (beginFloatDrag/dragMove)
@@ -1101,12 +1108,25 @@ function sendBackendStatus(payload) {
 
 ipcMain.handle('backend:getStatus', () => lastBackendStatus);
 
+// Synchronous (sendSync from preload.js) so window.BACKEND_CONFIG already
+// holds the token before any renderer code runs -- api.ts reads it at
+// module load. Only answered for this app's own two windows' top frames:
+// both only ever load bundled file:// pages (preventNavigation), so
+// nothing else should ever be asking.
+ipcMain.on('backend:getToken', (event) => {
+    const fromOwnWindow = [mainWindow, railWindow].some(
+        (w) => w && !w.isDestroyed() && w.webContents === event.sender
+    );
+    const isTopFrame = event.senderFrame && event.senderFrame === event.sender.mainFrame;
+    event.returnValue = fromOwnWindow && isTopFrame ? backendAuthToken : null;
+});
+
 function startHealthWatchdog() {
     stopHealthWatchdog();
     watchdogConsecutiveFailures = 0;
     watchdogTimer = setInterval(async () => {
         if (!recoveryConfig || isRecovering() || shuttingDown) return;
-        const ok = await probeHealthOnce(recoveryConfig.backendUrl);
+        const ok = await probeHealthOnce(recoveryConfig.backendUrl, undefined, backendAuthToken);
         const next = nextWatchdogState(watchdogConsecutiveFailures, ok);
         watchdogConsecutiveFailures = next.consecutiveFailures;
         if (next.shouldRestart) {
@@ -1200,6 +1220,7 @@ app.whenReady().then(async () => {
     const backendEnv = {
         ...process.env,
         PORT: String(backendPort),
+        [BACKEND_TOKEN_ENV]: backendAuthToken,
         ...(app.isPackaged ? {
             APP_DATA_DIR: app.getPath('userData'),
             ...(() => {
@@ -1236,6 +1257,7 @@ app.whenReady().then(async () => {
         cwd: backend.cwd,
         env: backendEnv,
         backendUrl: BACKEND_URL,
+        authToken: backendAuthToken,
         logDir: crashLogDir(),
         isShuttingDown: () => shuttingDown,
         // Recovery's own health wait must tolerate the same slow cold start
@@ -1259,7 +1281,7 @@ app.whenReady().then(async () => {
     });
 
     try {
-        await waitForHealth(BACKEND_URL, healthTimeoutMs, backendProcess);
+        await waitForHealth(BACKEND_URL, healthTimeoutMs, backendProcess, backendAuthToken);
         sendBackendStatus({ state: 'ready' });
         // Only armed once the backend has actually proven healthy at least
         // once (per-launch grace period) -- starting it unconditionally
@@ -1346,7 +1368,7 @@ ipcMain.handle('backend:restart', async () => {
     // Timed via AbortSignal (probeHealthOnce) -- a plain fetch with no
     // timeout would hang this handler forever against exactly the kind of
     // hung-but-accepting-connections backend this button exists to recover.
-    const ok = await probeHealthOnce(recoveryConfig.backendUrl);
+    const ok = await probeHealthOnce(recoveryConfig.backendUrl, undefined, backendAuthToken);
     if (ok) {
         // Already healthy -- don't spawn a second process on the same port,
         // but this is still a valid point to resume the watchdog if an
@@ -1363,7 +1385,10 @@ ipcMain.handle('backend:restart', async () => {
 // never block quitting, just skip the warning.
 async function fetchActiveJobsForQuitGuard() {
     try {
-        const res = await fetch(`${BACKEND_URL}/jobs`, { signal: AbortSignal.timeout(1500) });
+        const res = await fetch(`${BACKEND_URL}/jobs`, {
+            headers: backendAuthHeaders(backendAuthToken),
+            signal: AbortSignal.timeout(1500),
+        });
         if (!res.ok) return [];
         return await res.json();
     } catch {

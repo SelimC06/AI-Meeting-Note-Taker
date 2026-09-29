@@ -51,6 +51,24 @@ test('probeHealthOnce resolves true when /health responds ok', async () => {
     }
 });
 
+test('probeHealthOnce sends the backend token, and a 401 counts as unhealthy', async () => {
+    const port = await findFreePort();
+    const seen = [];
+    const server = http.createServer((req, res) => {
+        seen.push(req.headers['x-deskrecap-token']);
+        res.writeHead(req.headers['x-deskrecap-token'] === 'tok' ? 200 : 401);
+        res.end();
+    });
+    await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
+    try {
+        assert.equal(await probeHealthOnce(`http://127.0.0.1:${port}`, undefined, 'tok'), true);
+        assert.equal(await probeHealthOnce(`http://127.0.0.1:${port}`), false);
+        assert.deepEqual(seen, ['tok', undefined]);
+    } finally {
+        server.close();
+    }
+});
+
 test('probeHealthOnce resolves false when nothing is listening', async () => {
     const ok = await probeHealthOnce('http://127.0.0.1:1');
     assert.equal(ok, false);

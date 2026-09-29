@@ -1,6 +1,14 @@
 import { afterEach, expect, it, vi } from "vitest";
 import {
+  BACKEND_TOKEN_HEADER,
+  backendFetch,
+  checkHealth,
+  exportSessionZipUrl,
   getSessionTranscript,
+  getSettings,
+  listJobs,
+  startProcessing,
+  updateSettings,
   updateSpeakerNames,
   streamChatReply,
   streamGraphChatReply,
@@ -9,6 +17,57 @@ import {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  delete window.BACKEND_CONFIG;
+});
+
+function headersOf(fetchMock: ReturnType<typeof vi.fn>, call = 0): Headers {
+  const init = fetchMock.mock.calls[call][1] as RequestInit | undefined;
+  return new Headers(init?.headers);
+}
+
+it("sends the per-launch token from BACKEND_CONFIG on every kind of request", async () => {
+  window.BACKEND_CONFIG = { port: null, token: "launch-token" };
+  const fetchMock = vi.fn().mockImplementation(async () =>
+    new Response(JSON.stringify({ segments: [] }), { status: 200 })
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  await checkHealth();
+  await getSettings();
+  await listJobs();
+  await updateSettings({ whisper_model: "base.en" });
+  await startProcessing(new FormData());
+  await backendFetch(exportSessionZipUrl("s1"));
+  fetchMock.mockResolvedValueOnce(streamResponseFromChunks([new TextEncoder().encode("")]));
+  await collect(streamChatReply("s1", "hi", []));
+  fetchMock.mockResolvedValueOnce(streamResponseFromChunks([new TextEncoder().encode("")]));
+  await collectEvents(streamGraphChatReply("hi", []));
+
+  expect(fetchMock).toHaveBeenCalledTimes(8);
+  for (let i = 0; i < fetchMock.mock.calls.length; i++) {
+    expect(headersOf(fetchMock, i).get(BACKEND_TOKEN_HEADER), `call ${i}`).toBe("launch-token");
+  }
+});
+
+it("keeps caller headers (e.g. Content-Type) alongside the token", async () => {
+  window.BACKEND_CONFIG = { port: null, token: "launch-token" };
+  const fetchMock = vi.fn().mockResolvedValue(streamResponseFromChunks([new TextEncoder().encode("")]));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await collect(streamChatReply("s1", "hi", []));
+
+  const headers = headersOf(fetchMock);
+  expect(headers.get("Content-Type")).toBe("application/json");
+  expect(headers.get(BACKEND_TOKEN_HEADER)).toBe("launch-token");
+});
+
+it("omits the token header when no token is available (not an empty header)", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response("[]", { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await listJobs();
+
+  expect(headersOf(fetchMock).has(BACKEND_TOKEN_HEADER)).toBe(false);
 });
 
 // Builds a fetch Response whose body is a ReadableStream yielding the given
