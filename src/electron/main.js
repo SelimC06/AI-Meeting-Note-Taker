@@ -1,4 +1,4 @@
-import { app, BrowserWindow, screen, ipcMain, desktopCapturer, dialog, shell, session } from 'electron';
+import { app, BrowserWindow, Menu, screen, ipcMain, desktopCapturer, dialog, shell, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -21,10 +21,11 @@ import {
 import { computeResizedBounds } from './resizeGeometry.js';
 import { sanitizeCaptureSourceTypes } from './captureSources.js';
 import { distReactPath } from './paths.js';
-import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence } from './closeGuard.js';
+import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence, beforeQuitStep } from './closeGuard.js';
 import { sanitizeRailStatus, isValidSlotRect } from './railValidation.js';
 import { armProcessCrashLogging, logRendererCrash, logRendererError } from './crashLog.js';
 import { hasSeenRecordingConsentNotice, markRecordingConsentNoticeSeen } from './consentStore.js';
+import { buildAppMenuTemplate, isZoomShortcut } from './appMenu.js';
 
 let railErrorVisible = false;
 let isRailFloatDragging = false;
@@ -189,6 +190,9 @@ if (!gotSingleInstanceLock) {
     app.on('second-instance', () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
             if (mainWindow.isMinimized()) mainWindow.restore();
+            // On macOS the dashboard may only be hidden (see its 'close'
+            // handler), and focus() alone doesn't bring a hidden window back.
+            mainWindow.show();
             mainWindow.focus();
         }
     });
@@ -199,7 +203,7 @@ const __dirname  = path.dirname(__filename);
 
 function disableZoom(webContents) {
     webContents.on('before-input-event', (event, input) => {
-        if (input.control && ['=', '-', '0', '+'].includes(input.key)) {
+        if (isZoomShortcut(input, process.platform)) {
             event.preventDefault();
         }
     });
@@ -269,8 +273,11 @@ function popRailBackToDock() {
 // the dashboard's CURRENT bounds, computed fresh on every call rather than
 // once at drag-start — otherwise this would go stale if the dashboard
 // window moved (not just resized) since the rect was cached.
+// Also null while the dashboard is hidden (macOS Cmd+W, see its 'close'
+// handler): its bounds still exist, but "docking" the floating rail into an
+// invisible slot would make a live recording's only visible controls vanish.
 function currentDockSlotScreenRect() {
-    return lastDockSlotClientRect && mainWindow && !mainWindow.isDestroyed()
+    return lastDockSlotClientRect && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()
         ? computeDockSlotScreenRect(mainWindow.getContentBounds(), lastDockSlotClientRect)
         : null;
 }
@@ -327,8 +334,9 @@ function computeAndCacheRailBounds(relativeTo) {
 }
 
 // The rail window is the app's single persistent capture engine: it owns the
-// MediaRecorder/mic stream for the lifetime of the app, and nothing ever
-// recreates it after startup. It must never be destroyed while the app is
+// MediaRecorder/mic stream for the lifetime of the app. The only thing that
+// recreates it after startup is macOS's 'activate' (Dock click), as a
+// safety net if it's somehow gone. It must never be destroyed while the app is
 // running — "docked" means hidden, not destroyed (see the 'close' handler
 // below, which turns user-close gestures into an implicit dock instead).
 function createRailWindow() {
@@ -355,6 +363,7 @@ function createRailWindow() {
             preload: path.join(__dirname, "preload.js"),
             contextIsolation: true,
             backgroundThrottling: false,
+            devTools: !app.isPackaged,
         },
     });
 
@@ -721,10 +730,18 @@ async function retryRailUploadAndWait() {
 // resolved by argument count, not by checking for a nullish first arg -- so
 // passing `mainWindow ?? undefined` positionally would break if mainWindow
 // is null (e.g. already destroyed by the time before-quit's check runs).
+// The dashboard is shown first because on macOS it may only be hidden
+// (Cmd+W), and a sheet attached to a hidden window is invisible -- a Dock
+// "Quit" or Cmd+Q would then wait forever on a dialog nobody can see. The
+// app is also brought to the front, since a Dock "Quit" or a logout
+// doesn't activate it.
 function showMessageBox(options) {
-    return mainWindow && !mainWindow.isDestroyed()
-        ? dialog.showMessageBox(mainWindow, options)
-        : dialog.showMessageBox(options);
+    if (process.platform === 'darwin') app.focus({ steal: true });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        if (!mainWindow.isVisible()) mainWindow.show();
+        return dialog.showMessageBox(mainWindow, options);
+    }
+    return dialog.showMessageBox(options);
 }
 
 // Shown by the guarded close/quit paths below when a capture is live.
@@ -767,6 +784,11 @@ async function confirmPendingUploadDialog() {
 // after windows are already gone. Returns true if the close should
 // proceed, false if the user cancelled.
 async function performGuardedClose() {
+    // Everything guarded below lives only in the rail renderer -- once that
+    // window is gone there's nothing left to save, and lastRail* are just
+    // stale copies of its last push (e.g. a discarded pending upload), which
+    // would otherwise re-prompt on the quit that follows a guarded close.
+    if (!railWindow || railWindow.isDestroyed()) return true;
     if (shouldPromptBeforeClose(lastRailStatus)) {
         const proceed = await confirmCloseWithDialog();
         if (!proceed) return false;
@@ -798,6 +820,18 @@ async function performGuardedClose() {
     return true;
 }
 
+// Hiding a fullscreen window on macOS leaves a black, empty Space behind,
+// so leave fullscreen first and hide once that transition has finished.
+function hideMainWindow() {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isFullScreen()) {
+        mainWindow.once('leave-full-screen', () => mainWindow?.hide());
+        mainWindow.setFullScreen(false);
+        return;
+    }
+    mainWindow.hide();
+}
+
 function createWindow() {
     mainWindow = new BrowserWindow({
         width: 800,
@@ -808,7 +842,10 @@ function createWindow() {
         transparent: true,
         resizable: true,
         webPreferences: {
-            devTools: true,
+            // Off in packaged builds: DevTools on a recording app's renderer
+            // is both a reload button (losing the capture) and a way into
+            // the backend auth token. Dev keeps it for debugging.
+            devTools: !app.isPackaged,
             contextIsolation: true,
             preload: path.join(__dirname, 'preload.js')
         }
@@ -906,8 +943,21 @@ function createWindow() {
     // through instead of looping back into this same prompt. closeInProgress
     // guards against a second close gesture (or the app:quit IPC handler)
     // starting an overlapping second run while this one is still resolving.
+    //
+    // On macOS the app outlives its windows, so closing the dashboard
+    // (Cmd+W, Window > Close) only hides it instead: destroying it used to
+    // take the rail -- the app's one capture engine, see createRailWindow --
+    // down with it (see 'closed' below), leaving a Dock-reopened dashboard
+    // that could never record again until a relaunch. Hiding loses nothing,
+    // so no recording guard is needed on that path; a real quit tears
+    // windows down via destroy() (runGuardedQuit) or with isQuitting set.
     mainWindow.on('close', (e) => {
         if (isQuitting || closeConfirmed) return;
+        if (process.platform === 'darwin') {
+            e.preventDefault();
+            hideMainWindow();
+            return;
+        }
         if (closeInProgress) {
             e.preventDefault();
             return;
@@ -1016,18 +1066,29 @@ ipcMain.handle('window:endResize', () => {
     dashboardResizeState = null;
 });
 
-ipcMain.handle('app:quit', async () => {
-    // Guards against a second app:quit invocation (a rapid double-click on
-    // the close button, or the native 'close' handler above already
-    // running) starting an overlapping second guarded-close sequence.
+// The single guarded quit path, shared by the in-app close button
+// (app:quit) and every native quit gesture (Cmd+Q, Dock "Quit", logout --
+// all of which arrive as before-quit below). Previously only the in-app
+// button ran the recording guard; the native gestures set isQuitting and
+// let every window close unguarded, silently discarding a live recording.
+async function runGuardedQuit() {
+    // Guards against a second invocation (a rapid double-click on the close
+    // button, Cmd+Q pressed twice, or the native 'close' handler above
+    // already running) starting an overlapping second guarded-close sequence.
     if (closeInProgress) return;
     closeInProgress = true;
     try {
         const proceed = await performGuardedClose();
         if (!proceed) return;
+        // Lets the re-entrant before-quit (from app.quit() below) through
+        // instead of guarding a second time.
+        closeConfirmed = true;
         // Set before destroying windows, not after -- destroying the last
         // one below synchronously fires 'window-all-closed', which needs
         // to see this flag already set to skip its own app.quit() call.
+        // Destroying them before before-quit's jobs wait (rather than
+        // leaving them up during it) also means no new recording can be
+        // started while the quit is pending.
         quitRequested = true;
         for (const w of BrowserWindow.getAllWindows()) {
             if (!w.isDestroyed()) w.destroy();
@@ -1036,7 +1097,9 @@ ipcMain.handle('app:quit', async () => {
     } finally {
         closeInProgress = false;
     }
-});
+}
+
+ipcMain.handle('app:quit', () => runGuardedQuit());
 
 const BACKEND_PREFERRED_PORT = 8000;
 const BACKEND_MAX_PORTS_TO_TRY = 20;
@@ -1071,8 +1134,8 @@ function stopHealthWatchdog() {
 }
 
 // Central hook for EVERY backend:status push, whether it comes from main.js
-// itself (sendBackendStatus below) or from inside attemptRecovery (wired
-// through recoveryConfig.onStatus, including its own recursive re-arm for a
+// itself or from inside attemptRecovery (wired through
+// recoveryConfig.onStatus, including its own recursive re-arm for a
 // newly-recovered child that crashes again later) -- keeps lastBackendStatus
 // authoritative regardless of source, and is the single place that stops the
 // watchdog once a recovery cycle has exhausted its attempts. Without this,
@@ -1080,29 +1143,26 @@ function stopHealthWatchdog() {
 // ~15s of failures against the still-dead backend, and launched a brand new
 // recovery cycle -- forever.
 //
-// Also the single place that forwards the push to railWindow: previously
-// only mainWindow ever received backend:status (both here and inside
-// backendRecovery.js's own direct send), leaving the rail's
-// useProcessingJobs restart-pause permanently inert -- "Lost track of this
-// recording" could flash there during a backend restart the job actually
-// survives. attemptRecovery still sends to mainWindow itself; routing the
-// rail side through this shared hook (rather than threading mainWindow-only
-// logic through backendRecovery.js too) means every status source gets the
-// rail covered for free.
-function cacheBackendStatus(payload) {
+// Also the single place that forwards the push to both windows. The rail
+// used to be left out entirely (only mainWindow ever received
+// backend:status), leaving its useProcessingJobs restart-pause permanently
+// inert -- "Lost track of this recording" could flash there during a
+// backend restart the job actually survives. The dashboard used to be
+// reached by handing mainWindow to attemptRecovery, which re-arms itself
+// with whatever it was given -- a window captured at the first crash went
+// stale as soon as the dashboard was ever recreated, and recovery status
+// never reached the new one. attemptRecovery is no longer given a window at
+// all; reading the module-level ones here, at send time, always hits the
+// current windows.
+function sendBackendStatus(payload) {
     lastBackendStatus = payload;
     if (payload.state === 'failed') {
         stopHealthWatchdog();
     }
-    if (railWindow && !railWindow.isDestroyed()) {
-        railWindow.webContents.send('backend:status', payload);
-    }
-}
-
-function sendBackendStatus(payload) {
-    cacheBackendStatus(payload);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('backend:status', payload);
+    for (const w of [mainWindow, railWindow]) {
+        if (w && !w.isDestroyed()) {
+            w.webContents.send('backend:status', payload);
+        }
     }
 }
 
@@ -1134,9 +1194,9 @@ function startHealthWatchdog() {
             // ensurePortFree inside attemptRecovery kills whatever is
             // currently bound to the port (the hung process, since its exe
             // matches) before spawning a fresh one -- no separate kill step
-            // needed here. cacheBackendStatus (via recoveryConfig.onStatus)
+            // needed here. sendBackendStatus (via recoveryConfig.onStatus)
             // stops this very watchdog if the cycle ends in "failed".
-            await attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo: null });
+            await attemptRecovery({ ...recoveryConfig, crashInfo: null });
         }
     }, WATCHDOG_INTERVAL_MS);
 }
@@ -1148,7 +1208,7 @@ function startHealthWatchdog() {
 // running afterward, while a failed one leaves it off until the user
 // explicitly retries again.
 async function runRecovery(crashInfo) {
-    await attemptRecovery({ ...recoveryConfig, mainWindow, crashInfo });
+    await attemptRecovery({ ...recoveryConfig, crashInfo });
     if (lastBackendStatus?.state !== 'failed') {
         startHealthWatchdog();
     }
@@ -1178,6 +1238,12 @@ const crashLogDir = () => path.join(app.getPath('userData'), 'logs');
 
 app.whenReady().then(async () => {
     armProcessCrashLogging(crashLogDir());
+
+    Menu.setApplicationMenu(Menu.buildFromTemplate(buildAppMenuTemplate({
+        platform: process.platform,
+        isPackaged: app.isPackaged,
+        appName: app.name,
+    })));
 
     // Fallback for the renderer's darwin getDisplayMedia() call
     // (src/rail/capture/electronCapture.ts). On macOS 15+ with the native
@@ -1241,7 +1307,10 @@ app.whenReady().then(async () => {
     // there's nothing left that actually needs the gate.
     createWindow();
     createRailWindow();
-    armAutoUpdate(mainWindow);
+    // A getter, not the window itself: the updater's listeners live for the
+    // whole app session, and a captured reference would keep sending to a
+    // destroyed dashboard if it's ever recreated (macOS Dock reopen).
+    armAutoUpdate(() => mainWindow);
     sendBackendStatus({ state: 'starting' });
 
     // Packaged mode gets a longer timeout: a first launch after install can hit
@@ -1271,7 +1340,7 @@ app.whenReady().then(async () => {
         // hook below) authoritative for every push, including the ones
         // attemptRecovery sends directly rather than through
         // sendBackendStatus.
-        onStatus: cacheBackendStatus,
+        onStatus: sendBackendStatus,
     };
     // Armed before waitForHealth settles, not after -- a crash during the
     // initial health wait used to go unrecovered (the app just quit via the
@@ -1318,6 +1387,8 @@ ipcMain.handle('updater:install', async () => {
     try {
         const proceed = await performGuardedClose();
         if (!proceed) return;
+        // quitAndInstall re-enters before-quit -- don't guard a second time.
+        closeConfirmed = true;
         // Mirror app:quit: destroy the windows BEFORE the jobs wait, so no
         // new recording can start while the quit is pending, and wait out
         // the transcription job the guarded stop just created BEFORE
@@ -1412,6 +1483,30 @@ async function waitForActiveJobsToFinish(timeoutMs = QUIT_JOB_WAIT_TIMEOUT_MS) {
 }
 
 app.on('before-quit', (e) => {
+    // Every native quit gesture (Cmd+Q, Dock "Quit", the app menu's Quit,
+    // macOS logout/shutdown, a bare app.quit()) lands here first, and the
+    // recording guard has to run BEFORE isQuitting is set below -- that flag
+    // is what lets both windows' 'close' handlers through unguarded. So on
+    // first entry, defer to runGuardedQuit (Stop && Save / Cancel, then
+    // destroy the windows and call app.quit() again); only the re-entry,
+    // with closeConfirmed set, carries on into the real shutdown. Cancel
+    // leaves the app exactly as it was, nothing below having run yet.
+    //
+    // Trade-off for OS logout/shutdown: on macOS, preventing default here
+    // makes the system report that DeskRecap interrupted the logout. That's
+    // deliberate while a recording or upload would otherwise be lost -- the
+    // user gets the Stop && Save dialog and simply logs out again after.
+    // With nothing to guard, runGuardedQuit proceeds without any dialog
+    // after a single async hop, so a normal logout isn't held up beyond the
+    // (pre-existing) active-job wait below. On Windows, Electron doesn't
+    // emit before-quit for a shutdown/logoff at all; that case still goes
+    // through the windows' own 'close' handlers as before.
+    const step = beforeQuitStep({ closeConfirmed, quitConfirmed, beforeQuitInFlight });
+    if (step === 'guard') {
+        e.preventDefault();
+        runGuardedQuit();
+        return;
+    }
     // Lets the rail window's 'close' handler distinguish "the user is
     // quitting the whole app / the OS is shutting down" (let it close for
     // real) from "an isolated close gesture aimed at just this window"
@@ -1427,7 +1522,7 @@ app.on('before-quit', (e) => {
     // below) must never spawn a fresh backend process once quitting has begun.
     shuttingDown = true;
 
-    if (quitConfirmed) {
+    if (step === 'finish') {
         // Not awaited deliberately -- this handler doesn't preventDefault here,
         // so Electron proceeds to quit right after this returns. stopBackend's
         // taskkill is still spawned synchronously before that happens, and it
@@ -1437,7 +1532,7 @@ app.on('before-quit', (e) => {
         stopBackend();
         return;
     }
-    if (beforeQuitInFlight) {
+    if (step === 'keepWaiting') {
         // A previous app.quit() call's wait-for-jobs flow is still
         // resolving -- don't start a second one. Just keep preventing
         // default; the in-flight flow will call app.quit() again once it's
@@ -1470,4 +1565,21 @@ app.on('window-all-closed', () => {
     if (quitRequested) return; // app:quit's handler already called app.quit() itself
     if (process.platform !== 'darwin') app.quit();
 });
-app.on('activate', () => { if (!mainWindow) createWindow(); });
+// macOS Dock click. The dashboard is normally just hidden (see its 'close'
+// handler), so show it again; recreate either window only if it's actually
+// gone, so the app can always record again without a relaunch. Skipped
+// until whenReady has resolved the backend port, or this would race it and
+// build a second set of windows pointed at no backend.
+app.on('activate', () => {
+    // closeConfirmed: a quit is already underway (windows destroyed ahead
+    // of before-quit's job wait) -- don't resurrect them mid-shutdown.
+    if (!resolvedBackendPort || closeConfirmed || isQuitting) return;
+    if (!mainWindow || mainWindow.isDestroyed()) {
+        createWindow();
+    } else {
+        mainWindow.show();
+    }
+    if (!railWindow || railWindow.isDestroyed()) {
+        createRailWindow();
+    }
+});

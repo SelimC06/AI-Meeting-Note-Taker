@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence } from './closeGuard.js';
+import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence, beforeQuitStep } from './closeGuard.js';
 
 test('shouldPromptBeforeClose is true for starting, recording, and paused', () => {
     assert.equal(shouldPromptBeforeClose('starting'), true);
@@ -97,4 +97,20 @@ test('runInstallShutdownSequence skips the jobs wait when nothing is active', as
     });
 
     assert.ok(!calls.includes('waitForActiveJobsToFinish'));
+});
+
+test('beforeQuitStep guards first, before anything else, until the guard has passed', () => {
+    // The bug this guards against: Cmd+Q / Dock "Quit" / logout went
+    // straight to isQuitting (letting every window close unguarded) and
+    // destroyed a live recording -- only the in-app X button was guarded.
+    assert.equal(beforeQuitStep({ closeConfirmed: false, quitConfirmed: false, beforeQuitInFlight: false }), 'guard');
+    // Even flags left over from another path must not skip the guard.
+    assert.equal(beforeQuitStep({ closeConfirmed: false, quitConfirmed: true, beforeQuitInFlight: false }), 'guard');
+    assert.equal(beforeQuitStep({ closeConfirmed: false, quitConfirmed: false, beforeQuitInFlight: true }), 'guard');
+});
+
+test('beforeQuitStep walks guard -> waitForJobs -> keepWaiting -> finish once confirmed', () => {
+    assert.equal(beforeQuitStep({ closeConfirmed: true, quitConfirmed: false, beforeQuitInFlight: false }), 'waitForJobs');
+    assert.equal(beforeQuitStep({ closeConfirmed: true, quitConfirmed: false, beforeQuitInFlight: true }), 'keepWaiting');
+    assert.equal(beforeQuitStep({ closeConfirmed: true, quitConfirmed: true, beforeQuitInFlight: false }), 'finish');
 });

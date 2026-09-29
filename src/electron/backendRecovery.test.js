@@ -145,6 +145,32 @@ test('attemptRecovery invokes onStatus with the same payloads sent to the window
     }
 });
 
+test('attemptRecovery still reports every status via onStatus when given no window', async () => {
+    // main.js no longer hands attemptRecovery a window at all (a captured
+    // one went stale once the dashboard was recreated) -- it relies solely
+    // on onStatus to reach whichever windows are current at send time.
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-recovery-test-'));
+    const onStatusCalls = [];
+    try {
+        await attemptRecovery({
+            pythonExe: process.execPath,
+            args: ['-e', 'process.exit(1)'],
+            cwd: process.cwd(),
+            env: process.env,
+            backendUrl: 'http://127.0.0.1:1',
+            logDir,
+            crashInfo: { exitCode: 1, signal: null },
+            delays: [0, 10, 10],
+            onStatus: (payload) => onStatusCalls.push(payload),
+        });
+
+        assert.deepEqual(onStatusCalls.map((p) => p.state), ['restarting', 'restarting', 'restarting', 'failed']);
+    } finally {
+        stopBackend();
+        fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});
+
 test('attemptRecovery calls onStatus with "failed" when every attempt is exhausted', async () => {
     const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-recovery-test-'));
     const win = makeFakeWindow();

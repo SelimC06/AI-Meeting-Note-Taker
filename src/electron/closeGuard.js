@@ -56,3 +56,21 @@ export async function runInstallShutdownSequence({
         await waitForActiveJobsToFinish();
     }
 }
+
+// What before-quit should do on this entry. Every native quit gesture
+// (Cmd+Q, Dock "Quit", logout, a bare app.quit()) re-enters before-quit
+// several times on its way out, and the order matters:
+//   'guard'       -- the recording guard hasn't passed yet: run it FIRST,
+//                    before anything marks the app as quitting (that's what
+//                    lets windows close unguarded). Used to be skipped
+//                    entirely for everything but the in-app close button.
+//   'finish'      -- guard passed and the active-job wait is done: stop the
+//                    backend and let the quit through.
+//   'keepWaiting' -- the job wait from an earlier entry is still running.
+//   'waitForJobs' -- guard passed, start the (silent) active-job wait.
+export function beforeQuitStep({ closeConfirmed, quitConfirmed, beforeQuitInFlight }) {
+    if (!closeConfirmed) return 'guard';
+    if (quitConfirmed) return 'finish';
+    if (beforeQuitInFlight) return 'keepWaiting';
+    return 'waitForJobs';
+}

@@ -27,7 +27,11 @@ export async function attemptRecovery({
     // in `env`): the renderers read it once at load, so a new token here
     // would lock them out of the recovered backend.
     authToken = null,
-    mainWindow,
+    // Optional: main.js no longer passes one (it forwards every push to
+    // its CURRENT windows via onStatus instead), since a window captured
+    // here is carried into every recursive re-arm below and goes stale if
+    // the dashboard is ever recreated.
+    mainWindow = null,
     logDir,
     crashInfo = null,
     delays = [0, 3000, 8000],

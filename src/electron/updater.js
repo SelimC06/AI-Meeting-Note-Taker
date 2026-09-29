@@ -19,8 +19,9 @@ export function getLastStatus() {
     return lastStatus;
 }
 
-function sendStatus(mainWindow, payload) {
+function sendStatus(getMainWindow, payload) {
     lastStatus = payload;
+    const mainWindow = getMainWindow();
     if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('updater:status', payload);
     }
@@ -30,27 +31,32 @@ function sendStatus(mainWindow, payload) {
 // no removal, so calling this more than once (with the real electron-updater
 // autoUpdater) would attach duplicate listeners. Only called once today, at
 // startup, so this is not currently a problem.
-export function armAutoUpdate(mainWindow, updater = electronUpdater.autoUpdater, checkIntervalMs = UPDATE_CHECK_INTERVAL_MS) {
+//
+// Takes a getter rather than the window itself: these listeners live for
+// the whole app session, while the dashboard window can be recreated
+// (macOS Dock reopen) -- a captured reference would keep sending status to
+// the dead one and the new dashboard would never hear about an update.
+export function armAutoUpdate(getMainWindow, updater = electronUpdater.autoUpdater, checkIntervalMs = UPDATE_CHECK_INTERVAL_MS) {
     updater.autoDownload = true;
     updater.setFeedURL({ provider: 'generic', url: getUpdateFeedUrl() });
 
     updater.on('checking-for-update', () => {
-        sendStatus(mainWindow, { state: 'checking' });
+        sendStatus(getMainWindow, { state: 'checking' });
     });
     updater.on('update-available', (info) => {
-        sendStatus(mainWindow, { state: 'available', version: info.version });
+        sendStatus(getMainWindow, { state: 'available', version: info.version });
     });
     updater.on('update-not-available', () => {
-        sendStatus(mainWindow, { state: 'idle' });
+        sendStatus(getMainWindow, { state: 'idle' });
     });
     updater.on('download-progress', (progress) => {
-        sendStatus(mainWindow, { state: 'downloading', percent: progress.percent });
+        sendStatus(getMainWindow, { state: 'downloading', percent: progress.percent });
     });
     updater.on('update-downloaded', (info) => {
-        sendStatus(mainWindow, { state: 'ready', version: info.version });
+        sendStatus(getMainWindow, { state: 'ready', version: info.version });
     });
     updater.on('error', (err) => {
-        sendStatus(mainWindow, { state: 'error', message: err?.message ?? String(err) });
+        sendStatus(getMainWindow, { state: 'error', message: err?.message ?? String(err) });
     });
 
     const check = () => {

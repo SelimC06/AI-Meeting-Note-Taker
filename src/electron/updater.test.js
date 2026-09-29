@@ -42,7 +42,7 @@ test('armAutoUpdate sets autoDownload, sets the feed URL, and triggers a check',
     const win = makeFakeWindow();
     const updater = makeFakeUpdater();
 
-    armAutoUpdate(win, updater);
+    armAutoUpdate(() => win, updater);
 
     assert.equal(updater.autoDownload, true);
     assert.equal(updater.checkForUpdatesCalled, true);
@@ -51,7 +51,7 @@ test('armAutoUpdate sets autoDownload, sets the feed URL, and triggers a check',
 test('checking-for-update sends a "checking" status', () => {
     const win = makeFakeWindow();
     const updater = makeFakeUpdater();
-    armAutoUpdate(win, updater);
+    armAutoUpdate(() => win, updater);
 
     updater.emit('checking-for-update');
 
@@ -61,7 +61,7 @@ test('checking-for-update sends a "checking" status', () => {
 test('update-available sends an "available" status with version', () => {
     const win = makeFakeWindow();
     const updater = makeFakeUpdater();
-    armAutoUpdate(win, updater);
+    armAutoUpdate(() => win, updater);
 
     updater.emit('update-available', { version: '1.2.0' });
 
@@ -71,7 +71,7 @@ test('update-available sends an "available" status with version', () => {
 test('update-not-available sends an "idle" status', () => {
     const win = makeFakeWindow();
     const updater = makeFakeUpdater();
-    armAutoUpdate(win, updater);
+    armAutoUpdate(() => win, updater);
 
     updater.emit('update-not-available');
 
@@ -81,7 +81,7 @@ test('update-not-available sends an "idle" status', () => {
 test('download-progress sends a "downloading" status with percent', () => {
     const win = makeFakeWindow();
     const updater = makeFakeUpdater();
-    armAutoUpdate(win, updater);
+    armAutoUpdate(() => win, updater);
 
     updater.emit('download-progress', { percent: 42.7 });
 
@@ -91,7 +91,7 @@ test('download-progress sends a "downloading" status with percent', () => {
 test('update-downloaded sends a "ready" status with version', () => {
     const win = makeFakeWindow();
     const updater = makeFakeUpdater();
-    armAutoUpdate(win, updater);
+    armAutoUpdate(() => win, updater);
 
     updater.emit('update-downloaded', { version: '1.2.0' });
 
@@ -101,7 +101,7 @@ test('update-downloaded sends a "ready" status with version', () => {
 test('error sends an "error" status with the error message', () => {
     const win = makeFakeWindow();
     const updater = makeFakeUpdater();
-    armAutoUpdate(win, updater);
+    armAutoUpdate(() => win, updater);
 
     updater.emit('error', new Error('feed unreachable'));
 
@@ -112,11 +112,36 @@ test('status is not sent when the window is destroyed', () => {
     const win = makeFakeWindow();
     win.isDestroyed = () => true;
     const updater = makeFakeUpdater();
-    armAutoUpdate(win, updater);
+    armAutoUpdate(() => win, updater);
 
     updater.emit('checking-for-update');
 
     assert.equal(win.sent.length, 0);
+});
+
+test('status goes to whichever window the getter returns at send time, not the one at arm time', () => {
+    // The dashboard can be recreated after armAutoUpdate ran (macOS Dock
+    // reopen) -- a captured window would keep receiving status while the
+    // new one never did.
+    const first = makeFakeWindow();
+    const second = makeFakeWindow();
+    let current = first;
+    const updater = makeFakeUpdater();
+    armAutoUpdate(() => current, updater);
+
+    updater.emit('checking-for-update');
+    first.isDestroyed = () => true;
+    current = second;
+    updater.emit('update-available', { version: '2.0.0' });
+
+    assert.deepEqual(first.sent, [{ channel: 'updater:status', payload: { state: 'checking' } }]);
+    assert.deepEqual(second.sent, [{ channel: 'updater:status', payload: { state: 'available', version: '2.0.0' } }]);
+});
+
+test('status is not sent when the getter returns no window', () => {
+    const updater = makeFakeUpdater();
+    armAutoUpdate(() => null, updater);
+    assert.doesNotThrow(() => updater.emit('checking-for-update'));
 });
 
 test('installUpdate calls quitAndInstall on the given updater', () => {
@@ -128,7 +153,7 @@ test('installUpdate calls quitAndInstall on the given updater', () => {
 test('getLastStatus returns the most recent status after an event fires', () => {
     const win = makeFakeWindow();
     const updater = makeFakeUpdater();
-    armAutoUpdate(win, updater);
+    armAutoUpdate(() => win, updater);
 
     updater.emit('update-available', { version: '1.2.0' });
 
@@ -142,7 +167,7 @@ test('armAutoUpdate re-checks periodically instead of only once at startup', (t)
     let checkCount = 0;
     updater.checkForUpdates = () => { checkCount += 1; };
 
-    armAutoUpdate(win, updater, UPDATE_CHECK_INTERVAL_MS);
+    armAutoUpdate(() => win, updater, UPDATE_CHECK_INTERVAL_MS);
     assert.equal(checkCount, 1); // the initial startup check
 
     t.mock.timers.tick(UPDATE_CHECK_INTERVAL_MS);
@@ -159,7 +184,7 @@ test('armAutoUpdate does not re-check before the configured interval has elapsed
     let checkCount = 0;
     updater.checkForUpdates = () => { checkCount += 1; };
 
-    armAutoUpdate(win, updater, UPDATE_CHECK_INTERVAL_MS);
+    armAutoUpdate(() => win, updater, UPDATE_CHECK_INTERVAL_MS);
     assert.equal(checkCount, 1);
 
     t.mock.timers.tick(UPDATE_CHECK_INTERVAL_MS - 1);
@@ -176,7 +201,7 @@ test('armAutoUpdate does not produce an unhandled rejection when checkForUpdates
     process.once('unhandledRejection', onUnhandledRejection);
 
     try {
-        assert.doesNotThrow(() => armAutoUpdate(win, updater));
+        assert.doesNotThrow(() => armAutoUpdate(() => win, updater));
         // Let the microtask queue flush so a rejection (if unswallowed) would surface.
         await new Promise((resolve) => setImmediate(resolve));
         assert.equal(unhandled, null);
