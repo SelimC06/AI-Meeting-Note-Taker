@@ -72,6 +72,13 @@ class SessionsIndexCorruptError(Exception):
         )
 
 
+def index_is_corrupt(store_dir: Path) -> bool:
+    """Public form of _index_exists_but_is_corrupt, for callers outside this
+    module that must refuse to act on a damaged index (server.py's storage
+    move)."""
+    return _index_exists_but_is_corrupt(store_dir)
+
+
 def _index_exists_but_is_corrupt(store_dir: Path) -> bool:
     """True if sessions_index.json exists but can't be read back as a JSON
     list, so sweep_orphaned_sessions can tell "genuinely nothing indexed"

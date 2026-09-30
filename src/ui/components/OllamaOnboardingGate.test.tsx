@@ -63,3 +63,12 @@ it("is a labelled modal dialog with focus inside, and Escape doesn't dismiss it"
   fireEvent.keyDown(document.activeElement!, { key: "Escape" });
   expect(screen.getByRole("dialog")).toBeInTheDocument();
 });
+
+it("stays hidden while another dialog is open, and appears once it closes", () => {
+  vi.mocked(useOllamaReadiness).mockReturnValue({ status: "unreachable", recheck: vi.fn(), isRechecking: false });
+  const { rerender } = render(<OllamaOnboardingGate suppressed />);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+  rerender(<OllamaOnboardingGate suppressed={false} />);
+  expect(screen.getByRole("dialog", { name: "[SETUP REQUIRED]" })).toBeInTheDocument();
+});

@@ -5,6 +5,17 @@ export function logCrash(logDir, { exitCode, signal, logTail }) {
     appendJsonLine(logDir, 'backend-crashes.log', { exitCode, signal, logTail });
 }
 
+// backend:restart found the backend already healthy: what (if anything)
+// to push so the renderer leaves its failed/unresponsive state. That branch
+// used to only restart the watchdog, so a "failed" banner whose Retry was
+// clicked after the backend had come back on its own never went away.
+// 'up' maps to "reconnected" in useBackendLifecycle (a brief banner, then
+// healthy); nothing is sent if the renderer already believes it's healthy.
+export function statusForHealthyRetry(lastStatus) {
+    if (lastStatus?.state === 'ready' || lastStatus?.state === 'up') return null;
+    return { state: 'up' };
+}
+
 let recovering = false;
 
 export function isRecovering() {

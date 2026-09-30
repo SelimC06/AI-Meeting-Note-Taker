@@ -315,3 +315,55 @@ it("a late listJobs response can't re-add a job that was already removed", async
 
   expect(result.current.jobs).toEqual([]);
 });
+
+it("timed-out polls don't count toward the lost-track threshold (a slow backend isn't a lost job)", async () => {
+  vi.useFakeTimers();
+  vi.mocked(api.listJobs).mockResolvedValue([]);
+  vi.mocked(api.getJobStatus).mockRejectedValue(new DOMException("signal timed out", "TimeoutError"));
+
+  const { result } = renderHook(() => useProcessingJobs());
+  await act(async () => {
+    await Promise.resolve();
+  });
+  act(() => result.current.addJob("job-1"));
+
+  // Well past 5 polls, every one of them timing out.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500 * 10);
+  });
+
+  expect(result.current.jobs).toEqual([{ id: "job-1", stage: null, status: "queued", error: null }]);
+});
+
+it("timeouts in between real failures neither count nor reset the real-failure count", async () => {
+  vi.useFakeTimers();
+  vi.mocked(api.listJobs).mockResolvedValue([]);
+  const timeout = new DOMException("signal timed out", "TimeoutError");
+  const notFound = new Error("Failed to fetch job status: 404");
+  vi.mocked(api.getJobStatus)
+    .mockRejectedValueOnce(notFound)
+    .mockRejectedValueOnce(timeout)
+    .mockRejectedValueOnce(notFound)
+    .mockRejectedValueOnce(timeout)
+    .mockRejectedValueOnce(notFound)
+    .mockRejectedValueOnce(notFound)
+    .mockRejectedValue(notFound);
+
+  const { result } = renderHook(() => useProcessingJobs());
+  await act(async () => {
+    await Promise.resolve();
+  });
+  act(() => result.current.addJob("job-1"));
+
+  // 6 polls: 4 real failures + 2 timeouts -- not lost yet.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500 * 6);
+  });
+  expect(result.current.jobs[0].status).toBe("queued");
+
+  // 5th real failure.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500);
+  });
+  expect(result.current.jobs[0].status).toBe("failed");
+});

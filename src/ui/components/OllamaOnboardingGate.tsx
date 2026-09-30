@@ -6,6 +6,12 @@ const OLLAMA_DOWNLOAD_URL = "https://ollama.com/download";
 
 type OllamaOnboardingGateProps = {
   active?: boolean;
+  // True while another dialog (Settings, the consent notice) is open. The
+  // gate sits below Settings (z-40 vs z-50) but, mounting later, would end
+  // up on top of the dialog focus stack: focus jumped into its hidden link,
+  // Escape stopped closing Settings, and Tab was trapped in the invisible
+  // gate. It simply waits and appears once the other dialog closes.
+  suppressed?: boolean;
 };
 
 // The gate's modal frame, split out so useDialog only runs while the gate
@@ -22,7 +28,7 @@ function GateDialog({ children }: { children: (titleId: string) => ReactNode }) 
   );
 }
 
-export default function OllamaOnboardingGate({ active = true }: OllamaOnboardingGateProps) {
+export default function OllamaOnboardingGate({ active = true, suppressed = false }: OllamaOnboardingGateProps) {
   const readiness = useOllamaReadiness(active);
   const [dismissed, setDismissed] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
@@ -34,7 +40,7 @@ export default function OllamaOnboardingGate({ active = true }: OllamaOnboarding
     };
   }, []);
 
-  if (dismissed) return null;
+  if (dismissed || suppressed) return null;
   if (readiness.status === "checking" || readiness.status === "ready") return null;
 
   const handleCopy = async (command: string) => {

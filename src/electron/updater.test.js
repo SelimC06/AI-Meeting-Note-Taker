@@ -209,3 +209,53 @@ test('armAutoUpdate does not produce an unhandled rejection when checkForUpdates
         process.removeListener('unhandledRejection', onUnhandledRejection);
     }
 });
+
+test('installUpdateOrQuit quits when the updater reports an install error instead of quitting', async () => {
+    const { installUpdateOrQuit } = await import('./updater.js');
+    const updater = makeFakeUpdater();
+    updater.quitAndInstall = () => {
+        // What electron-updater does for a missing/corrupt installer:
+        // dispatchError, return false, no quit, no throw.
+        updater.emit('error', new Error('installer missing'));
+    };
+    let quits = 0;
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+        const timer = installUpdateOrQuit(() => { quits++; }, updater, 60000);
+        clearTimeout(timer);
+    } finally {
+        console.error = originalError;
+    }
+    assert.equal(quits, 1);
+});
+
+test('installUpdateOrQuit quits when quitAndInstall throws', async () => {
+    const { installUpdateOrQuit } = await import('./updater.js');
+    const updater = makeFakeUpdater();
+    updater.quitAndInstall = () => { throw new Error('boom'); };
+    let quits = 0;
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+        const timer = installUpdateOrQuit(() => { quits++; }, updater, 60000);
+        clearTimeout(timer);
+    } finally {
+        console.error = originalError;
+    }
+    assert.equal(quits, 1);
+});
+
+test('installUpdateOrQuit falls back to quitting when nothing else happens', async () => {
+    const { installUpdateOrQuit } = await import('./updater.js');
+    const updater = makeFakeUpdater();
+    updater.quitAndInstall = () => {}; // silently does nothing
+    updater.on('error', () => {}); // armAutoUpdate's own, always-present listener
+    let quits = 0;
+    installUpdateOrQuit(() => { quits++; }, updater, 20);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(quits, 1);
+    // A later updater error doesn't quit a second time.
+    updater.emit('error', new Error('late'));
+    assert.equal(quits, 1);
+});

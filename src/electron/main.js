@@ -4,10 +4,10 @@ import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, killAllBackendsSync, waitForHealth, getBackendLogTail, armCrashMonitor, ensurePortFree, generateBackendToken, backendAuthHeaders, BACKEND_TOKEN_ENV } from './backend.js';
-import { attemptRecovery, isRecovering } from './backendRecovery.js';
-import { nextWatchdogState, probeHealthOnce, fetchBackendBusy, watchdogThreshold, WATCHDOG_INTERVAL_MS } from './backendWatchdog.js';
+import { attemptRecovery, isRecovering, statusForHealthyRetry } from './backendRecovery.js';
+import { nextWatchdogState, probeHealthOnce, fetchBackendBusy, watchdogThreshold, watchdogBusy, knownBusyAfterRailStatus, WATCHDOG_INTERVAL_MS } from './backendWatchdog.js';
 import { isTrustedIpcSender } from './ipcGuard.js';
-import { armAutoUpdate, getLastStatus, installUpdate } from './updater.js';
+import { armAutoUpdate, getLastStatus, installUpdateOrQuit } from './updater.js';
 import {
     computeRailBounds,
     computeCenteredBounds,
@@ -252,7 +252,13 @@ if (!gotSingleInstanceLock) {
             // handler), and focus() alone doesn't bring a hidden window back.
             mainWindow.show();
             mainWindow.focus();
+            return;
         }
+        // No dashboard at all (e.g. windows destroyed by a quit sequence
+        // that then didn't finish): relaunching is the user's only way back
+        // in, and it lands here because of the single-instance lock -- so
+        // recreate the windows, same as a macOS Dock click does.
+        reopenWindows();
     });
 }
 
@@ -548,6 +554,7 @@ ipcHandle('rail:pushStatus', (_event, status) => {
     }
     lastFullRailStatus = sanitized;
     lastRailStatus = sanitized.status;
+    backendKnownBusy = knownBusyAfterRailStatus(backendKnownBusy, lastRailIsProcessing, sanitized.isProcessing);
     lastRailIsProcessing = sanitized.isProcessing;
     lastRailHasPendingUpload = sanitized.hasPendingUpload;
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -1281,7 +1288,8 @@ function startHealthWatchdog() {
                 const busy = await fetchBackendBusy(recoveryConfig.backendUrl, backendAuthToken);
                 if (busy !== null) backendKnownBusy = busy;
             }
-            const next = nextWatchdogState(watchdogConsecutiveFailures, ok, watchdogThreshold(backendKnownBusy));
+            const busy = watchdogBusy(backendKnownBusy, lastRailIsProcessing);
+            const next = nextWatchdogState(watchdogConsecutiveFailures, ok, watchdogThreshold(busy));
             watchdogConsecutiveFailures = next.consecutiveFailures;
             if (next.shouldRestart) {
                 watchdogConsecutiveFailures = 0;
@@ -1524,16 +1532,11 @@ ipcHandle('updater:install', async () => {
         // fast path (stopBackend + immediate quit) when quitAndInstall
         // fires app.quit().
         quitConfirmed = true;
-        try {
-            installUpdate();
-        } catch (err) {
-            // quitAndInstall throws if the downloaded update is gone/corrupt
-            // (AV quarantine). Windows are already destroyed and quitRequested
-            // suppressed window-all-closed's quit -- without this fallback the
-            // app survives as an unquittable, windowless process.
-            console.error('[updater] quitAndInstall failed, quitting without installing:', err);
-            app.quit();
-        }
+        // Windows are already destroyed and quitRequested suppressed
+        // window-all-closed's quit, so a failed install must still end in a
+        // quit -- and quitAndInstall doesn't reliably throw when it fails
+        // (see installUpdateOrQuit).
+        installUpdateOrQuit(() => app.quit());
     } finally {
         closeInProgress = false;
     }
@@ -1551,8 +1554,11 @@ ipcHandle('backend:restart', async () => {
     if (ok) {
         // Already healthy -- don't spawn a second process on the same port,
         // but this is still a valid point to resume the watchdog if an
-        // earlier failed cycle had paused it (G2).
+        // earlier failed cycle had paused it (G2), and to tell the renderer
+        // so its failed banner clears.
         startHealthWatchdog();
+        const status = statusForHealthyRetry(lastBackendStatus);
+        if (status) sendBackendStatus(status);
         return;
     }
     await runRecovery(null);
@@ -1696,7 +1702,9 @@ app.on('window-all-closed', () => {
 // gone, so the app can always record again without a relaunch. Skipped
 // until whenReady has resolved the backend port, or this would race it and
 // build a second set of windows pointed at no backend.
-app.on('activate', () => {
+// Shared by the macOS Dock click ('activate') and a relaunch attempt
+// ('second-instance' with no dashboard left).
+function reopenWindows() {
     // closeConfirmed: a quit is already underway (windows destroyed ahead
     // of before-quit's job wait) -- don't resurrect them mid-shutdown.
     if (!resolvedBackendPort || closeConfirmed || isQuitting) return;
@@ -1708,4 +1716,8 @@ app.on('activate', () => {
     if (!railWindow || railWindow.isDestroyed()) {
         createRailWindow();
     }
+}
+
+app.on('activate', () => {
+    reopenWindows();
 });

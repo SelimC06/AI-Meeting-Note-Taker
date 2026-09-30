@@ -9,7 +9,7 @@ from starlette.types import Scope, Receive, Send
 from starlette.responses import PlainTextResponse
 from pathlib import Path
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 import asyncio
@@ -48,6 +48,7 @@ from .sessions_store import (
     write_speaker_names,
     load_speaker_names,
     recover_sessions_index,
+    index_is_corrupt,
     SessionsIndexCorruptError,
     STAGING_DIR_PREFIX,
 )
@@ -56,6 +57,7 @@ from .settings_store import (
     SAVE_LOCK,
     WHISPER_MODEL_CHOICES,
     WHISPER_MODEL_VALUES,
+    EXPORT_DIR_NAME,
     StorageMoveError,
     load_checked as load_settings_checked,
     move_storage_dir,
@@ -336,14 +338,14 @@ SETTINGS_PATH = ROOT / "settings.json"
 # files.
 EXPORT_TEMP_PREFIX = "meeting-export-"
 
-# Where export_session_zip builds its zip: a folder inside the storage dir,
-# not the OS temp dir. The archive is roughly the size of the recording
+# export_session_zip builds its zip in <storage>/EXPORT_DIR_NAME (imported
+# from settings_store, whose storage move skips that folder): inside the
+# storage dir, not the OS temp dir. The archive is roughly the size of the recording
 # (up to several GB), and storage is often on an external or larger drive
 # than the system disk -- building it in the system temp dir failed with
 # disk-full exactly for the users whose recordings live elsewhere. Dotted
 # and not session-shaped, so the session sweeps in sessions_store never
 # touch it.
-EXPORT_DIR_NAME = ".exports"
 
 
 def _sweep_stale_export_zips(max_age_seconds: int = 3600, store_dir: Optional[Path] = None) -> None:
@@ -507,8 +509,17 @@ def to_wav(src: Optional[Path], dst: Path, ar: int = 16000, ac: int = 1) -> Opti
         return None
 
 
-def mix_audios_wav(system_wav: Optional[Path], mic_wav: Optional[Path], out_wav: Path) -> Optional[Path]:
-    """Mix 0/1/2 wav inputs into a single wav; returns out_wav or None."""
+def mix_audios_wav(
+    system_wav: Optional[Path], mic_wav: Optional[Path], out_wav: Path
+) -> Tuple[Optional[Path], bool]:
+    """Mix 0/1/2 wav inputs into a single wav.
+
+    Returns (out_wav or None, complete). `complete` is False only when two
+    tracks were given but amix failed and ONE of them was copied instead --
+    the mix (and so final.*) then holds only the system track, and the
+    caller must not treat the mic's raw upload as disposable (see
+    _delete_job_intermediates' caller).
+    """
     if system_wav and mic_wav:
         try:
             run_ffmpeg([
@@ -517,18 +528,19 @@ def mix_audios_wav(system_wav: Optional[Path], mic_wav: Optional[Path], out_wav:
                 "-filter_complex", "[0:a][1:a]amix=inputs=2:duration=longest:dropout_transition=3,volume=2.0",
                 str(out_wav),
             ])
-            return out_wav
+            return out_wav, True
         except Exception as e:
             log(f"mix failed: {e}")
-            # fall through to one of the tracks below
+            shutil.copy(system_wav, out_wav)
+            return out_wav, False
 
     if system_wav:
         shutil.copy(system_wav, out_wav)
-        return out_wav
+        return out_wav, True
     if mic_wav:
         shutil.copy(mic_wav, out_wav)
-        return out_wav
-    return None
+        return out_wav, True
+    return None, True
 
 
 def transcribe_dual_tracks(
@@ -755,12 +767,26 @@ def restore_session(session_id: str):
 
 @app.post("/sessions/recover-index")
 def recover_index():
-    if jobs.is_busy():
-        raise HTTPException(409, "Wait for processing to finish before recovering the library")
-    try:
-        return recover_sessions_index(STORE)
-    except OSError as e:
-        raise HTTPException(500, f"Recovering the library failed: {e}")
+    # Whole recovery under _store_state_lock, like the storage move's checks:
+    # a move in progress is emptying the folder this would write an index
+    # into, and an upload in flight is writing a session folder the orphan
+    # sweep inside recovery would adopt -- after which that upload's job
+    # appends a second record with the same id. Holding the lock (rather
+    # than just checking) keeps a new upload from registering until the
+    # recovery -- a few file reads and writes -- is done. Lock order is the
+    # same as patch_settings': _store_state_lock, then jobs' and the
+    # sessions index's own locks.
+    with _store_state_lock:
+        if move_in_progress:
+            raise HTTPException(409, "The storage folder is being moved -- try again in a moment")
+        if _active_uploads > 0:
+            raise HTTPException(409, "Wait for the current upload to finish before recovering the library")
+        if jobs.is_busy():
+            raise HTTPException(409, "Wait for processing to finish before recovering the library")
+        try:
+            return recover_sessions_index(STORE)
+        except OSError as e:
+            raise HTTPException(500, f"Recovering the library failed: {e}")
 
 
 @app.delete("/sessions/{session_id}")
@@ -934,6 +960,18 @@ def patch_settings(body: SettingsUpdate):
                     raise HTTPException(409, "Wait for the current upload to finish before moving the storage folder")
                 if jobs.is_busy():
                     raise HTTPException(409, "Wait for processing to finish before moving the storage folder")
+                # A damaged index can't have its paths rewritten after the
+                # move (rewrite_index_paths would raise), which used to skip
+                # saving settings.json: this run used the new folder, the next
+                # launch the old, now-empty one. Checked before
+                # try_block_store so a refusal here never leaves the graph
+                # worker blocked.
+                if index_is_corrupt(STORE):
+                    raise HTTPException(
+                        409,
+                        "Your meeting library index is damaged -- use Recover library first, "
+                        "then move the storage folder.",
+                    )
                 if graph_jobs is not None and not graph_jobs.try_block_store():
                     raise HTTPException(409, "Wait for processing to finish before moving the storage folder")
                 move_in_progress = True
@@ -965,7 +1003,16 @@ def patch_settings(body: SettingsUpdate):
         try:
             if body.storage_dir is not None:
                 STORE.mkdir(parents=True, exist_ok=True)
-                rewrite_index_paths(STORE, old_store_dir, STORE)
+                try:
+                    rewrite_index_paths(STORE, old_store_dir, STORE)
+                except SessionsIndexCorruptError as e:
+                    # Checked before the move, so only reachable if the index
+                    # broke mid-move. The files are already in the new folder
+                    # -- settings.json must say so (below), or the next launch
+                    # opens the old, empty one. The stale absolute paths get
+                    # fixed up once the library is recovered and re-moved, and
+                    # export already falls back to final.* in the folder.
+                    log(f"storage moved, but the index couldn't be rewritten: {e}")
             settings = save_settings(SETTINGS_PATH, updates, ROOT / "uploads")
         except OSError as e:
             if body.storage_dir is not None:
@@ -1281,7 +1328,17 @@ def _run_process_job(job_id: str) -> None:
 
         system_wav = to_wav(system_webm, session / "system.wav")
         mic_wav = to_wav(mic_webm, session / "mic.wav")
-        mixed_wav = mix_audios_wav(system_wav, mic_wav, session / "mixed.wav")
+        mixed_wav, mix_complete = mix_audios_wav(system_wav, mic_wav, session / "mixed.wav")
+        # Whether final.* will carry every uploaded audio track. Not the case
+        # if a track failed to convert (a truncated upload makes to_wav
+        # return None) or amix failed and one track was used alone -- the
+        # recording still succeeds, but the missing track's raw webm is then
+        # the only copy of that audio anywhere.
+        all_audio_in_final = (
+            mix_complete
+            and (system_webm is None or system_wav is not None)
+            and (mic_webm is None or mic_wav is not None)
+        )
 
         try:
             final_path = mux_video_audio(screen_webm, mixed_wav, session / "final.webm")
@@ -1596,10 +1653,20 @@ def _run_process_job(job_id: str) -> None:
             graph_jobs.enqueue_session(record["id"])
 
         if transcribed:
-            _delete_job_intermediates(session, final_path, [
-                system_wav, mic_wav, mixed_wav, session / "transcript_.wav",
-                screen_webm, system_webm, mic_webm,
-            ])
+            intermediates = [system_wav, mic_wav, mixed_wav, session / "transcript_.wav", screen_webm]
+            if all_audio_in_final:
+                intermediates += [system_webm, mic_webm]
+            else:
+                # Keep BOTH raw tracks, not just the one that went missing:
+                # they're only useful together (re-mixing, re-transcribing),
+                # and they're small next to the video. The wavs can still go
+                # -- they're derived from these webms.
+                kept = [p.name for p in (system_webm, mic_webm) if p is not None]
+                log(
+                    f"keeping raw audio for {session.name} ({', '.join(kept)}): "
+                    "not every uploaded track made it into the final recording"
+                )
+            _delete_job_intermediates(session, final_path, intermediates)
 
         jobs.update_job(job_id, status="done", notes=notes, video_path=str(final_path))
     except Exception as e:

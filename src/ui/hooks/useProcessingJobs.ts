@@ -26,6 +26,11 @@ const LOST_TRACK_FAILURE_THRESHOLD = 5;
 // other request to the backend (chat, settings) behind them.
 export const POLL_REQUEST_TIMEOUT_MS = 5000;
 
+function isTimeout(e: unknown): boolean {
+  const name = (e as { name?: unknown } | null)?.name;
+  return name === "TimeoutError" || name === "AbortError";
+}
+
 function pollSignal(): AbortSignal | undefined {
   return typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(POLL_REQUEST_TIMEOUT_MS) : undefined;
 }
@@ -95,7 +100,16 @@ export function useProcessingJobs() {
             const status = await getJobStatus(j.id, pollSignal());
             failureCountsRef.current.delete(j.id);
             return { id: j.id, kind: "updated" as const, status };
-          } catch {
+          } catch (e) {
+            // A poll that hit its own deadline (see POLL_REQUEST_TIMEOUT_MS)
+            // says the backend is slow -- normal while it's transcribing on
+            // a saturated CPU -- not that the job is gone. Only real
+            // failures (the job unknown to the backend, the backend
+            // unreachable) count toward the lost-track threshold, or a long
+            // job on a slow machine would be declared lost while it runs.
+            if (isTimeout(e)) {
+              return { id: j.id, kind: "skip" as const };
+            }
             if (backendRestartingRef.current) {
               // The backend lifecycle already told us it's restarting --
               // this is an expected pause, not a real failure, so it

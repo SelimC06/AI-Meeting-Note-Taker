@@ -83,3 +83,12 @@ it("offers Retry when phase is unresponsive (unreachable for >~10s with no main-
 
   expect(restart).toHaveBeenCalledTimes(1);
 });
+
+it("renders the failed banner in the layout flow, not as an overlay", () => {
+  mockLifecycle({ phase: "failed", logTail: "x" });
+  vi.stubGlobal("backendAPI", { restart: vi.fn() });
+  render(<BackendStatusBanner />);
+  const banner = screen.getByRole("alert");
+  expect(banner.className).not.toMatch(/\babsolute\b/);
+  expect(banner.className).toMatch(/\bshrink-0\b/);
+});

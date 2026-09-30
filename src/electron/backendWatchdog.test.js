@@ -144,3 +144,29 @@ test('fetchBackendBusy returns null (unknown) when /jobs fails or is unreachable
     }
     assert.equal(await fetchBackendBusy('http://127.0.0.1:1', 'tok', 200), null);
 });
+
+test('an upload that just finished makes the watchdog treat the backend as busy', async () => {
+    const { knownBusyAfterRailStatus } = await import('./backendWatchdog.js');
+    assert.equal(knownBusyAfterRailStatus(false, true, false), true);
+    // Nothing else changes the last known answer.
+    assert.equal(knownBusyAfterRailStatus(false, false, true), false);
+    assert.equal(knownBusyAfterRailStatus(false, false, false), false);
+    assert.equal(knownBusyAfterRailStatus(true, false, false), true);
+});
+
+test('a job starting right after the upload is not killed at the idle threshold', async () => {
+    const { knownBusyAfterRailStatus, watchdogBusy } = await import('./backendWatchdog.js');
+    // Upload in flight: busy even before /jobs has ever reported anything.
+    assert.equal(watchdogBusy(false, true), true);
+    // Upload done -> job starts -> CPU saturated -> every probe fails, so
+    // backendKnownBusy is never refreshed from /jobs.
+    const knownBusy = knownBusyAfterRailStatus(false, true, false);
+    let failures = 0;
+    let restarted = false;
+    for (let i = 0; i < 10; i++) {
+        const next = nextWatchdogState(failures, false, watchdogThreshold(watchdogBusy(knownBusy, false)));
+        failures = next.consecutiveFailures;
+        restarted ||= next.shouldRestart;
+    }
+    assert.equal(restarted, false);
+});

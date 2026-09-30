@@ -67,9 +67,10 @@ def test_mix_audios_wav_mixes_both_tracks_on_success(tmp_path, monkeypatch):
 
     monkeypatch.setattr(server_module, "run", fake_run)
 
-    result = server_module.mix_audios_wav(system_wav, mic_wav, out_wav)
+    result, complete = server_module.mix_audios_wav(system_wav, mic_wav, out_wav)
 
     assert result == out_wav
+    assert complete is True
     assert out_wav.read_bytes() == b"mixed"
     assert "amix" in " ".join(calls[0])
 
@@ -83,9 +84,11 @@ def test_mix_audios_wav_falls_back_to_system_track_when_mix_fails(tmp_path, monk
 
     monkeypatch.setattr(server_module, "run", lambda cmd: _cp(returncode=1, stderr="mix failed"))
 
-    result = server_module.mix_audios_wav(system_wav, mic_wav, out_wav)
+    result, complete = server_module.mix_audios_wav(system_wav, mic_wav, out_wav)
 
     assert result == out_wav
+    # Only the system track made it in -- reported, so the job keeps mic.webm.
+    assert complete is False
     assert out_wav.read_bytes() == b"sys"
 
 
@@ -94,9 +97,10 @@ def test_mix_audios_wav_uses_system_only(tmp_path):
     system_wav.write_bytes(b"sys")
     out_wav = tmp_path / "mixed.wav"
 
-    result = server_module.mix_audios_wav(system_wav, None, out_wav)
+    result, complete = server_module.mix_audios_wav(system_wav, None, out_wav)
 
     assert result == out_wav
+    assert complete is True
     assert out_wav.read_bytes() == b"sys"
 
 
@@ -105,14 +109,15 @@ def test_mix_audios_wav_uses_mic_only(tmp_path):
     mic_wav.write_bytes(b"mic")
     out_wav = tmp_path / "mixed.wav"
 
-    result = server_module.mix_audios_wav(None, mic_wav, out_wav)
+    result, complete = server_module.mix_audios_wav(None, mic_wav, out_wav)
 
     assert result == out_wav
+    assert complete is True
     assert out_wav.read_bytes() == b"mic"
 
 
 def test_mix_audios_wav_returns_none_with_no_tracks(tmp_path):
-    result = server_module.mix_audios_wav(None, None, tmp_path / "mixed.wav")
+    result, _ = server_module.mix_audios_wav(None, None, tmp_path / "mixed.wav")
     assert result is None
 
 

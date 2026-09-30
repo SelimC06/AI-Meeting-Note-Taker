@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import DockedRail from "./DockedRail";
+import DockedRail, { RAIL_SETTLE_TIMEOUT_MS } from "./DockedRail";
 
 afterEach(() => {
   cleanup();
@@ -355,4 +355,66 @@ it("does not push any slot rect while docked (not floating), regardless of colla
   const { updateDockSlotRect } = stubWindowControls();
   render(<DockedRail collapsed />);
   expect(updateDockSlotRect).not.toHaveBeenCalled();
+});
+
+// ---------- settling never gets stuck ----------
+
+const IDLE_STATUS: RailStatus = {
+  status: "idle", elapsedLabel: "00:00", level: [], recordError: null, isProcessing: false, hasPendingUpload: false,
+};
+
+function dragAndRelease() {
+  const handle = screen.getByLabelText("Drag to detach the rail");
+  fireEvent.pointerDown(handle, { clientX: 30, clientY: 20, pointerId: 1 });
+  fireEvent.pointerMove(handle, { clientX: 60, clientY: 20, pointerId: 1 });
+  fireEvent.pointerUp(handle, { clientX: 40, clientY: 15, pointerId: 1 });
+}
+
+it("keeps the pill hidden while main decides dock vs float (no flash)", () => {
+  mockSlotRect();
+  const { emitStatus } = stubWindowControls({ endRailFloatDrag: vi.fn(() => new Promise(() => {})) });
+  render(<DockedRail />);
+  emitStatus(IDLE_STATUS);
+
+  dragAndRelease();
+
+  expect(screen.getByLabelText("Start recording")).toBeDisabled();
+});
+
+it("stops settling when endRailFloatDrag rejects, instead of leaving the pill invisible", async () => {
+  mockSlotRect();
+  const { emitStatus } = stubWindowControls({ endRailFloatDrag: vi.fn().mockRejectedValue(new Error("ipc gone")) });
+  render(<DockedRail />);
+  emitStatus(IDLE_STATUS);
+
+  dragAndRelease();
+
+  await waitFor(() => expect(screen.getByLabelText("Start recording")).toBeEnabled());
+});
+
+it("stops settling after a timeout when main's floatingChanged push never arrives", async () => {
+  vi.useFakeTimers();
+  try {
+    mockSlotRect();
+    const getRailFloating = vi.fn().mockResolvedValue(false);
+    const { emitStatus } = stubWindowControls({
+      endRailFloatDrag: vi.fn(() => new Promise(() => {})),
+      getRailFloating,
+    });
+    render(<DockedRail />);
+    emitStatus(IDLE_STATUS);
+
+    dragAndRelease();
+    expect(screen.getByLabelText("Start recording")).toBeDisabled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(RAIL_SETTLE_TIMEOUT_MS);
+    });
+
+    expect(screen.getByLabelText("Start recording")).toBeEnabled();
+    // And it re-asked main where the rail ended up.
+    expect(getRailFloating).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
 });

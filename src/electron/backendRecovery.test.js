@@ -584,3 +584,12 @@ test('attemptRecovery stops a still-tracked backend that never bound the port be
         fs.rmSync(markerDir, { recursive: true, force: true });
     }
 });
+
+test('statusForHealthyRetry clears a failed (or never-confirmed) state with "up"', async () => {
+    const { statusForHealthyRetry } = await import('./backendRecovery.js');
+    assert.deepEqual(statusForHealthyRetry({ state: 'failed', logTail: 'x' }), { state: 'up' });
+    assert.deepEqual(statusForHealthyRetry({ state: 'restarting', attempt: 3, maxAttempts: 3 }), { state: 'up' });
+    assert.deepEqual(statusForHealthyRetry(null), { state: 'up' });
+    assert.equal(statusForHealthyRetry({ state: 'ready' }), null);
+    assert.equal(statusForHealthyRetry({ state: 'up' }), null);
+});

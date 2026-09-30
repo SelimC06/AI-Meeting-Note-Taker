@@ -178,6 +178,16 @@ class StorageMoveError(Exception):
     pass
 
 
+# server.py builds export zips in <storage>/EXPORT_DIR_NAME (defined here so
+# move_storage_dir below and server.py agree on it). Only transient files
+# live there, so a storage move leaves it behind and deletes it afterwards
+# instead of moving it: an export zip still open for a download made the
+# move fail on Windows, and a cross-drive copy that died partway left
+# new_dir/.exports behind, so every retry failed with "Destination folder
+# is not empty".
+EXPORT_DIR_NAME = ".exports"
+
+
 def move_storage_dir(old_dir: Path, new_dir: Path) -> None:
     old_resolved = old_dir.resolve()
     new_resolved = new_dir.resolve()
@@ -212,10 +222,14 @@ def move_storage_dir(old_dir: Path, new_dir: Path) -> None:
     # last guarantees a partial failure always leaves the index alongside
     # whichever directory still holds the bulk of the session folders.
     entries = sorted(
-        old_dir.iterdir(), key=lambda p: (p.name == "sessions_index.json", p.name)
+        (p for p in old_dir.iterdir() if p.name != EXPORT_DIR_NAME),
+        key=lambda p: (p.name == "sessions_index.json", p.name),
     )
     try:
         for entry in entries:
             shutil.move(str(entry), str(new_dir / entry.name))
     except OSError as e:
         raise StorageMoveError(f"Failed to move recordings: {e}") from e
+    # Best-effort: a zip still open for download stays behind and is cleaned
+    # up by server.py's startup export sweep if it's ever pointed here again.
+    shutil.rmtree(old_dir / EXPORT_DIR_NAME, ignore_errors=True)

@@ -84,3 +84,44 @@ export function armAutoUpdate(getMainWindow, updater = electronUpdater.autoUpdat
 export function installUpdate(updater = electronUpdater.autoUpdater) {
     updater.quitAndInstall();
 }
+
+// How long installUpdateOrQuit gives quitAndInstall to actually start the
+// quit before assuming it silently didn't. A real quit is under way well
+// before this (quitAndInstall calls app.quit() on the next tick; before-quit
+// then spends at most a few seconds stopping the backend), and calling
+// app.quit() again during that is harmless.
+export const INSTALL_QUIT_FALLBACK_MS = 10000;
+
+// For updater:install, which has already destroyed every window by the
+// time it gets here. quitAndInstall() does NOT throw when the installer is
+// missing or fails to launch: electron-updater's install() reports it via
+// the 'error' event and returns false, and quitAndInstall then just returns
+// without quitting -- leaving a windowless, menu-less app the user can't
+// quit (and a relaunch only hits the single-instance lock). So quit
+// ourselves on the updater's 'error', a synchronous throw, or -- if neither
+// comes and the app is still here -- after INSTALL_QUIT_FALLBACK_MS.
+export function installUpdateOrQuit(
+    quit,
+    updater = electronUpdater.autoUpdater,
+    fallbackMs = INSTALL_QUIT_FALLBACK_MS
+) {
+    let settled = false;
+    let timer = null;
+    const onError = (err) => fallback(err);
+    function fallback(reason) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        updater.removeListener?.('error', onError);
+        if (reason) console.error('[updater] install failed, quitting without installing:', reason?.message ?? reason);
+        quit();
+    }
+    updater.once('error', onError);
+    timer = setTimeout(() => fallback(null), fallbackMs);
+    try {
+        updater.quitAndInstall();
+    } catch (err) {
+        fallback(err);
+    }
+    return timer;
+}

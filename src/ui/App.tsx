@@ -213,7 +213,7 @@ function App() {
             view={sidebarView}
             onViewChange={setSidebarView}
           />
-          <OllamaOnboardingGate active={backendUp} />
+          <OllamaOnboardingGate active={backendUp} suppressed={settingsOpen || showRecordingConsent} />
 
           {showRecordingConsent && (
             <RecordingConsentModal

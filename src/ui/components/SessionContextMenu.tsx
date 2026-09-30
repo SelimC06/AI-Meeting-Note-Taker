@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { backendFetch, exportSessionNotesUrl, exportSessionZipUrl, type Session } from "../api";
+import { isDialogOpen } from "../hooks/useDialog";
 
 interface Props {
   session: Session;
@@ -123,7 +124,9 @@ const SessionContextMenu: React.FC<Props> = ({
       onClose();
     };
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      // A dialog opened over the menu (e.g. the recording-consent notice)
+      // owns Escape -- one press used to answer it AND close the menu.
+      if (e.key === "Escape" && !isDialogOpen()) onClose();
     };
     document.addEventListener("mousedown", handlePointerDown);
     document.addEventListener("keydown", handleKeyDown);

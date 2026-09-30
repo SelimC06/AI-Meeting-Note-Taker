@@ -319,3 +319,24 @@ it("a click on a row's actions button doesn't count as an outside click", () => 
     trigger.remove();
   }
 });
+
+it("leaves Escape to a dialog that's open on top of the menu", async () => {
+  const { useDialog } = await import("../hooks/useDialog");
+  function Dialog({ onEscape }: { onEscape: () => void }) {
+    const { dialogProps, titleId } = useDialog({ onEscape });
+    return (
+      <div {...dialogProps}>
+        <h2 id={titleId}>Consent</h2>
+        <button>ok</button>
+      </div>
+    );
+  }
+  const onDialogEscape = vi.fn();
+  const props = renderMenu("active");
+  render(<Dialog onEscape={onDialogEscape} />);
+
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+
+  expect(onDialogEscape).toHaveBeenCalledTimes(1);
+  expect(props.onClose).not.toHaveBeenCalled();
+});

@@ -460,3 +460,35 @@ def test_save_lock_is_reentrant(tmp_path):
         result = save(settings_path, {"whisper_model": "small.en"}, default_dir)
 
     assert result["whisper_model"] == "small.en"
+
+
+def test_move_storage_dir_leaves_the_exports_folder_behind_and_removes_it(tmp_path):
+    from app.settings_store import EXPORT_DIR_NAME
+
+    old = tmp_path / "old"
+    (old / "sess1").mkdir(parents=True)
+    (old / "sess1" / "final.webm").write_bytes(b"v")
+    (old / EXPORT_DIR_NAME).mkdir()
+    (old / EXPORT_DIR_NAME / "meeting-export-abc.zip").write_bytes(b"zip")
+    new = tmp_path / "new"
+
+    move_storage_dir(old, new)
+
+    assert (new / "sess1" / "final.webm").exists()
+    assert not (new / EXPORT_DIR_NAME).exists()
+    assert not (old / EXPORT_DIR_NAME).exists()
+
+
+def test_move_storage_dir_is_not_broken_by_an_export_that_cannot_be_removed(tmp_path, monkeypatch):
+    from app import settings_store
+
+    old = tmp_path / "old"
+    (old / "sess1").mkdir(parents=True)
+    (old / settings_store.EXPORT_DIR_NAME).mkdir()
+    moved = []
+    real_move = shutil.move
+    monkeypatch.setattr(settings_store.shutil, "move", lambda s, d: (moved.append(Path(s).name), real_move(s, d))[1])
+
+    move_storage_dir(old, tmp_path / "new")
+
+    assert moved == ["sess1"]  # .exports never attempted

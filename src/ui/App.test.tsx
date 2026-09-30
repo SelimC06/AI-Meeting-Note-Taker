@@ -228,3 +228,16 @@ it("shows no settings warning when the backend reports none", async () => {
   await waitFor(() => expect(getHealthStatus).toHaveBeenCalled());
   expect(screen.queryByText(/settings file/)).not.toBeInTheDocument();
 });
+
+it("doesn't show the Ollama setup gate over an open Settings dialog", async () => {
+  vi.mocked(getOllamaModels).mockResolvedValue({ ok: false, models: [], error: "connection refused" });
+  render(<App />);
+  // Gate appears once the backend is up and Ollama is unreachable.
+  expect(await screen.findByRole("dialog", { name: "[SETUP REQUIRED]" })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /settings/i }));
+
+  const settings = await screen.findByRole("dialog", { name: "[SETTINGS]" });
+  expect(screen.queryByRole("dialog", { name: "[SETUP REQUIRED]" })).not.toBeInTheDocument();
+  expect(settings.contains(document.activeElement)).toBe(true);
+});

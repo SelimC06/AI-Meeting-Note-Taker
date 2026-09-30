@@ -52,7 +52,14 @@ const BackendStatusBanner: React.FC = () => {
       }
     };
     return (
-      <div role="alert" className={`${baseClasses} flex-wrap bg-panel border-b border-red-500 text-red-400`}>
+      // In the layout flow (shrink-0 inside App's flex column), not
+      // absolutely positioned like the transient banners above: this one
+      // stays until the backend recovers and can't be dismissed, and with
+      // Details open it used to cover the docked rail's Record/Stop.
+      <div
+        role="alert"
+        className="shrink-0 px-3 py-1.5 text-xs flex flex-wrap items-center justify-between gap-2 bg-panel border-b border-red-500 text-red-400"
+      >
         <span>The app backend stopped and couldn't be restarted.</span>
         <div className="flex items-center gap-3">
           {state.logTail && (

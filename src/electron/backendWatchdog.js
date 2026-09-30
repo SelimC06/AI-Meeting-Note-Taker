@@ -30,6 +30,26 @@ export function watchdogThreshold(backendBusy) {
     return backendBusy ? WATCHDOG_BUSY_FAILURE_THRESHOLD : WATCHDOG_FAILURE_THRESHOLD;
 }
 
+// What main.js's last-known "backend has a job" becomes after a
+// rail:pushStatus. /jobs only answers while the backend is responsive, and
+// the moment it gets busy is exactly when it stops answering: the upload
+// finishes, the job starts, transcription saturates the CPU, and the next
+// probes fail before any probe ever saw the job -- so the idle threshold
+// applied and the watchdog killed the job ~15s in. An upload that just
+// ended (isProcessing true -> false) almost always means a job was just
+// created, so assume busy until an answered probe says otherwise (a failed
+// upload only makes the watchdog more patient until then).
+export function knownBusyAfterRailStatus(knownBusy, wasProcessing, isProcessing) {
+    if (wasProcessing && !isProcessing) return true;
+    return knownBusy;
+}
+
+// The rail uploading right now (isProcessing) counts as busy too: the
+// backend is receiving a multi-GB request, and the job follows immediately.
+export function watchdogBusy(knownBusy, railIsProcessing) {
+    return Boolean(knownBusy || railIsProcessing);
+}
+
 // Asks the backend's own /jobs (the same endpoint the quit guard and the
 // renderers' useProcessingJobs poll) whether a job is queued or running.
 // true/false, or null when it couldn't tell (unreachable, timeout, bad

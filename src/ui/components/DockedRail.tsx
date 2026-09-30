@@ -37,6 +37,10 @@ const DRAG_THRESHOLD_PX = 5;
 // just as live while cutting out redundant IPC/native-call traffic.
 const DRAG_MOVE_MIN_INTERVAL_MS = 16;
 
+// Upper bound on waiting for main's dock-vs-float answer after a drag
+// (normally a single IPC round trip) before showing the pill anyway.
+export const RAIL_SETTLE_TIMEOUT_MS = 1000;
+
 type DragState = {
     startX: number;
     startY: number;
@@ -118,6 +122,26 @@ export default function DockedRail({ collapsed = false }: Props) {
             unsubscribe?.();
         };
     }, []);
+
+    // Safety net for settling: it normally ends when main's floatingChanged
+    // push arrives (one IPC round trip), but if that push never comes the
+    // pill stayed opacity-0 for good -- during a recording that hid the
+    // dashboard's record/stop controls. After RAIL_SETTLE_TIMEOUT_MS, stop
+    // settling and ask main where the rail actually ended up.
+    useEffect(() => {
+        if (!isSettling) return;
+        let cancelled = false;
+        const timer = setTimeout(() => {
+            setIsSettling(false);
+            window.windowControls?.getRailFloating?.()?.then((floating) => {
+                if (!cancelled) setIsFloating(!!floating);
+            });
+        }, RAIL_SETTLE_TIMEOUT_MS);
+        return () => {
+            cancelled = true;
+            clearTimeout(timer);
+        };
+    }, [isSettling]);
 
     // Plays a pop-in entrance on the docked pill every time we (re)become
     // docked — whether that's from dragging it back near the dock slot or
@@ -246,7 +270,10 @@ export default function DockedRail({ collapsed = false }: Props) {
         // uses the floating window's actual current bounds, which can
         // disagree with a local guess at the slot boundary, and only main
         // pushing in both directions guarantees the renderer converges.
-        window.windowControls?.endRailFloatDrag?.();
+        // If the invoke fails, no floatingChanged push is coming -- stop
+        // settling now rather than leaving the pill invisible (see the
+        // safety timeout below for the push that never arrives).
+        Promise.resolve(window.windowControls?.endRailFloatDrag?.()).catch(() => setIsSettling(false));
     };
 
     // If the OS cancels the gesture mid-drag (Alt+Tab, Win+L, a display

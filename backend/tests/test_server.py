@@ -4013,7 +4013,7 @@ def test_process_writes_transcript_for_system_only_recording(client, monkeypatch
 def test_process_falls_back_to_unlabeled_mixed_transcript_when_dual_track_fails(client, monkeypatch):
     def fake_mix(system_wav, mic_wav, out_wav):
         out_wav.write_bytes(b"fake mixed wav")
-        return out_wav
+        return out_wav, True
 
     monkeypatch.setattr(server_module, "mix_audios_wav", fake_mix)
 
@@ -4281,7 +4281,18 @@ def test_startup_with_corrupt_settings_reports_it_and_guards_the_sweeps(tmp_path
 _INTERMEDIATES = {"system.wav", "mic.wav", "mixed.wav", "screen.webm", "system.webm", "mic.webm"}
 
 
+def _successful_amix(monkeypatch):
+    # The fake wavs aren't real audio, so a real amix would fail and fall
+    # back to one track -- exactly the case that must KEEP the raw webms.
+    # This stands in for an amix that worked.
+    def fake_run_ffmpeg(args):
+        Path(args[-1]).write_bytes(b"mixed wav")
+
+    monkeypatch.setattr(server_module, "run_ffmpeg", fake_run_ffmpeg)
+
+
 def test_successful_job_deletes_intermediates_and_keeps_what_features_read(client, monkeypatch):
+    _successful_amix(monkeypatch)
     job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
     assert job["status"] == "done"
 
@@ -4296,6 +4307,53 @@ def test_successful_job_deletes_intermediates_and_keeps_what_features_read(clien
     # Export still has everything it ships.
     zf = zipfile.ZipFile(io.BytesIO(client.get(f"/sessions/{job['session_id']}/export/zip").content))
     assert {"final.webm", "notes.md", "transcript_.txt"} <= set(zf.namelist())
+
+
+def test_job_keeps_both_raw_tracks_when_one_track_failed_to_convert(client, monkeypatch):
+    """A truncated mic upload: to_wav fails for it, transcription still
+    succeeds from the system track alone, and final.* has no mic audio --
+    mic.webm is then the only copy of it and must not be deleted."""
+    _successful_amix(monkeypatch)
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", _fake_mux)
+    monkeypatch.setattr(server_module, "transcribe_wav", _two_speaker_system_transcribe_wav)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
+    real_writer = _fake_to_wav_writer()
+
+    def to_wav_mic_fails(src, dst, ar=16000, ac=1):
+        if src is not None and src.name == "mic.webm":
+            return None
+        return real_writer(src, dst, ar, ac)
+
+    monkeypatch.setattr(server_module, "to_wav", to_wav_mic_fails)
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+
+    remaining = {p.name for p in (server_module.STORE / job["session_id"]).iterdir()}
+    assert {"system.webm", "mic.webm", "final.webm"} <= remaining
+    # Derived and duplicate files still go.
+    assert remaining.isdisjoint({"system.wav", "mixed.wav", "screen.webm"}), remaining
+
+
+def test_job_keeps_both_raw_tracks_when_amix_falls_back_to_one_track(client, monkeypatch):
+    def failing_run_ffmpeg(args):
+        raise RuntimeError("amix: invalid data")
+
+    monkeypatch.setattr(server_module, "run_ffmpeg", failing_run_ffmpeg)
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    assert job["status"] == "done"
+
+    remaining = {p.name for p in (server_module.STORE / job["session_id"]).iterdir()}
+    assert {"system.webm", "mic.webm", "final.webm"} <= remaining
+    assert remaining.isdisjoint({"system.wav", "mic.wav", "mixed.wav", "screen.webm"}), remaining
 
 
 def test_single_track_fallback_job_deletes_transcript_wav(client, monkeypatch):
@@ -4766,3 +4824,67 @@ def test_failed_move_unblocks_the_graph_worker(client, tmp_path, monkeypatch, gr
 
     assert graph_jobs._store_blocked is False
     assert server_module.move_in_progress is False
+
+
+# ---------- storage move / recovery vs. a damaged index ----------
+
+def test_storage_move_is_refused_while_the_index_is_corrupt(client, tmp_path):
+    (server_module.STORE / "sessions_index.json").write_text("[{trunc", encoding="utf-8")
+    new_dir = tmp_path.parent / f"{tmp_path.name}-moved-corrupt"
+    original = server_module.STORE
+
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+
+    assert resp.status_code == 409
+    assert "Recover library" in resp.json()["detail"]
+    assert server_module.STORE == original
+    assert not new_dir.exists()
+    assert server_module.move_in_progress is False
+    if server_module.graph_jobs is not None:
+        assert server_module.graph_jobs._store_blocked is False
+
+
+def test_settings_are_still_saved_if_the_index_breaks_during_the_move(client, tmp_path, monkeypatch):
+    new_dir = tmp_path.parent / f"{tmp_path.name}-moved-midbreak"
+
+    def move_then_index_breaks(old_dir, new):
+        new.mkdir(parents=True, exist_ok=True)
+        (new / "sessions_index.json").write_text("[{trunc", encoding="utf-8")
+
+    monkeypatch.setattr(server_module, "move_storage_dir", move_then_index_breaks)
+
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+
+    assert resp.status_code == 200
+    saved = json.loads(server_module.SETTINGS_PATH.read_text(encoding="utf-8"))
+    assert saved["storage_dir"] == str(new_dir)
+    assert server_module.STORE == new_dir
+
+
+@pytest.mark.parametrize("state", ["move", "upload"])
+def test_recover_index_refuses_during_a_move_or_an_upload(client, monkeypatch, state):
+    (server_module.STORE / "sessions_index.json").write_text("[{trunc", encoding="utf-8")
+    if state == "move":
+        monkeypatch.setattr(server_module, "move_in_progress", True)
+    else:
+        monkeypatch.setattr(server_module, "_active_uploads", 1)
+
+    resp = client.post("/sessions/recover-index")
+
+    assert resp.status_code == 409
+    assert (server_module.STORE / "sessions_index.json").read_text(encoding="utf-8") == "[{trunc"
+
+
+def test_recover_index_holds_the_store_lock_so_an_upload_cannot_register_meanwhile(client, monkeypatch):
+    (server_module.STORE / "sessions_index.json").write_text("[{trunc", encoding="utf-8")
+    lock_held_during_recovery = []
+    real_recover = server_module.recover_sessions_index
+
+    def spying_recover(store):
+        lock_held_during_recovery.append(server_module._store_state_lock.locked())
+        return real_recover(store)
+
+    monkeypatch.setattr(server_module, "recover_sessions_index", spying_recover)
+
+    assert client.post("/sessions/recover-index").status_code == 200
+    assert lock_held_during_recovery == [True]

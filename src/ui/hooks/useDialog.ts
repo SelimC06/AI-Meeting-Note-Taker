@@ -20,6 +20,12 @@ export function focusableElements(container: HTMLElement): HTMLElement[] {
 // doesn't have both react to one key press.
 const dialogStack: symbol[] = [];
 
+// For key handling outside dialogs (SessionContextMenu's Escape): while a
+// dialog is open, Escape belongs to it.
+export function isDialogOpen(): boolean {
+  return dialogStack.length > 0;
+}
+
 interface UseDialogOptions {
   // Escape closes the dialog when given. Left out for a dialog that must be
   // answered explicitly (the Ollama setup gate).
