@@ -601,7 +601,13 @@ def sweep_orphaned_sessions(store_dir: Path, min_age_seconds: Optional[float] = 
             # Tombstoned folders (above) are exempt: nothing writes to a
             # folder the user already deleted, so retrying its removal is
             # always safe.
-            if time.time() - _newest_mtime(entry) < min_age_seconds:
+            # A gate of 0 (the tests; recover_sessions_index) means NO gate --
+            # not even computing the age. On Windows a file's mtime comes from
+            # a coarser clock than time.time(), so a file written a moment ago
+            # can look slightly in the future: age < 0, and "< 0" skipped the
+            # folder even with the gate off. With a real gate, that negative
+            # age simply reads as "just modified", which is right.
+            if min_age_seconds > 0 and time.time() - _newest_mtime(entry) < min_age_seconds:
                 continue
             if _has_recording_data(entry):
                 record = _adopt_orphan_session(store_dir, entry)

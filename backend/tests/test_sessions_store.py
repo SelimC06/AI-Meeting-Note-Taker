@@ -1619,3 +1619,37 @@ def test_recover_collapses_duplicates_in_the_backup(tmp_path: Path):
     sessions_store.recover_sessions_index(tmp_path)
 
     assert [(r["id"], r["title"]) for r in load_sessions(tmp_path)] == [(A_ID, "Real")]
+
+
+def test_a_file_mtime_slightly_in_the_future_does_not_block_an_ungated_sweep(tmp_path: Path, monkeypatch):
+    """Windows clock skew: a just-written file's mtime can be a little ahead
+    of time.time(). Simulated here on any platform with os.utime."""
+    from app.sessions_store import sweep_orphaned_sessions
+
+    monkeypatch.setattr(sessions_store, "ORPHAN_MIN_AGE_SECONDS", 600)
+    folder = tmp_path / ORPHAN_ID
+    folder.mkdir()
+    (folder / "final.webm").write_bytes(b"v")
+    future = time.time() + 3
+    for p in (folder, folder / "final.webm"):
+        os.utime(p, (future, future))
+
+    # (b) with the real gate: "just modified", left alone.
+    assert sweep_orphaned_sessions(tmp_path) == {"adopted": [], "deleted": []}
+    # (a) with the gate off (tests, Recover library): adopted regardless.
+    assert sweep_orphaned_sessions(tmp_path, min_age_seconds=0) == {"adopted": [ORPHAN_ID], "deleted": []}
+
+
+def test_recover_library_adopts_a_folder_whose_mtime_is_in_the_future(tmp_path: Path):
+    folder = tmp_path / ORPHAN_ID
+    folder.mkdir()
+    (folder / "final.webm").write_bytes(b"v")
+    future = time.time() + 3
+    for p in (folder, folder / "final.webm"):
+        os.utime(p, (future, future))
+    (tmp_path / "sessions_index.json").write_text("garbage", encoding="utf-8")
+
+    result = sessions_store.recover_sessions_index(tmp_path)
+
+    assert result["adopted"] == 1
+    assert [r["id"] for r in load_sessions(tmp_path)] == [ORPHAN_ID]
