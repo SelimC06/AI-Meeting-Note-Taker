@@ -8,10 +8,45 @@
 // enough consecutive probes fail.
 
 import { backendAuthHeaders } from './backend.js';
+import { hasActiveJob } from './closeGuard.js';
 
 export const WATCHDOG_FAILURE_THRESHOLD = 3;
 export const WATCHDOG_PROBE_TIMEOUT_MS = 3000;
 export const WATCHDOG_INTERVAL_MS = 5000;
+
+// While a transcription job is known to be queued/running, the backend is
+// expected to miss probes: Whisper/pyannote/ffmpeg saturate every core, and
+// /health then can't get a thread in time. 3 misses (~15s) used to kill it
+// mid-transcription -- losing the job the user was waiting on. Restarts
+// aren't switched off entirely while busy, though: a backend that genuinely
+// deadlocks mid-job is exactly what this watchdog exists for, so it still
+// gets recovered, just after 60 consecutive misses (~5 minutes of total
+// silence) instead of 3. Real CPU saturation lets an occasional probe
+// through well within that, which resets the count.
+export const WATCHDOG_BUSY_FAILURE_THRESHOLD = 60;
+export const WATCHDOG_JOBS_TIMEOUT_MS = 1500;
+
+export function watchdogThreshold(backendBusy) {
+    return backendBusy ? WATCHDOG_BUSY_FAILURE_THRESHOLD : WATCHDOG_FAILURE_THRESHOLD;
+}
+
+// Asks the backend's own /jobs (the same endpoint the quit guard and the
+// renderers' useProcessingJobs poll) whether a job is queued or running.
+// true/false, or null when it couldn't tell (unreachable, timeout, bad
+// response) -- the caller keeps its last known answer in that case, since
+// "can't reach /jobs" is exactly what a busy backend looks like.
+export async function fetchBackendBusy(backendUrl, authToken = null, timeoutMs = WATCHDOG_JOBS_TIMEOUT_MS) {
+    try {
+        const res = await fetch(`${backendUrl}/jobs`, {
+            headers: backendAuthHeaders(authToken),
+            signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (!res.ok) return null;
+        return hasActiveJob(await res.json());
+    } catch {
+        return null;
+    }
+}
 
 // Pure decision function, kept separate from the actual network probe so it
 // can be tested without spawning a process or a real/fake server: given

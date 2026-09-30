@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { resolveVenvPython, resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, waitForHealth, HEALTH_ATTEMPT_TIMEOUT_MS, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree, getProcessExecutablePath, findPidsListeningOnPort, generateBackendToken, backendAuthHeaders, BACKEND_TOKEN_HEADER, BACKEND_TOKEN_ENV } from './backend.js';
+import { backendSpawnOptions, killProcessTree, killAllBackendsSync, resolveVenvPython, resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, waitForHealth, HEALTH_ATTEMPT_TIMEOUT_MS, getBackendLogTail, armCrashMonitor, disarmCrashMonitor, ensurePortFree, getProcessExecutablePath, findPidsListeningOnPort, generateBackendToken, backendAuthHeaders, BACKEND_TOKEN_HEADER, BACKEND_TOKEN_ENV } from './backend.js';
 
 test('generateBackendToken returns a fresh 256-bit hex token each call', () => {
     const a = generateBackendToken();
@@ -544,3 +544,125 @@ test(
         }
     }
 );
+
+
+// ---------- process-group stop / escalation (macOS/Linux) ----------
+
+const POSIX_ONLY = { skip: process.platform === 'win32' };
+
+function pidIsAlive(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (err) {
+        return err.code === 'EPERM';
+    }
+}
+
+async function waitUntil(cond, timeoutMs = 3000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (cond()) return true;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return cond();
+}
+
+// A "backend" that spawns a long-lived grandchild (standing in for ffmpeg)
+// and prints its pid, so a test can check the grandchild dies too.
+const PARENT_WITH_GRANDCHILD_SCRIPT = `
+const { spawn } = require('child_process');
+const gc = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+console.log('GRANDCHILD ' + gc.pid);
+setInterval(() => {}, 1000);
+`;
+
+function captureGrandchildPid(child) {
+    return new Promise((resolve) => {
+        child.stdout.on('data', (data) => {
+            const match = /GRANDCHILD (\d+)/.exec(data.toString());
+            if (match) resolve(Number(match[1]));
+        });
+    });
+}
+
+test('backendSpawnOptions detaches on macOS/Linux (own process group) but not on Windows', () => {
+    assert.equal(backendSpawnOptions('/c', {}, 'darwin').detached, true);
+    assert.equal(backendSpawnOptions('/c', {}, 'linux').detached, true);
+    assert.equal(backendSpawnOptions('C:/c', {}, 'win32').detached, false);
+});
+
+test('stopBackend kills the whole process group, grandchildren included', POSIX_ONLY, async () => {
+    const child = startBackend(process.execPath, ['-e', PARENT_WITH_GRANDCHILD_SCRIPT], process.cwd());
+    const grandchildPid = await captureGrandchildPid(child);
+    assert.ok(pidIsAlive(grandchildPid));
+
+    await stopBackend();
+
+    assert.ok(await waitUntil(() => !pidIsAlive(grandchildPid)), 'grandchild (ffmpeg stand-in) survived the stop');
+    assert.ok(child.exitCode !== null || child.signalCode !== null);
+});
+
+test('stopBackend escalates to SIGKILL when the backend ignores SIGTERM', POSIX_ONLY, async () => {
+    // What a deadlocked uvicorn looks like from outside: SIGTERM is caught
+    // (it only sets a flag) and nothing ever acts on it.
+    const child = startBackend(
+        process.execPath,
+        ['-e', "process.on('SIGTERM', () => {}); console.log('READY'); setInterval(() => {}, 1000);"],
+        process.cwd()
+    );
+    await new Promise((resolve) => child.stdout.once('data', resolve));
+    const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve(signal)));
+
+    const started = Date.now();
+    await stopBackend(process.platform, 300);
+
+    assert.equal(await exited, 'SIGKILL');
+    assert.ok(Date.now() - started >= 250, 'SIGKILL was sent before the grace period elapsed');
+});
+
+test('stopBackend resolves only once the backend has actually exited', POSIX_ONLY, async () => {
+    const child = startBackend(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], process.cwd());
+    await stopBackend();
+    assert.equal(pidIsAlive(child.pid), false);
+});
+
+test('startBackend stops the previous child instead of orphaning it, without reporting a crash', async () => {
+    const crashes = [];
+    const first = startBackend(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], process.cwd());
+    armCrashMonitor(first, (code, signal) => crashes.push({ code, signal }));
+    const firstExited = new Promise((resolve) => first.once('exit', resolve));
+
+    const second = startBackend(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], process.cwd());
+    try {
+        await firstExited;
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.deepEqual(crashes, [], 'replacing a backend must not look like a crash');
+        assert.equal(second.exitCode, null);
+    } finally {
+        await stopBackend();
+    }
+});
+
+test('killProcessTree still kills a pid that is not a group leader (orphan from an older build)', POSIX_ONLY, async () => {
+    const legacy = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
+    const exited = new Promise((resolve) => legacy.once('exit', resolve));
+    await killProcessTree(legacy.pid, process.platform, 1000);
+    await exited;
+    assert.equal(pidIsAlive(legacy.pid), false);
+});
+
+test('killAllBackendsSync kills a running backend and its group synchronously', POSIX_ONLY, async () => {
+    const child = startBackend(process.execPath, ['-e', PARENT_WITH_GRANDCHILD_SCRIPT], process.cwd());
+    const grandchildPid = await captureGrandchildPid(child);
+    const crashes = [];
+    armCrashMonitor(child, (code, signal) => crashes.push({ code, signal }));
+    const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve(signal)));
+
+    killAllBackendsSync();
+
+    assert.equal(await exited, 'SIGKILL');
+    assert.ok(await waitUntil(() => !pidIsAlive(grandchildPid)));
+    assert.deepEqual(crashes, []);
+    await stopBackend();
+});

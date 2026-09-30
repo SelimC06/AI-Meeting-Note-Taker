@@ -69,6 +69,15 @@ export async function attemptRecovery({
             if (isShuttingDown()) return;
             publish({ state: 'restarting', attempt, maxAttempts });
             try {
+                // Stop whatever backend is still tracked -- a hung one the
+                // watchdog gave up on, or a slow starter a Retry is
+                // replacing -- and WAIT for it (SIGTERM, then SIGKILL, on
+                // its whole process group), before checking the port.
+                // ensurePortFree only finds a process once it's listening,
+                // so one that hadn't bound the port yet used to survive,
+                // untracked, alongside the new spawn.
+                await stopBackend();
+                if (isShuttingDown()) return;
                 const freed = await ensurePortFree(Number(new URL(backendUrl).port), pythonExe);
                 if (!freed) throw new Error('backend port is held by another process');
                 const child = startBackend(pythonExe, args, cwd, env);

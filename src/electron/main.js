@@ -3,9 +3,10 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, waitForHealth, getBackendLogTail, armCrashMonitor, ensurePortFree, generateBackendToken, backendAuthHeaders, BACKEND_TOKEN_ENV } from './backend.js';
+import { resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, killAllBackendsSync, waitForHealth, getBackendLogTail, armCrashMonitor, ensurePortFree, generateBackendToken, backendAuthHeaders, BACKEND_TOKEN_ENV } from './backend.js';
 import { attemptRecovery, isRecovering } from './backendRecovery.js';
-import { nextWatchdogState, probeHealthOnce, WATCHDOG_INTERVAL_MS } from './backendWatchdog.js';
+import { nextWatchdogState, probeHealthOnce, fetchBackendBusy, watchdogThreshold, WATCHDOG_INTERVAL_MS } from './backendWatchdog.js';
+import { isTrustedIpcSender } from './ipcGuard.js';
 import { armAutoUpdate, getLastStatus, installUpdate } from './updater.js';
 import {
     computeRailBounds,
@@ -23,7 +24,7 @@ import { sanitizeCaptureSourceTypes } from './captureSources.js';
 import { distReactPath } from './paths.js';
 import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence, beforeQuitStep, pendingUploadFromAck, runGuardedClose } from './closeGuard.js';
 import { sanitizeRailStatus, isValidSlotRect } from './railValidation.js';
-import { armProcessCrashLogging, logRendererCrash, logRendererError } from './crashLog.js';
+import { armProcessCrashLogging, logRendererCrash, logRendererError, safeAppendCrashLog } from './crashLog.js';
 import { hasSeenRecordingConsentNotice, markRecordingConsentNoticeSeen } from './consentStore.js';
 import { buildAppMenuTemplate, isZoomShortcut } from './appMenu.js';
 
@@ -139,6 +140,11 @@ let quitConfirmed = false;
 // Reentrancy guard for before-quit's async wait-for-jobs flow -- in case
 // app.quit() is somehow called a second time while it's still resolving.
 let beforeQuitInFlight = false;
+// before-quit's 'finish' step awaits stopBackend() before letting the quit
+// through (see there): in flight while that stop runs, stopped once it's
+// done and the re-entered quit may proceed.
+let backendStopForQuitInFlight = false;
+let backendStoppedForQuit = false;
 // Resolved by the rail:stopAndSaveComplete ack below once RailApp's
 // stop-triggered upload handoff (or the empty-recording no-op path)
 // finishes, so the close/quit guards know when it's actually safe to
@@ -178,6 +184,53 @@ const RAIL_POP_OUT_DURATION_MS = 160;
 let mainWindow = null;
 let railWindow = null;
 
+// Every ipcMain channel below is registered through these two instead of
+// ipcMain.on/handle directly:
+// - Only this app's own windows' top frames are answered (isTrustedIpcSender
+//   -- they only ever load bundled file:// pages); anything else is dropped.
+// - An exception thrown by an ipcMain.on listener (fire-and-forget, so
+//   there's no caller to hand it back to) used to surface as an
+//   uncaughtException, which logs and exits the whole app -- a malformed
+//   message could kill a recording. It's logged and swallowed instead.
+//   ipcMain.handle already returns a thrown error to the renderer as a
+//   rejected invoke(), so handlers only get the sender check.
+function trustedIpcSender(event) {
+    return isTrustedIpcSender(event, [mainWindow, railWindow]);
+}
+
+function ipcOn(channel, listener) {
+    ipcMain.on(channel, (event, ...args) => {
+        if (!trustedIpcSender(event)) {
+            console.warn(`[main] ignored ${channel} from an untrusted sender`);
+            return;
+        }
+        try {
+            listener(event, ...args);
+        } catch (err) {
+            console.error(`[main] ${channel} listener failed:`, err);
+            // crashLogDir needs userData, which is only stable once ready.
+            if (app.isReady()) {
+                safeAppendCrashLog(crashLogDir(), 'main-crashes.log', {
+                    kind: 'ipcListenerError',
+                    channel,
+                    message: err?.message ?? String(err),
+                    stack: err?.stack,
+                });
+            }
+        }
+    });
+}
+
+function ipcHandle(channel, handler) {
+    ipcMain.handle(channel, (event, ...args) => {
+        if (!trustedIpcSender(event)) {
+            console.warn(`[main] ignored ${channel} from an untrusted sender`);
+            return undefined;
+        }
+        return handler(event, ...args);
+    });
+}
+
 // Without this, every launch starts a fully independent instance — each with its own
 // windows and its own attempt to spawn a backend on the same hardcoded port. If an
 // earlier instance never fully quit (e.g. its rail window stayed open, which alone
@@ -185,7 +238,12 @@ let railWindow = null;
 // a new launch's backend collides with the old instance's still-running one.
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
-    app.quit();
+    // exit, not quit: app.quit() is asynchronous and still let this
+    // module's whenReady callback run -- which calls ensurePortFree, and
+    // that kills any process on the backend port whose executable matches
+    // ours: the FIRST instance's live backend. whenReady also bails on
+    // !gotSingleInstanceLock below, in case exit hasn't landed yet.
+    app.exit(0);
 } else {
     app.on('second-instance', () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -219,9 +277,17 @@ function disableZoom(webContents) {
 // this, a compromised/malicious renderer (or a stray link, window.location
 // assignment, etc.) could navigate the window away to attacker-controlled
 // content. External links are handled separately via setWindowOpenHandler.
+//
+// A plain <a href="https://..."> without target="_blank" goes through here
+// rather than setWindowOpenHandler, and used to be blocked silently -- the
+// link just did nothing. http(s) targets open in the system browser, same
+// as window.open; the navigation itself is still always prevented.
 function preventNavigation(webContents) {
-    webContents.on('will-navigate', (event) => {
+    webContents.on('will-navigate', (event, url) => {
         event.preventDefault();
+        if (/^https?:\/\//.test(url)) {
+            shell.openExternal(url).catch(() => {});
+        }
     });
 }
 
@@ -453,7 +519,7 @@ function createRailWindow() {
     });
 }
 
-ipcMain.handle('rail:setErrorVisible', (_event, visible) => {
+ipcHandle('rail:setErrorVisible', (_event, visible) => {
     railErrorVisible = !!visible;
     if (!railWindow || railWindow.isDestroyed()) return;
     // A snap slide still in flight would keep resetting the old height on
@@ -469,12 +535,12 @@ ipcMain.handle('rail:setErrorVisible', (_event, visible) => {
     });
 });
 
-ipcMain.handle('rail:command', (_event, action) => {
+ipcHandle('rail:command', (_event, action) => {
     if (!railWindow || railWindow.isDestroyed()) return;
     railWindow.webContents.send('rail:command', action);
 });
 
-ipcMain.handle('rail:pushStatus', (_event, status) => {
+ipcHandle('rail:pushStatus', (_event, status) => {
     const sanitized = sanitizeRailStatus(status);
     if (!sanitized) {
         console.warn('[main] dropped malformed rail:pushStatus payload:', status);
@@ -495,17 +561,17 @@ ipcMain.handle('rail:pushStatus', (_event, status) => {
 // level ticks). Until then it would sit on DEFAULT_STATUS, which reads
 // "idle" and leaves the Record button enabled -- one click during that
 // window would send toggleRecord and stop an actually-live recording.
-ipcMain.handle('rail:getStatus', () => lastFullRailStatus);
+ipcHandle('rail:getStatus', () => lastFullRailStatus);
 
 // Acked by RailApp.tsx once a stop triggered by stopAndSaveRailRecording()
 // below (the "Stop && Save" dialog choice) has finished its upload handoff
 // -- or immediately, on the empty-recording no-op path.
 // Carries { hasPendingUpload } read at ack time -- see waitForStopAck.
-ipcMain.on('rail:stopAndSaveComplete', (_event, payload) => {
+ipcOn('rail:stopAndSaveComplete', (_event, payload) => {
     pendingStopAck?.resolve(payload);
 });
 
-ipcMain.handle('rail:beginFloatDrag', (_event, slotRect) => {
+ipcHandle('rail:beginFloatDrag', (_event, slotRect) => {
     if (!mainWindow || mainWindow.isDestroyed() || !railWindow || railWindow.isDestroyed()) return;
     if (!isValidSlotRect(slotRect)) {
         console.warn('[main] dropped malformed slotRect in rail:beginFloatDrag:', slotRect);
@@ -547,18 +613,18 @@ ipcMain.handle('rail:beginFloatDrag', (_event, slotRect) => {
 // Fire-and-forget (ipcRenderer.send, not invoke): dragMove fires once per
 // pointermove, and only the latest cursor position ever matters, so there's
 // nothing to await and no need to pay for a round-trip reply.
-ipcMain.on('rail:dragMove', () => {
+ipcOn('rail:dragMove', () => {
     if (!isRailFloatDragging || !railWindow || railWindow.isDestroyed()) return;
     const cursor = screen.getCursorScreenPoint();
     railWindow.setBounds(computeCenteredBounds(cursor, RAIL_WIDTH, currentRailHeight()));
 });
 
-ipcMain.handle('rail:endFloatDrag', () => {
+ipcHandle('rail:endFloatDrag', () => {
     isRailFloatDragging = false;
     settleFloatingRailPosition();
 });
 
-ipcMain.on('rail:updateDockSlotRect', (_event, slotRect) => {
+ipcOn('rail:updateDockSlotRect', (_event, slotRect) => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (!isValidSlotRect(slotRect)) {
         console.warn('[main] dropped malformed slotRect in rail:updateDockSlotRect:', slotRect);
@@ -572,18 +638,18 @@ ipcMain.on('rail:updateDockSlotRect', (_event, slotRect) => {
     lastDockSlotClientRect = slotRect;
 });
 
-ipcMain.handle('rail:getFloating', () => {
+ipcHandle('rail:getFloating', () => {
     return !!(railWindow && !railWindow.isDestroyed() && railWindow.isVisible());
 });
 
 // Click-to-reattach: an explicit, additive alternative to dragging the
 // floating rail back near the dock slot. Both paths now converge on the
 // same popRailBackToDock() above.
-ipcMain.handle('rail:reattach', () => {
+ipcHandle('rail:reattach', () => {
     popRailBackToDock();
 });
 
-ipcMain.handle("list-capture-sources", async (_event, types) => {
+ipcHandle("list-capture-sources", async (_event, types) => {
     const sources = await desktopCapturer.getSources({
         types: sanitizeCaptureSourceTypes(types),
         thumbnailSize: { width: 0, height: 0 }, // we only need ids & names
@@ -595,7 +661,7 @@ ipcMain.handle("list-capture-sources", async (_event, types) => {
     }));
 });
 
-ipcMain.handle('dialog:chooseFolder', async () => {
+ipcHandle('dialog:chooseFolder', async () => {
     if (!mainWindow) return null;
     const result = await dialog.showOpenDialog(mainWindow, {
         properties: ['openDirectory'],
@@ -604,7 +670,7 @@ ipcMain.handle('dialog:chooseFolder', async () => {
     return result.filePaths[0];
 });
 
-ipcMain.handle('shell:openPrivacySettings', (_event, kind) => {
+ipcHandle('shell:openPrivacySettings', (_event, kind) => {
     const page = process.platform === 'darwin'
         ? (kind === 'screenRecording'
             ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
@@ -633,7 +699,7 @@ const consentFilePath = () => path.join(app.getPath('userData'), 'consent.json')
 // together and both proceed to record() concurrently.
 let pendingConsentResolve = null;
 
-ipcMain.handle('consent:ensureRecordingConsent', async () => {
+ipcHandle('consent:ensureRecordingConsent', async () => {
     if (hasSeenRecordingConsentNotice(consentFilePath())) return true;
     if (!mainWindow || mainWindow.isDestroyed()) return true;
 
@@ -658,16 +724,31 @@ ipcMain.handle('consent:ensureRecordingConsent', async () => {
     return proceed;
 });
 
-ipcMain.on('consent:recordingNoticeResponse', (_event, value) => {
+ipcOn('consent:recordingNoticeResponse', (_event, value) => {
     pendingConsentResolve?.(value === true);
 });
+
+// The notice lives in the dashboard renderer's React state. If that page
+// reloads (or its renderer dies) while the notice is up, the notice is gone
+// and no response will ever come -- the pending ensureRecordingConsent, and
+// the recording start awaiting it, used to hang forever. Settled as "don't
+// proceed": the user never actually saw it through, and the next Record
+// click simply shows the notice again. (A closed dashboard still fails open
+// instead -- see mainWindow's 'closed' handler and the comment above.)
+function cancelPendingConsentNotice() {
+    pendingConsentResolve?.(false);
+    pendingConsentResolve = null;
+}
 
 // Reports a JS error caught in a renderer (window.onerror /
 // unhandledrejection, wired up in src/ui/main.tsx and src/rail/main.tsx) --
 // the renderer process is still alive here, unlike render-process-gone
 // above, but this is the far more common failure mode for a React UI (a
 // broken/blank screen) than an actual process death.
-ipcMain.on('diagnostics:reportRendererError', (_event, payload) => {
+// Validated, size-capped and rotated inside logRendererError, and a failed
+// write is logged rather than thrown (see crashLog.js) -- this used to
+// destructure whatever arrived and could throw straight out of the listener.
+ipcOn('diagnostics:reportRendererError', (_event, payload) => {
     logRendererError(crashLogDir(), payload);
 });
 
@@ -676,7 +757,7 @@ ipcMain.on('diagnostics:reportRendererError', (_event, payload) => {
 // this same folder -- this is the only way to get at them, by design: they
 // stay on-device unless the user chooses to open and share this folder
 // themselves, the same local-only stance as the rest of the app.
-ipcMain.handle('diagnostics:openLogsFolder', async () => {
+ipcHandle('diagnostics:openLogsFolder', async () => {
     const dir = crashLogDir();
     fs.mkdirSync(dir, { recursive: true });
     await shell.openPath(dir);
@@ -848,7 +929,11 @@ function createWindow() {
     denyWindowOpenExceptExternalHttp(mainWindow.webContents);
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
         logRendererCrash(crashLogDir(), { window: 'main', reason: details.reason, exitCode: details.exitCode });
+        cancelPendingConsentNotice();
     });
+    // Fires for a reload (Ctrl+R, crash-recovery reload); on the very first
+    // load nothing is pending yet, so it's a no-op then.
+    mainWindow.webContents.on('did-start-loading', cancelPendingConsentNotice);
     // If the dashboard renderer reloads or crash-recovers mid-drag, its
     // DockedRail component (and whatever pointer state it held) is gone —
     // but isRailFloatDragging is main-process state, so nothing else would
@@ -1000,7 +1085,7 @@ function cpuPercentFromDelta(prev, curr) {
     if (totalDelta <= 0) return 0;
     return Math.round((1 - idleDelta / totalDelta) * 100);
 }
-ipcMain.handle('system:getStats', async () => {
+ipcHandle('system:getStats', async () => {
     const before = cpuSnapshot();
     await new Promise(r => setTimeout(r, 150));
     const after = cpuSnapshot();
@@ -1011,7 +1096,7 @@ ipcMain.handle('system:getStats', async () => {
     return { cpuPercent, memPercent, totalMemBytes: totalMem, freeMemBytes: freeMem };
 });
 
-ipcMain.handle('win:minimize', () => mainWindow && mainWindow.minimize());
+ipcHandle('win:minimize', () => mainWindow && mainWindow.minimize());
 
 // Manual resize for the dashboard: Chromium/Windows drop the native
 // resize-by-dragging-the-frame-edge behavior entirely once a BrowserWindow is
@@ -1021,7 +1106,7 @@ ipcMain.handle('win:minimize', () => mainWindow && mainWindow.minimize());
 // drag drives rail:beginFloatDrag/dragMove/endFloatDrag -- main pulls the
 // live cursor position itself rather than trusting renderer-supplied
 // coordinates, matching that existing pattern.
-ipcMain.handle('window:beginResize', (_event, direction) => {
+ipcHandle('window:beginResize', (_event, direction) => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     // Clears out a settle check left over from some earlier drag that just
     // happens to still be pending -- without this, it could fire mid-resize
@@ -1039,7 +1124,7 @@ ipcMain.handle('window:beginResize', (_event, direction) => {
     };
 });
 
-ipcMain.on('window:resizeMove', () => {
+ipcOn('window:resizeMove', () => {
     if (!dashboardResizeState || !mainWindow || mainWindow.isDestroyed()) return;
     const cursor = screen.getCursorScreenPoint();
     const dx = cursor.x - dashboardResizeState.startCursor.x;
@@ -1055,7 +1140,7 @@ ipcMain.on('window:resizeMove', () => {
     mainWindow.setBounds(bounds);
 });
 
-ipcMain.handle('window:endResize', () => {
+ipcHandle('window:endResize', () => {
     dashboardResizeState = null;
 });
 
@@ -1092,7 +1177,7 @@ async function runGuardedQuit() {
     }
 }
 
-ipcMain.handle('app:quit', () => runGuardedQuit());
+ipcHandle('app:quit', () => runGuardedQuit());
 
 const BACKEND_PREFERRED_PORT = 8000;
 const BACKEND_MAX_PORTS_TO_TRY = 20;
@@ -1118,6 +1203,12 @@ let lastBackendStatus = null;
 // own retry loop or spawns a process after shutdown has begun.
 let watchdogTimer = null;
 let watchdogConsecutiveFailures = 0;
+// Last answer from the backend's /jobs (see fetchBackendBusy): whether a
+// transcription job is queued/running. Only updated when the backend
+// answers, so a run of missed probes during a job keeps the patient,
+// busy threshold (watchdogThreshold) instead of dropping back to 3.
+let backendKnownBusy = false;
+let watchdogTickInFlight = false;
 
 function stopHealthWatchdog() {
     if (watchdogTimer) {
@@ -1159,37 +1250,51 @@ function sendBackendStatus(payload) {
     }
 }
 
-ipcMain.handle('backend:getStatus', () => lastBackendStatus);
+ipcHandle('backend:getStatus', () => lastBackendStatus);
 
 // Synchronous (sendSync from preload.js) so window.BACKEND_CONFIG already
 // holds the token before any renderer code runs -- api.ts reads it at
 // module load. Only answered for this app's own two windows' top frames:
 // both only ever load bundled file:// pages (preventNavigation), so
-// nothing else should ever be asking.
+// nothing else should ever be asking. Registered directly rather than via
+// ipcOn: a sendSync caller blocks until returnValue is set, so an untrusted
+// sender still has to get an answer (null), not silence.
 ipcMain.on('backend:getToken', (event) => {
-    const fromOwnWindow = [mainWindow, railWindow].some(
-        (w) => w && !w.isDestroyed() && w.webContents === event.sender
-    );
-    const isTopFrame = event.senderFrame && event.senderFrame === event.sender.mainFrame;
-    event.returnValue = fromOwnWindow && isTopFrame ? backendAuthToken : null;
+    event.returnValue = trustedIpcSender(event) ? backendAuthToken : null;
 });
 
 function startHealthWatchdog() {
     stopHealthWatchdog();
     watchdogConsecutiveFailures = 0;
+    // A fresh (or just-restarted) backend has no jobs; the first answered
+    // probe below corrects this if it does.
+    backendKnownBusy = false;
     watchdogTimer = setInterval(async () => {
         if (!recoveryConfig || isRecovering() || shuttingDown) return;
-        const ok = await probeHealthOnce(recoveryConfig.backendUrl, undefined, backendAuthToken);
-        const next = nextWatchdogState(watchdogConsecutiveFailures, ok);
-        watchdogConsecutiveFailures = next.consecutiveFailures;
-        if (next.shouldRestart) {
-            watchdogConsecutiveFailures = 0;
-            // ensurePortFree inside attemptRecovery kills whatever is
-            // currently bound to the port (the hung process, since its exe
-            // matches) before spawning a fresh one -- no separate kill step
-            // needed here. sendBackendStatus (via recoveryConfig.onStatus)
-            // stops this very watchdog if the cycle ends in "failed".
-            await attemptRecovery({ ...recoveryConfig, crashInfo: null });
+        // A probe plus the /jobs check can take up to ~4.5s of this 5s
+        // interval; never let two ticks overlap and double-count a miss.
+        if (watchdogTickInFlight) return;
+        watchdogTickInFlight = true;
+        try {
+            const ok = await probeHealthOnce(recoveryConfig.backendUrl, undefined, backendAuthToken);
+            if (ok) {
+                const busy = await fetchBackendBusy(recoveryConfig.backendUrl, backendAuthToken);
+                if (busy !== null) backendKnownBusy = busy;
+            }
+            const next = nextWatchdogState(watchdogConsecutiveFailures, ok, watchdogThreshold(backendKnownBusy));
+            watchdogConsecutiveFailures = next.consecutiveFailures;
+            if (next.shouldRestart) {
+                watchdogConsecutiveFailures = 0;
+                // attemptRecovery stops the tracked (hung) backend -- its
+                // whole process group, escalating to SIGKILL -- and clears
+                // the port before spawning a fresh one; no separate kill
+                // step needed here. sendBackendStatus (via
+                // recoveryConfig.onStatus) stops this very watchdog if the
+                // cycle ends in "failed".
+                await attemptRecovery({ ...recoveryConfig, crashInfo: null });
+            }
+        } finally {
+            watchdogTickInFlight = false;
         }
     }, WATCHDOG_INTERVAL_MS);
 }
@@ -1230,7 +1335,10 @@ async function resolveBackendPort(expectedExePath) {
 const crashLogDir = () => path.join(app.getPath('userData'), 'logs');
 
 app.whenReady().then(async () => {
-    armProcessCrashLogging(crashLogDir());
+    if (!gotSingleInstanceLock) return;
+    // uncaughtException exits via process.exit(1), which skips before-quit
+    // and its stopBackend -- kill the backend synchronously first.
+    armProcessCrashLogging(crashLogDir(), process, { beforeExit: () => killAllBackendsSync() });
 
     Menu.setApplicationMenu(Menu.buildFromTemplate(buildAppMenuTemplate({
         platform: process.platform,
@@ -1365,11 +1473,18 @@ app.whenReady().then(async () => {
             ? `${err?.message ?? err}\n\nBackend output:\n${logTail}`
             : String(err?.message ?? err);
         console.error('[backend] failed to become healthy on startup:', detail);
+        // A crash during startup fires BOTH the crash monitor armed above
+        // (which starts a recovery and publishes "restarting") and this
+        // wait's own exit listener. Publishing "failed" here on top of that
+        // showed a false failure, stopped the watchdog, and left Retry
+        // inert (isRecovering() is true). The running recovery reports its
+        // own outcome -- "up" or a real "failed" -- so defer to it.
+        if (isRecovering()) return;
         sendBackendStatus({ state: 'failed', logTail: detail });
     }
 });
 
-ipcMain.handle('updater:install', async () => {
+ipcHandle('updater:install', async () => {
     // Same guard app:quit uses: quitAndInstall() fires app.quit(), whose
     // before-quit handler sets isQuitting and lets every window close
     // unguarded -- so the recording/pending-upload guard has to run HERE,
@@ -1423,11 +1538,11 @@ ipcMain.handle('updater:install', async () => {
         closeInProgress = false;
     }
 });
-ipcMain.handle('updater:getStatus', () => getLastStatus());
+ipcHandle('updater:getStatus', () => getLastStatus());
 
-ipcMain.handle('app:getVersion', () => app.getVersion());
+ipcHandle('app:getVersion', () => app.getVersion());
 
-ipcMain.handle('backend:restart', async () => {
+ipcHandle('backend:restart', async () => {
     if (!recoveryConfig || isRecovering()) return;
     // Timed via AbortSignal (probeHealthOnce) -- a plain fetch with no
     // timeout would hang this handler forever against exactly the kind of
@@ -1516,13 +1631,23 @@ app.on('before-quit', (e) => {
     shuttingDown = true;
 
     if (step === 'finish') {
-        // Not awaited deliberately -- this handler doesn't preventDefault here,
-        // so Electron proceeds to quit right after this returns. stopBackend's
-        // taskkill is still spawned synchronously before that happens, and it
-        // runs as its own OS process, so it finishes killing the backend (and
-        // its ffmpeg children) independently of whether Electron has already
-        // exited by the time it completes.
-        stopBackend();
+        // Hold the quit until the backend has actually stopped, then quit
+        // again. It used to be fired and forgotten, which only worked
+        // because the backend shared Electron's process group; now that it's
+        // detached on macOS/Linux (see backendSpawnOptions), a backend that
+        // ignored SIGTERM would outlive the app unless the SIGKILL
+        // escalation gets to run. Bounded by STOP_GRACE_MS (~5s) in the
+        // worst case. killAllBackendsSync on process 'exit' backs this up.
+        if (backendStoppedForQuit) return;
+        e.preventDefault();
+        if (backendStopForQuitInFlight) return;
+        backendStopForQuitInFlight = true;
+        stopBackend()
+            .catch((err) => console.error('[main] stopping the backend on quit failed:', err))
+            .finally(() => {
+                backendStoppedForQuit = true;
+                app.quit();
+            });
         return;
     }
     if (step === 'keepWaiting') {
@@ -1554,6 +1679,14 @@ app.on('before-quit', (e) => {
         }
     })();
 });
+// Last line of defence for every way out that skips before-quit (app.exit,
+// an uncaughtException exit, a quit while the stop above is still pending):
+// synchronously kill any backend still running, so a detached backend and
+// its ffmpeg children never outlive the app and hold the port next launch.
+process.on('exit', () => {
+    killAllBackendsSync();
+});
+
 app.on('window-all-closed', () => {
     if (quitRequested) return; // app:quit's handler already called app.quit() itself
     if (process.platform !== 'darwin') app.quit();

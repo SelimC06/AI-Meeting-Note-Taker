@@ -6,7 +6,7 @@ import path from 'node:path';
 import { logCrash, attemptRecovery, isRecovering } from './backendRecovery.js';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
-import { stopBackend } from './backend.js';
+import { startBackend, stopBackend } from './backend.js';
 
 function makeTmpLogDir() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'backend-recovery-test-'));
@@ -546,5 +546,41 @@ test('attemptRecovery stops between attempts once isShuttingDown() flips true, i
     } finally {
         stopBackend();
         fs.rmSync(logDir, { recursive: true, force: true });
+    }
+});
+
+
+test('attemptRecovery stops a still-tracked backend that never bound the port before spawning (Retry after startup timeout)', { skip: process.platform === 'win32' }, async () => {
+    const port = await findFreePort();
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-recovery-test-'));
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-recovery-marker-'));
+    const marker = path.join(markerDir, 'ready');
+    fs.writeFileSync(marker, '');
+    // The slow starter: alive, not listening (so ensurePortFree can't see
+    // it), and ignoring SIGTERM like a wedged uvicorn.
+    const stale = startBackend(
+        process.execPath,
+        ['-e', "process.on('SIGTERM', () => {}); console.log('READY'); setInterval(() => {}, 1000);"],
+        process.cwd()
+    );
+    await new Promise((resolve) => stale.stdout.once('data', resolve));
+    const staleExited = new Promise((resolve) => stale.once('exit', (code, signal) => resolve(signal)));
+    try {
+        await attemptRecovery({
+            pythonExe: process.execPath,
+            args: ['-e', HEALTH_SERVER_SCRIPT],
+            cwd: process.cwd(),
+            env: { ...process.env, SDD_MARKER: marker, SDD_PORT: String(port) },
+            backendUrl: `http://127.0.0.1:${port}`,
+            logDir,
+            delays: [0],
+        });
+        // Resolved by the time recovery finished -- stopped (SIGKILL after
+        // the grace period), not left running untracked.
+        assert.equal(await Promise.race([staleExited, new Promise((r) => setTimeout(() => r('still running'), 100))]), 'SIGKILL');
+    } finally {
+        await stopBackend();
+        fs.rmSync(logDir, { recursive: true, force: true });
+        fs.rmSync(markerDir, { recursive: true, force: true });
     }
 });
