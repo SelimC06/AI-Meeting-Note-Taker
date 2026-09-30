@@ -50,6 +50,10 @@ interface Props {
   // useSessions' indexCorrupt) -- shows a "recover library" action next to
   // it. Defaults false.
   sessionsIndexCorrupt?: boolean;
+  // Bumped by App when sessions were permanently deleted from outside this
+  // component (Settings' Empty Trash) -- the trash list is this
+  // component's own fetch, so it has to be told to refetch.
+  trashRefreshKey?: number;
 }
 
 // Distinguishes "the fetch itself never landed" (offline/backend down --
@@ -79,6 +83,7 @@ const Sidebar: React.FC<Props> = ({
   backendUp = true,
   backendFailed = false,
   sessionsIndexCorrupt = false,
+  trashRefreshKey = 0,
 }) => {
   const [query, setQuery] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -101,6 +106,13 @@ const Sidebar: React.FC<Props> = ({
   };
 
   const trashList = useSessions(view === "trash", true);
+  const reloadTrash = trashList.reload;
+  const lastTrashRefreshKeyRef = useRef(trashRefreshKey);
+  useEffect(() => {
+    if (trashRefreshKey === lastTrashRefreshKeyRef.current) return;
+    lastTrashRefreshKeyRef.current = trashRefreshKey;
+    reloadTrash();
+  }, [trashRefreshKey, reloadTrash]);
 
   const { jobs } = useProcessingJobs();
   const activeJobs = jobs.filter((j) => j.status === "queued" || j.status === "running");

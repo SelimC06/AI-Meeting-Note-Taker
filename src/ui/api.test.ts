@@ -5,6 +5,7 @@ import {
   checkHealth,
   exportSessionZipUrl,
   getHealthStatus,
+  getJobStatus,
   getSessionTranscript,
   getSessions,
   getSettings,
@@ -393,4 +394,29 @@ it("getHealthStatus passes settings_error through, defaulting to null", async ()
 
   expect((await getHealthStatus()).settings_error).toBe("damaged");
   expect((await getHealthStatus()).settings_error).toBeNull();
+});
+
+it("encodes session and job ids into request paths", async () => {
+  const fetchMock = vi.fn().mockImplementation(async () =>
+    new Response(JSON.stringify({ segments: [] }), { status: 200 })
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  await getSessionTranscript("a/../b?x#y");
+  expect(fetchMock.mock.calls[0][0]).toMatch(/\/sessions\/a%2F\.\.%2Fb%3Fx%23y\/transcript$/);
+
+  fetchMock.mockImplementation(async () => new Response(JSON.stringify({ id: "j" }), { status: 200 }));
+  await getJobStatus("j/1");
+  expect(fetchMock.mock.calls[1][0]).toMatch(/\/jobs\/j%2F1$/);
+  expect(exportSessionZipUrl("a b")).toMatch(/\/sessions\/a%20b\/export\/zip$/);
+});
+
+it("listJobs and getJobStatus pass a caller's abort signal through to fetch", async () => {
+  const fetchMock = vi.fn().mockImplementation(async () => new Response("[]", { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const controller = new AbortController();
+
+  await listJobs(controller.signal);
+
+  expect((fetchMock.mock.calls[0][1] as RequestInit).signal).toBe(controller.signal);
 });

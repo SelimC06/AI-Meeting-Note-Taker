@@ -251,3 +251,67 @@ it("removeJob drops a job from the list", async () => {
   });
   expect(result.current.jobs).toEqual([]);
 });
+
+const runningJob = (id: string) => ({
+  id, session_id: "s", status: "running" as const, stage: "transcribing" as const,
+  error: null, notes: null, video_path: null, created_at: "2026-08-06T00:00:00Z",
+});
+
+it("skips poll ticks while the previous poll is still in flight (hung backend)", async () => {
+  vi.useFakeTimers();
+  vi.mocked(api.listJobs).mockReturnValue(new Promise(() => {}));
+
+  renderHook(() => useProcessingJobs());
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500 * 4);
+  });
+
+  // Without the in-flight guard this was 5 requests, all still pending.
+  expect(api.listJobs).toHaveBeenCalledTimes(1);
+});
+
+it("puts a deadline on every poll request", async () => {
+  vi.mocked(api.listJobs).mockResolvedValue([runningJob("job-1")]);
+  vi.mocked(api.getJobStatus).mockResolvedValue(runningJob("job-1"));
+
+  renderHook(() => useProcessingJobs());
+
+  // Tracked jobs are refreshed from the second tick on (1.5s).
+  await waitFor(() => expect(api.getJobStatus).toHaveBeenCalled(), { timeout: 3000 });
+  expect(vi.mocked(api.listJobs).mock.calls[0][0]).toBeInstanceOf(AbortSignal);
+  expect(vi.mocked(api.getJobStatus).mock.calls[0][1]).toBeInstanceOf(AbortSignal);
+});
+
+it("addJob doesn't duplicate a job discovery already found", async () => {
+  vi.mocked(api.listJobs).mockResolvedValue([runningJob("job-1")]);
+  vi.mocked(api.getJobStatus).mockResolvedValue(runningJob("job-1"));
+
+  const { result } = renderHook(() => useProcessingJobs());
+  await waitFor(() => expect(result.current.jobs).toHaveLength(1));
+
+  act(() => result.current.addJob("job-1"));
+
+  expect(result.current.jobs.map((j) => j.id)).toEqual(["job-1"]);
+});
+
+it("a late listJobs response can't re-add a job that was already removed", async () => {
+  let resolveListJobs!: (value: Awaited<ReturnType<typeof api.listJobs>>) => void;
+  vi.mocked(api.listJobs).mockReturnValueOnce(
+    new Promise((resolve) => {
+      resolveListJobs = resolve;
+    })
+  );
+  vi.mocked(api.listJobs).mockResolvedValue([]);
+
+  const { result } = renderHook(() => useProcessingJobs());
+  act(() => result.current.addJob("job-1"));
+  act(() => result.current.removeJob("job-1"));
+
+  await act(async () => {
+    // Snapshotted before the job finished, so it still says "running".
+    resolveListJobs([runningJob("job-1")]);
+    await Promise.resolve();
+  });
+
+  expect(result.current.jobs).toEqual([]);
+});

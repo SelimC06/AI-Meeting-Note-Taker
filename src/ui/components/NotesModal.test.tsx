@@ -224,3 +224,52 @@ it("falls back to plain prose notes without crashing when the action items fetch
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   expect(screen.getByText(/Discussed roadmap\./)).toBeInTheDocument();
 });
+
+
+it("rolls back a failed speaker rename and says so", async () => {
+  vi.spyOn(api, "getSessionTranscript").mockResolvedValue([
+    { start: 0, end: 1, speaker: "SPEAKER_00", text: "hello", raw_speaker: "SPEAKER_00" },
+  ]);
+  vi.spyOn(api, "updateSpeakerNames").mockRejectedValue(new Error("Failed to update speaker names: 500"));
+
+  render(<NotesModal session={session} onClose={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: "Transcript" }));
+  await waitFor(() => expect(screen.getByText("hello")).toBeInTheDocument());
+
+  fireEvent.click(screen.getByRole("button", { name: "Rename SPEAKER_00" }));
+  const input = screen.getByRole("textbox", { name: "New name for SPEAKER_00" });
+  fireEvent.change(input, { target: { value: "Alice" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't rename speaker");
+  expect(screen.getByText("SPEAKER_00")).toBeInTheDocument();
+  expect(screen.queryByText("Alice")).not.toBeInTheDocument();
+});
+
+it("an older rename failing doesn't undo a newer rename of the same speaker", async () => {
+  vi.spyOn(api, "getSessionTranscript").mockResolvedValue([
+    { start: 0, end: 1, speaker: "SPEAKER_00", text: "hello", raw_speaker: "SPEAKER_00" },
+  ]);
+  let rejectFirst!: (e: unknown) => void;
+  vi.spyOn(api, "updateSpeakerNames")
+    .mockReturnValueOnce(new Promise((_, reject) => { rejectFirst = reject; }))
+    .mockResolvedValueOnce({ SPEAKER_00: "Bob" });
+
+  render(<NotesModal session={session} onClose={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: "Transcript" }));
+  await waitFor(() => expect(screen.getByText("hello")).toBeInTheDocument());
+
+  const rename = (name: string, current: string) => {
+    fireEvent.click(screen.getByRole("button", { name: "Rename SPEAKER_00" }));
+    const input = screen.getByRole("textbox", { name: "New name for SPEAKER_00" });
+    expect(input).toHaveValue(current);
+    fireEvent.change(input, { target: { value: name } });
+    fireEvent.keyDown(input, { key: "Enter" });
+  };
+  rename("Alice", "SPEAKER_00");
+  rename("Bob", "Alice");
+  rejectFirst(new Error("late failure"));
+
+  await waitFor(() => expect(screen.getByText("Bob")).toBeInTheDocument());
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});

@@ -35,6 +35,9 @@ type SectionId =
 
 type DotTone = "ok" | "warn" | "err" | "idle" | "none";
 
+// The settings saved optimistically on click (see saveOptimistic).
+type OptimisticField = "whisper_model" | "ollama_chat_model" | "ai_provider" | "advanced_diarization_enabled";
+
 const NAV_GROUPS: { heading: string; sections: { id: SectionId; label: string }[] }[] = [
   {
     heading: "Settings",
@@ -68,7 +71,16 @@ function StatusDot({ tone }: { tone: DotTone }) {
   return <span aria-hidden="true" className={"inline-block h-1.5 w-1.5 rounded-full shrink-0 " + toneClass} />;
 }
 
-export default function SettingsPage({ active }: { active: boolean }) {
+export default function SettingsPage({
+  active,
+  onSessionsDeleted,
+}: {
+  active: boolean;
+  // Told which sessions Empty Trash permanently deleted, so the rest of the
+  // app can drop them too (the Sidebar's trash list, per-meeting chat
+  // state) -- this page has no other way to reach those.
+  onSessionsDeleted?: (ids: string[]) => void;
+}) {
   const [activeSection, setActiveSection] = useState<SectionId>("transcription");
 
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -101,6 +113,17 @@ export default function SettingsPage({ active }: { active: boolean }) {
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
   const [emptyingTrash, setEmptyingTrash] = useState(false);
+  const [confirmingEmptyTrash, setConfirmingEmptyTrash] = useState(false);
+
+  // Optimistic saves, per field: the generation of the latest change, and
+  // the last value the backend confirmed (what a failed save rolls back
+  // to). Each click used to capture `prev` in its own closure and apply its
+  // response whenever it arrived -- two quick clicks answered out of order
+  // left the older choice on screen, and one field's rollback or response
+  // could clobber another field's change still in flight.
+  const fieldGenerationRef = useRef<Partial<Record<OptimisticField, number>>>({});
+  const pendingFieldsRef = useRef<Set<OptimisticField>>(new Set());
+  const confirmedRef = useRef<Settings | null>(null);
 
   const updaterStatus = useUpdaterStatus();
   const [appVersion, setAppVersion] = useState<string | null>(null);
@@ -114,6 +137,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
     getSettings()
       .then((s) => {
         if (!cancelled) {
+          confirmedRef.current = s;
           setSettings(s);
           setVocabularyDraft(s.custom_vocabulary);
           // No token/API-key drafts to seed: the backend never sends the
@@ -131,6 +155,48 @@ export default function SettingsPage({ active }: { active: boolean }) {
     };
   }, []);
 
+  // Applies a full settings response from a non-optimistic save (storage
+  // folder, secrets, vocabulary...) without undoing an optimistic change
+  // that's still waiting on its own response.
+  const applyServerSettings = (updated: Settings) => {
+    confirmedRef.current = updated;
+    setSettings((current) => {
+      if (!current) return updated;
+      const merged = { ...updated };
+      for (const field of pendingFieldsRef.current) {
+        (merged as Record<OptimisticField, unknown>)[field] = current[field];
+      }
+      return merged;
+    });
+  };
+
+  const saveOptimistic = async <K extends OptimisticField>(
+    field: K,
+    value: Settings[K],
+    setError: (message: string | null) => void
+  ) => {
+    const generation = (fieldGenerationRef.current[field] ?? 0) + 1;
+    fieldGenerationRef.current[field] = generation;
+    pendingFieldsRef.current.add(field);
+    setSettings((s) => (s ? { ...s, [field]: value } : s));
+    setError(null);
+    try {
+      const updated = await updateSettings({ [field]: value } as Parameters<typeof updateSettings>[0]);
+      if (confirmedRef.current) confirmedRef.current = { ...confirmedRef.current, [field]: updated[field] };
+      // A newer change to this field was made meanwhile: its own response
+      // (or rollback) decides what's shown, not this one.
+      if (fieldGenerationRef.current[field] !== generation) return;
+      pendingFieldsRef.current.delete(field);
+      setSettings((s) => (s ? { ...s, [field]: updated[field] } : s));
+    } catch (e) {
+      if (fieldGenerationRef.current[field] !== generation) return;
+      pendingFieldsRef.current.delete(field);
+      const confirmed = confirmedRef.current;
+      setSettings((s) => (s && confirmed ? { ...s, [field]: confirmed[field] } : s));
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const loadUsage = () => {
     getStorageUsage()
       .then((u) => {
@@ -145,18 +211,26 @@ export default function SettingsPage({ active }: { active: boolean }) {
     loadUsage();
   }, [active]);
 
+  // Only runs from the "[confirm]" step below -- this is permanent, and
+  // used to fire on a single click.
   const handleEmptyTrash = async () => {
+    setConfirmingEmptyTrash(false);
     setEmptyingTrash(true);
+    const deleted: string[] = [];
     try {
       const trashed = (await getSessions(true)).filter((s) => s.trashed_at);
       for (const s of trashed) {
         await deleteSessionForever(s.id);
+        deleted.push(s.id);
       }
-      loadUsage();
     } catch (e) {
       setUsageError(e instanceof Error ? e.message : String(e));
     } finally {
       setEmptyingTrash(false);
+      // Reported even after a partial failure: whatever did get deleted is
+      // gone, and a stale trash row for it would 404 on restore.
+      if (deleted.length > 0) onSessionsDeleted?.(deleted);
+      loadUsage();
     }
   };
 
@@ -187,46 +261,12 @@ export default function SettingsPage({ active }: { active: boolean }) {
     };
   }, []);
 
-  const handleWhisperChange = async (value: string) => {
-    const prev = settings;
-    setSettings((s) => (s ? { ...s, whisper_model: value } : s));
-    setWhisperError(null);
-    try {
-      const updated = await updateSettings({ whisper_model: value });
-      setSettings(updated);
-      setWhisperError(null);
-    } catch (e) {
-      setSettings(prev);
-      setWhisperError(e instanceof Error ? e.message : String(e));
-    }
-  };
+  const handleWhisperChange = (value: string) => saveOptimistic("whisper_model", value, setWhisperError);
 
-  const handleOllamaChange = async (value: string) => {
-    const prev = settings;
-    setSettings((s) => (s ? { ...s, ollama_chat_model: value } : s));
-    setOllamaSaveError(null);
-    try {
-      const updated = await updateSettings({ ollama_chat_model: value });
-      setSettings(updated);
-      setOllamaSaveError(null);
-    } catch (e) {
-      setSettings(prev);
-      setOllamaSaveError(e instanceof Error ? e.message : String(e));
-    }
-  };
+  const handleOllamaChange = (value: string) => saveOptimistic("ollama_chat_model", value, setOllamaSaveError);
 
-  const handleProviderChange = async (value: "ollama" | "custom") => {
-    const prev = settings;
-    setSettings((s) => (s ? { ...s, ai_provider: value } : s));
-    setProviderSaveError(null);
-    try {
-      const updated = await updateSettings({ ai_provider: value });
-      setSettings(updated);
-    } catch (e) {
-      setSettings(prev);
-      setProviderSaveError(e instanceof Error ? e.message : String(e));
-    }
-  };
+  const handleProviderChange = (value: "ollama" | "custom") =>
+    saveOptimistic("ai_provider", value, setProviderSaveError);
 
   const handleSaveConnection = async () => {
     setConnectionSaveError(null);
@@ -239,7 +279,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
         ...(apiKeyDraft ? { custom_api_key: apiKeyDraft } : {}),
         custom_model_name: customModelDraft,
       });
-      setSettings(updated);
+      applyServerSettings(updated);
       setBaseUrlDraft(updated.custom_api_base_url);
       setApiKeyDraft("");
       setCustomModelDraft(updated.custom_model_name);
@@ -252,7 +292,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
     setConnectionSaveError(null);
     try {
       const updated = await updateSettings({ custom_api_key: "" });
-      setSettings(updated);
+      applyServerSettings(updated);
       setApiKeyDraft("");
     } catch (e) {
       setConnectionSaveError(e instanceof Error ? e.message : String(e));
@@ -263,32 +303,22 @@ export default function SettingsPage({ active }: { active: boolean }) {
     setVocabularySaveError(null);
     try {
       const updated = await updateSettings({ custom_vocabulary: vocabularyDraft });
-      setSettings(updated);
+      applyServerSettings(updated);
       setVocabularyDraft(updated.custom_vocabulary);
     } catch (e) {
       setVocabularySaveError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  const handleDiarizationToggle = async (value: boolean) => {
-    const prev = settings;
-    setSettings((s) => (s ? { ...s, advanced_diarization_enabled: value } : s));
-    setDiarizationError(null);
-    try {
-      const updated = await updateSettings({ advanced_diarization_enabled: value });
-      setSettings(updated);
-    } catch (e) {
-      setSettings(prev);
-      setDiarizationError(e instanceof Error ? e.message : String(e));
-    }
-  };
+  const handleDiarizationToggle = (value: boolean) =>
+    saveOptimistic("advanced_diarization_enabled", value, setDiarizationError);
 
   // "" clears the saved token; any other value replaces it.
   const saveToken = async (value: string) => {
     setTokenSaveError(null);
     try {
       const updated = await updateSettings({ huggingface_token: value });
-      setSettings(updated);
+      applyServerSettings(updated);
       setTokenDraft("");
     } catch (e) {
       setTokenSaveError(e instanceof Error ? e.message : String(e));
@@ -303,7 +333,7 @@ export default function SettingsPage({ active }: { active: boolean }) {
     setStorageError(null);
     try {
       const updated = await updateSettings({ storage_dir: chosen });
-      setSettings(updated);
+      applyServerSettings(updated);
     } catch (e) {
       setStorageError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -481,13 +511,31 @@ export default function SettingsPage({ active }: { active: boolean }) {
                         {usage.trashed_count} session{usage.trashed_count === 1 ? "" : "s"} in
                         trash — purges automatically after 30 days
                       </p>
-                      <button
-                        onClick={handleEmptyTrash}
-                        disabled={emptyingTrash}
-                        className="shrink-0 px-2 py-0.5 rounded-sm text-xs border border-red-400/40 text-red-400 hover:bg-red-400/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:opacity-50"
-                      >
-                        {emptyingTrash ? "Emptying..." : "Empty Trash"}
-                      </button>
+                      {confirmingEmptyTrash ? (
+                        <div className="shrink-0 flex items-center gap-2 text-xs text-red-400">
+                          <span>delete forever?</span>
+                          <button
+                            onClick={handleEmptyTrash}
+                            className="text-red-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                          >
+                            [confirm]
+                          </button>
+                          <button
+                            onClick={() => setConfirmingEmptyTrash(false)}
+                            className="text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                          >
+                            [cancel]
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmingEmptyTrash(true)}
+                          disabled={emptyingTrash}
+                          className="shrink-0 px-2 py-0.5 rounded-sm text-xs border border-red-400/40 text-red-400 hover:bg-red-400/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:opacity-50"
+                        >
+                          {emptyingTrash ? "Emptying..." : "Empty Trash"}
+                        </button>
+                      )}
                     </div>
                   )}
                 </>

@@ -483,3 +483,28 @@ it("does not offer recovery for an ordinary load error", () => {
   renderSidebar({ sessions: null, sessionsError: "Failed to load sessions: 500" });
   expect(screen.queryByRole("button", { name: "[recover library]" })).not.toBeInTheDocument();
 });
+
+
+it("refetches the trash list when trashRefreshKey changes (Settings' Empty Trash)", async () => {
+  vi.mocked(getSessions).mockResolvedValue([]);
+  const props: ComponentProps<typeof Sidebar> = {
+    view: "trash",
+    collapsed: false,
+    sessions: [],
+    sessionsError: null,
+    reloadSessions: vi.fn(),
+    selectedId: null,
+    onSelect: vi.fn(),
+    trashRefreshKey: 0,
+  };
+  const { rerender } = render(<Sidebar {...props} />);
+  await waitFor(() => expect(getSessions).toHaveBeenCalledTimes(1));
+
+  rerender(<Sidebar {...props} />);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(getSessions).toHaveBeenCalledTimes(1);
+
+  rerender(<Sidebar {...props} trashRefreshKey={1} />);
+  await waitFor(() => expect(getSessions).toHaveBeenCalledTimes(2));
+  expect(getSessions).toHaveBeenLastCalledWith(true);
+});

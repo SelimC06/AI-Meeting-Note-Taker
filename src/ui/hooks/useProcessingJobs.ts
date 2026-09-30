@@ -18,6 +18,18 @@ const POLL_INTERVAL_MS = 1500;
 // transient blip doesn't fail a job that's still running fine.
 const LOST_TRACK_FAILURE_THRESHOLD = 5;
 
+// Per-request deadline for the polls below. A hung backend accepts the
+// connection and never answers; without a deadline those fetches never
+// settled, so (a) the lost-track threshold above could never trip, and
+// (b) with a new poll every 1.5s -- in both windows running this hook --
+// they filled Chromium's 6-connections-per-host limit and stalled every
+// other request to the backend (chat, settings) behind them.
+export const POLL_REQUEST_TIMEOUT_MS = 5000;
+
+function pollSignal(): AbortSignal | undefined {
+  return typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(POLL_REQUEST_TIMEOUT_MS) : undefined;
+}
+
 function toProcessingJob(job: JobStatus): ProcessingJob {
   return { id: job.id, stage: job.stage, progress: job.progress, status: job.status, error: job.error };
 }
@@ -27,6 +39,11 @@ export function useProcessingJobs() {
   const jobsRef = useRef<ProcessingJob[]>(jobs);
   jobsRef.current = jobs;
   const failureCountsRef = useRef<Map<string, number>>(new Map());
+  // Jobs this instance has already finished with (removeJob). A listJobs()
+  // response that was in flight when the job was removed can still list it
+  // as running; without this, discovery re-added it and the rail flashed
+  // its success/failure a second time.
+  const removedIdsRef = useRef<Set<string>>(new Set());
   // main.js broadcasts backend:status to both mainWindow and railWindow
   // (see broadcastBackendStatus), so this pause applies in either renderer
   // this hook runs in.
@@ -49,10 +66,11 @@ export function useProcessingJobs() {
     // poll against.
     const discoverNewJobs = async () => {
       try {
-        const all = await listJobs();
+        const all = await listJobs(pollSignal());
         if (cancelled) return;
         const active = all
           .filter((j) => j.status === "queued" || j.status === "running")
+          .filter((j) => !removedIdsRef.current.has(j.id))
           .map(toProcessingJob);
         setJobs((prev) => {
           const prevIds = new Set(prev.map((j) => j.id));
@@ -74,7 +92,7 @@ export function useProcessingJobs() {
       const results = await Promise.all(
         active.map(async (j) => {
           try {
-            const status = await getJobStatus(j.id);
+            const status = await getJobStatus(j.id, pollSignal());
             failureCountsRef.current.delete(j.id);
             return { id: j.id, kind: "updated" as const, status };
           } catch {
@@ -111,9 +129,18 @@ export function useProcessingJobs() {
       );
     };
 
-    const poll = () => {
-      discoverNewJobs();
-      refreshTrackedJobs();
+    // One poll at a time: a tick that lands while the previous poll is
+    // still waiting (slow or hung backend) is skipped rather than stacking
+    // another round of requests on top of it.
+    let pollInFlight = false;
+    const poll = async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      try {
+        await Promise.allSettled([discoverNewJobs(), refreshTrackedJobs()]);
+      } finally {
+        pollInFlight = false;
+      }
     };
 
     poll();
@@ -124,12 +151,18 @@ export function useProcessingJobs() {
     };
   }, []);
 
+  // Deduped: discovery can find a job (via listJobs) before the caller that
+  // started it gets its id back and adds it -- adding it again showed "2
+  // recordings processing" for one.
   const addJob = useCallback((jobId: string) => {
-    setJobs((prev) => [...prev, { id: jobId, stage: null, status: "queued", error: null }]);
+    setJobs((prev) =>
+      prev.some((j) => j.id === jobId) ? prev : [...prev, { id: jobId, stage: null, status: "queued", error: null }]
+    );
   }, []);
 
   const removeJob = useCallback((jobId: string) => {
     failureCountsRef.current.delete(jobId);
+    removedIdsRef.current.add(jobId);
     setJobs((prev) => prev.filter((j) => j.id !== jobId));
   }, []);
 

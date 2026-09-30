@@ -86,3 +86,24 @@ it("does not re-check on every rerender while active stays true", async () => {
   });
   expect(getOllamaModels).toHaveBeenCalledTimes(1);
 });
+
+it("is ready with the custom provider even though Ollama is unreachable", async () => {
+  vi.mocked(getOllamaModels).mockResolvedValue({ ok: false, models: [], error: "connection refused" });
+  vi.mocked(getSettings).mockResolvedValue({
+    whisper_model: "base.en",
+    storage_dir: "/x",
+    ollama_chat_model: "gemma3:4b",
+    custom_vocabulary: "",
+    advanced_diarization_enabled: false,
+    huggingface_token_set: false,
+    ai_provider: "custom",
+    custom_api_base_url: "https://api.example.com/v1",
+    custom_api_key_set: true,
+    custom_model_name: "gpt-4o-mini",
+    whisper_model_choices: [],
+  });
+
+  const { result } = renderHook(() => useOllamaReadiness());
+
+  await waitFor(() => expect(result.current.status).toBe("ready"));
+});

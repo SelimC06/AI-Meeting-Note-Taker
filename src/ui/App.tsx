@@ -36,6 +36,16 @@ function App() {
     reload: reloadSessions,
   } = useSessions(true, false);
   const chatSessions = useChatSessions();
+  const [trashRefreshKey, setTrashRefreshKey] = useState(0);
+  // Settings' Empty Trash deletes sessions the Sidebar and per-meeting chat
+  // still hold onto -- drop them everywhere, the same way a single
+  // "delete forever" from the context menu does.
+  const handleSessionsDeleted = (ids: string[]) => {
+    ids.forEach((id) => chatSessions.discardSession(id));
+    if (selectedId !== null && ids.includes(selectedId)) setSelectedId(null);
+    setTrashRefreshKey((k) => k + 1);
+    reloadSessions();
+  };
   const health = useBackendHealth(true);
   const backendUp = health?.backend ?? false;
   // Sidebar/Chat use this to stop suppressing sessionsError once the backend
@@ -156,6 +166,7 @@ function App() {
                 backendUp={backendUp}
                 backendFailed={backendFailed}
                 onSessionDeleted={chatSessions.discardSession}
+                trashRefreshKey={trashRefreshKey}
               />
             </ErrorBoundary>
             <ErrorBoundary>
@@ -187,7 +198,13 @@ function App() {
             {/* Settings opens as its own rectangle over just this row --
                 the status line below stays visible and un-dimmed, same as
                 the title bar above it. */}
-            {settingsOpen && <SettingsModal active onClose={() => setSettingsOpen(false)} />}
+            {settingsOpen && (
+              <SettingsModal
+                active
+                onClose={() => setSettingsOpen(false)}
+                onSessionsDeleted={handleSessionsDeleted}
+              />
+            )}
           </div>
 
           <StatusLine

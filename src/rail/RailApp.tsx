@@ -9,6 +9,7 @@ import { extensionForMimeType } from './capture/recorder';
 import { useElapsedTime } from './hooks/useElapsedTime';
 import { useMicLevel } from './hooks/useMicLevel';
 import { useAnimationReplayKey } from './hooks/useAnimationReplayKey';
+import { useThrottledValue } from './hooks/useThrottledValue';
 import { startProcessing } from "../ui/api";
 import { useProcessingJobs } from "../ui/hooks/useProcessingJobs";
 
@@ -19,6 +20,10 @@ const STAGE_LABELS: Record<string, string> = {
   summarizing: "summarizing",
   saving: "saving",
 };
+
+// ~5 updates a second for the dashboard's docked level meter: smooth
+// enough to read as live, a third of the raw ~60ms level cadence.
+export const RAIL_LEVEL_PUSH_INTERVAL_MS = 200;
 
 export default function RailApp() {
     const { status, record, pause, resume, stop, error: recordError, micStream, systemStream } = useThreeTrackSegments();
@@ -43,6 +48,12 @@ export default function RailApp() {
 
     const elapsed = useElapsedTime(status);
     const levels = useMicLevel(micStream, systemStream);
+    // The rail's own LevelMeter animates from `levels` directly (every
+    // ~60ms), but the copy pushed to main for the dashboard's DockedRail is
+    // throttled: each push is an IPC round trip plus a DockedRail re-render
+    // in the other window, and at the raw rate that was ~16 a second for as
+    // long as a recording ran -- even while the dashboard was hidden.
+    const pushedLevels = useThrottledValue(levels, RAIL_LEVEL_PUSH_INTERVAL_MS);
 
     useEffect(() => {
         if (resultFlash === null) return;
@@ -405,12 +416,12 @@ export default function RailApp() {
         window.windowControls?.pushRailStatus?.({
             status,
             elapsedLabel: elapsed,
-            level: levels,
+            level: pushedLevels,
             recordError: displayError?.message ?? null,
             isProcessing,
             hasPendingUpload: pendingUploadCount > 0,
         });
-    }, [status, elapsed, levels, displayError, isProcessing, pendingUploadCount]);
+    }, [status, elapsed, pushedLevels, displayError, isProcessing, pendingUploadCount]);
 
     const commandHandlersRef = useRef({
         handleRecordClick,

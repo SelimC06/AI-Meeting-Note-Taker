@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   getSessionActionItems,
   getSessionTranscript,
@@ -91,12 +91,19 @@ const TranscriptView: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   const [segments, setSegments] = useState<TranscriptSegment[] | null>(null);
   const [error, setError] = useState(false);
   const [nameOverrides, setNameOverrides] = useState<Record<string, string>>({});
+  const [renameError, setRenameError] = useState<string | null>(null);
+  // Per raw label: the latest rename's generation, so only the newest
+  // rename's failure rolls back (an older one failing after a newer one
+  // was typed must not undo the newer name).
+  const renameGenerationRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
     let cancelled = false;
     setSegments(null);
     setError(false);
     setNameOverrides({});
+    setRenameError(null);
+    renameGenerationRef.current = {};
     getSessionTranscript(sessionId)
       .then((result) => {
         if (!cancelled) setSegments(result);
@@ -112,11 +119,24 @@ const TranscriptView: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   const handleRename = (rawLabel: string, newName: string) => {
     // Optimistic: apply immediately so every segment sharing this raw label
     // updates together, without waiting on the round trip.
+    const hadOverride = rawLabel in nameOverrides;
+    const previousName = nameOverrides[rawLabel];
+    const generation = (renameGenerationRef.current[rawLabel] ?? 0) + 1;
+    renameGenerationRef.current[rawLabel] = generation;
+    setRenameError(null);
     setNameOverrides((prev) => ({ ...prev, [rawLabel]: newName }));
-    updateSpeakerNames(sessionId, { [rawLabel]: newName }).catch(() => {
-      // Best-effort -- the rename didn't persist, but there's nothing
-      // actionable to show the user beyond leaving the optimistic label as
-      // already applied; a reload will reflect the real saved state.
+    updateSpeakerNames(sessionId, { [rawLabel]: newName }).catch((e) => {
+      // The failure used to be swallowed: the new name stayed on screen as
+      // if saved and silently reverted on the next open. Put the old name
+      // back now and say so.
+      if (renameGenerationRef.current[rawLabel] !== generation) return;
+      setNameOverrides((prev) => {
+        const next = { ...prev };
+        if (hadOverride) next[rawLabel] = previousName;
+        else delete next[rawLabel];
+        return next;
+      });
+      setRenameError(`Couldn't rename speaker: ${e instanceof Error ? e.message : String(e)}`);
     });
   };
 
@@ -142,6 +162,18 @@ const TranscriptView: React.FC<{ sessionId: string }> = ({ sessionId }) => {
 
   return (
     <div className="flex-1 overflow-y-auto px-3 py-2 text-xs space-y-2">
+      {renameError && (
+        <div role="alert" className="flex items-center justify-between gap-2 text-red-400">
+          <span>{renameError}</span>
+          <button
+            aria-label="dismiss rename error"
+            onClick={() => setRenameError(null)}
+            className="hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal shrink-0"
+          >
+            [x]
+          </button>
+        </div>
+      )}
       {segments.map((seg, i) => {
         if (seg.speaker == null && seg.raw_speaker == null) {
           return (

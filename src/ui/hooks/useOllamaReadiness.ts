@@ -29,6 +29,16 @@ export function useOllamaReadiness(
     Promise.all([getOllamaModels(), getSettings()])
       .then(([modelsResult, settings]) => {
         if (generation !== generationRef.current) return;
+        // Ollama is irrelevant with a custom (OpenAI-compatible) provider
+        // selected -- chat, summaries and extraction all go there instead --
+        // so there's nothing to set up. Checked before the Ollama result,
+        // which is "unreachable" for exactly these users (no Ollama
+        // installed), and used to put the full-screen setup gate in front
+        // of them on every launch.
+        if (settings.ai_provider === "custom") {
+          setState({ status: "ready" });
+          return;
+        }
         if (!modelsResult.ok) {
           setState({ status: "unreachable" });
           return;

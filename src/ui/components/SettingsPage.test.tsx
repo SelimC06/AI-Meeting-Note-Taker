@@ -2,7 +2,9 @@ import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import SettingsPage from "./SettingsPage";
 import {
+  deleteSessionForever,
   getOllamaModels,
+  getSessions,
   getSettings,
   getStorageUsage,
   updateSettings,
@@ -582,4 +584,138 @@ it("clears a saved API key", async () => {
   await waitFor(() => {
     expect(screen.queryByText(/an api key is saved/i)).not.toBeInTheDocument();
   });
+});
+
+
+// ---------- optimistic save ordering ----------
+
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+const selectedWhisper = () =>
+  screen.getAllByRole("button").find((b) => b.className.includes("bg-signal") && b.textContent?.startsWith("["));
+
+it("keeps the latest whisper choice when an older save answers last", async () => {
+  const first = deferred<Settings>();
+  const second = deferred<Settings>();
+  vi.mocked(updateSettings).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+
+  render(<SettingsPage active />);
+  fireEvent.click(await screen.findByText(/\[small\.en\]/));
+  fireEvent.click(screen.getByText(/\[medium\.en\]/));
+
+  await act(async () => {
+    second.resolve({ ...baseSettings, whisper_model: "medium.en" });
+    await Promise.resolve();
+  });
+  await act(async () => {
+    first.resolve({ ...baseSettings, whisper_model: "small.en" });
+    await Promise.resolve();
+  });
+
+  expect(selectedWhisper()?.textContent).toContain("[medium.en]");
+});
+
+it("a failed older save doesn't roll back a newer choice", async () => {
+  const first = deferred<Settings>();
+  const second = deferred<Settings>();
+  vi.mocked(updateSettings).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+
+  render(<SettingsPage active />);
+  fireEvent.click(await screen.findByText(/\[small\.en\]/));
+  fireEvent.click(screen.getByText(/\[medium\.en\]/));
+
+  await act(async () => {
+    first.reject(new Error("stale failure"));
+    await Promise.resolve();
+  });
+
+  expect(selectedWhisper()?.textContent).toContain("[medium.en]");
+  expect(screen.queryByText("stale failure")).not.toBeInTheDocument();
+
+  await act(async () => {
+    second.resolve({ ...baseSettings, whisper_model: "medium.en" });
+    await Promise.resolve();
+  });
+  expect(selectedWhisper()?.textContent).toContain("[medium.en]");
+});
+
+it("a failed latest save rolls back to the last value the backend confirmed", async () => {
+  vi.mocked(updateSettings)
+    .mockResolvedValueOnce({ ...baseSettings, whisper_model: "small.en" })
+    .mockRejectedValueOnce(new Error("disk full"));
+
+  render(<SettingsPage active />);
+  fireEvent.click(await screen.findByText(/\[small\.en\]/));
+  await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(1));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  fireEvent.click(screen.getByText(/\[medium\.en\]/));
+
+  expect(await screen.findByText("disk full")).toBeInTheDocument();
+  expect(selectedWhisper()?.textContent).toContain("[small.en]");
+});
+
+// ---------- Empty Trash ----------
+
+const trashedSession = (id: string) => ({
+  id, created_at: "2026-08-01T00:00:00Z", title: id, notes: "", video_path: "", trashed_at: "2026-08-02T00:00:00Z",
+});
+
+async function openStorageWithTrash() {
+  vi.mocked(getStorageUsage).mockResolvedValue({
+    used_bytes: 0, free_bytes: 100, total_bytes: 100, session_count: 0, trashed_count: 2,
+  });
+  vi.mocked(getSessions).mockResolvedValue([trashedSession("t1"), trashedSession("t2")]);
+  vi.mocked(deleteSessionForever).mockResolvedValue(undefined);
+}
+
+it("Empty Trash asks for confirmation and deletes nothing on cancel", async () => {
+  await openStorageWithTrash();
+  render(<SettingsPage active />);
+  await screen.findByText(/\[small\.en\]/);
+  openSection("Storage");
+
+  fireEvent.click(await screen.findByRole("button", { name: "Empty Trash" }));
+  expect(screen.getByText("delete forever?")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "[cancel]" }));
+
+  expect(deleteSessionForever).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "Empty Trash" })).toBeInTheDocument();
+});
+
+it("Empty Trash deletes on confirm and reports the deleted ids", async () => {
+  await openStorageWithTrash();
+  const onSessionsDeleted = vi.fn();
+  render(<SettingsPage active onSessionsDeleted={onSessionsDeleted} />);
+  await screen.findByText(/\[small\.en\]/);
+  openSection("Storage");
+
+  fireEvent.click(await screen.findByRole("button", { name: "Empty Trash" }));
+  fireEvent.click(screen.getByRole("button", { name: "[confirm]" }));
+
+  await waitFor(() => expect(onSessionsDeleted).toHaveBeenCalledWith(["t1", "t2"]));
+  expect(deleteSessionForever).toHaveBeenCalledTimes(2);
+});
+
+it("Empty Trash reports what it did delete even when a later delete fails", async () => {
+  await openStorageWithTrash();
+  vi.mocked(deleteSessionForever).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("500"));
+  const onSessionsDeleted = vi.fn();
+  render(<SettingsPage active onSessionsDeleted={onSessionsDeleted} />);
+  await screen.findByText(/\[small\.en\]/);
+  openSection("Storage");
+
+  fireEvent.click(await screen.findByRole("button", { name: "Empty Trash" }));
+  fireEvent.click(screen.getByRole("button", { name: "[confirm]" }));
+
+  await waitFor(() => expect(onSessionsDeleted).toHaveBeenCalledWith(["t1"]));
 });

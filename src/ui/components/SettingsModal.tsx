@@ -4,9 +4,10 @@ import SettingsPage from "./SettingsPage";
 interface Props {
   active: boolean;
   onClose: () => void;
+  onSessionsDeleted?: (ids: string[]) => void;
 }
 
-const SettingsModal: React.FC<Props> = ({ active, onClose }) => {
+const SettingsModal: React.FC<Props> = ({ active, onClose, onSessionsDeleted }) => {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -33,7 +34,7 @@ const SettingsModal: React.FC<Props> = ({ active, onClose }) => {
             </svg>
           </button>
         </div>
-        <SettingsPage active={active} />
+        <SettingsPage active={active} onSessionsDeleted={onSessionsDeleted} />
       </div>
     </div>
   );

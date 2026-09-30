@@ -139,7 +139,7 @@ export async function* streamChatReply(
   history: ChatTurn[],
   signal?: AbortSignal
 ): AsyncGenerator<string> {
-  const resp = await backendFetch(`${BACKEND_URL}/chat/${sessionId}`, {
+  const resp = await backendFetch(`${BACKEND_URL}/chat/${encodeURIComponent(sessionId)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, history }),
@@ -361,8 +361,12 @@ export async function getOllamaModels(): Promise<OllamaModelsResult> {
   }
 }
 
+// Session and job ids are encodeURIComponent'd into every path below. They
+// are uuid hex today, so this changes nothing in practice -- it just means
+// an id can never reach a different route ("../", "?", "#") if that ever
+// stops being true.
 export async function renameSession(id: string, title: string): Promise<Session> {
-  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}`, {
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
@@ -375,7 +379,7 @@ export async function renameSession(id: string, title: string): Promise<Session>
 }
 
 export async function trashSession(id: string): Promise<Session> {
-  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}/trash`, { method: "POST" });
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${encodeURIComponent(id)}/trash`, { method: "POST" });
   if (!resp.ok) {
     throw new Error(`Failed to trash session: ${resp.status}`);
   }
@@ -383,7 +387,7 @@ export async function trashSession(id: string): Promise<Session> {
 }
 
 export async function restoreSession(id: string): Promise<Session> {
-  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}/restore`, { method: "POST" });
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${encodeURIComponent(id)}/restore`, { method: "POST" });
   if (!resp.ok) {
     throw new Error(`Failed to restore session: ${resp.status}`);
   }
@@ -391,7 +395,7 @@ export async function restoreSession(id: string): Promise<Session> {
 }
 
 export async function deleteSessionForever(id: string): Promise<void> {
-  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}`, { method: "DELETE" });
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!resp.ok) {
     throw new Error(`Failed to delete session: ${resp.status}`);
   }
@@ -418,7 +422,7 @@ export type TranscriptSegment = {
 };
 
 export async function getSessionTranscript(id: string): Promise<TranscriptSegment[]> {
-  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}/transcript`);
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${encodeURIComponent(id)}/transcript`);
   if (!resp.ok) {
     throw new Error(`Failed to load transcript: ${resp.status}`);
   }
@@ -434,7 +438,7 @@ export async function updateSpeakerNames(
   id: string,
   names: Record<string, string>
 ): Promise<Record<string, string>> {
-  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}/speaker-names`, {
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${encodeURIComponent(id)}/speaker-names`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ names }),
@@ -459,7 +463,7 @@ export type ActionItem = {
 };
 
 export async function getSessionActionItems(id: string): Promise<ActionItem[] | null> {
-  const resp = await backendFetch(`${BACKEND_URL}/sessions/${id}/action-items`);
+  const resp = await backendFetch(`${BACKEND_URL}/sessions/${encodeURIComponent(id)}/action-items`);
   if (!resp.ok) {
     throw new Error(`Failed to load action items: ${resp.status}`);
   }
@@ -468,11 +472,11 @@ export async function getSessionActionItems(id: string): Promise<ActionItem[] | 
 }
 
 export function exportSessionNotesUrl(id: string): string {
-  return `${BACKEND_URL}/sessions/${id}/export/notes`;
+  return `${BACKEND_URL}/sessions/${encodeURIComponent(id)}/export/notes`;
 }
 
 export function exportSessionZipUrl(id: string): string {
-  return `${BACKEND_URL}/sessions/${id}/export/zip`;
+  return `${BACKEND_URL}/sessions/${encodeURIComponent(id)}/export/zip`;
 }
 
 export type StorageUsage = {
@@ -528,16 +532,18 @@ export async function startProcessing(
   return (await resp.json()) as { job_id: string; session_id: string };
 }
 
-export async function getJobStatus(jobId: string): Promise<JobStatus> {
-  const resp = await backendFetch(`${BACKEND_URL}/jobs/${jobId}`);
+// `signal` lets a poller put a deadline on these (see useProcessingJobs):
+// against a hung backend a plain fetch never settles, so polls pile up.
+export async function getJobStatus(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
+  const resp = await backendFetch(`${BACKEND_URL}/jobs/${encodeURIComponent(jobId)}`, { signal });
   if (!resp.ok) {
     throw new Error(`Failed to fetch job status: ${resp.status}`);
   }
   return (await resp.json()) as JobStatus;
 }
 
-export async function listJobs(): Promise<JobStatus[]> {
-  const resp = await backendFetch(`${BACKEND_URL}/jobs`);
+export async function listJobs(signal?: AbortSignal): Promise<JobStatus[]> {
+  const resp = await backendFetch(`${BACKEND_URL}/jobs`, { signal });
   if (!resp.ok) {
     throw new Error(`Failed to list jobs: ${resp.status}`);
   }
