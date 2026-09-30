@@ -256,6 +256,46 @@ const Sidebar: React.FC<Props> = ({
 
   const hasList = list !== null && list.length > 0;
 
+  // Opens the session actions menu at the pointer for a right-click, or
+  // under the element for a keyboard-triggered one (the context-menu key /
+  // Shift+F10 fire contextmenu with no meaningful pointer position).
+  const openMenuFromContextEvent = (e: React.MouseEvent<HTMLElement>, s: Session) => {
+    e.preventDefault();
+    if (e.clientX === 0 && e.clientY === 0) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      setContextMenu({ session: s, x: rect.left, y: rect.bottom });
+      return;
+    }
+    setContextMenu({ session: s, x: e.clientX, y: e.clientY });
+  };
+
+  // The visible way into the same menu right-click opens -- rows used to
+  // have no keyboard (or discoverable) path to rename/trash/notes/export,
+  // or, in the trash, to restore/delete at all. Toggles, so a second click
+  // closes it.
+  const actionsButton = (s: Session) => {
+    const open = contextMenu?.session.id === s.id;
+    return (
+      <button
+        data-session-menu-trigger
+        aria-label={`Actions for ${s.title}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={(e) => {
+          if (open) {
+            setContextMenu(null);
+            return;
+          }
+          const rect = e.currentTarget.getBoundingClientRect();
+          setContextMenu({ session: s, x: rect.left, y: rect.bottom });
+        }}
+        className="absolute right-1 top-1.5 h-5 w-5 grid place-items-center rounded-sm text-dim hover:text-phosphor hover:bg-line focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+      >
+        <span aria-hidden="true">⋯</span>
+      </button>
+    );
+  };
+
   // "done" (or a pre-status-field record, where status is undefined) needs
   // no badge -- only the degraded cases (job failed but the recording was
   // preserved, or a directory recovered from an interrupted/crashed run)
@@ -413,40 +453,50 @@ const Sidebar: React.FC<Props> = ({
                         className="w-full bg-void border border-signal rounded-sm px-2 py-2 text-xs text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                       />
                     ) : view === "active" ? (
-                      <button
-                        onClick={() => onSelect(s.id)}
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          setContextMenu({ session: s, x: e.clientX, y: e.clientY });
-                        }}
-                        title={s.title}
-                        className={
-                          "w-full text-left text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
-                          (selectedId === s.id
-                            ? "bg-line border-l-2 border-signal pl-[6px] pr-2 py-2"
-                            : "px-2 py-2 hover:bg-line")
-                        }
-                      >
-                        <div className="flex items-center">
-                          <span className="truncate">{s.title}</span>
-                          {statusBadge(s)}
-                        </div>
-                        <div className="text-dim">{formatRelativeTime(s.created_at)}</div>
-                      </button>
+                      <div className="relative">
+                        <button
+                          onClick={() => onSelect(s.id)}
+                          onContextMenu={(e) => openMenuFromContextEvent(e, s)}
+                          aria-current={selectedId === s.id ? "true" : undefined}
+                          title={s.title}
+                          className={
+                            "w-full text-left text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
+                            (selectedId === s.id
+                              ? "bg-line border-l-2 border-signal pl-[6px] pr-7 py-2"
+                              : "pl-2 pr-7 py-2 hover:bg-line")
+                          }
+                        >
+                          <div className="flex items-center">
+                            <span className="truncate">{s.title}</span>
+                            {statusBadge(s)}
+                          </div>
+                          <div className="text-dim">{formatRelativeTime(s.created_at)}</div>
+                        </button>
+                        {actionsButton(s)}
+                      </div>
                     ) : (
-                      <div
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          setContextMenu({ session: s, x: e.clientX, y: e.clientY });
-                        }}
-                        title={s.title}
-                        className="w-full text-left px-2 py-2 text-xs"
-                      >
-                        <div className="flex items-center">
-                          <span className="truncate">{s.title}</span>
-                          {statusBadge(s)}
-                        </div>
-                        <div className="text-dim">{formatRelativeTime(s.trashed_at ?? s.created_at)}</div>
+                      <div className="relative">
+                        {/* A trashed meeting's only actions are in the menu
+                            (restore, delete forever, notes, export), so
+                            activating the row opens it -- it used to be a
+                            plain div reachable only by right-click. */}
+                        <button
+                          onClick={(e) => {
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setContextMenu({ session: s, x: rect.left, y: rect.bottom });
+                          }}
+                          onContextMenu={(e) => openMenuFromContextEvent(e, s)}
+                          aria-haspopup="menu"
+                          title={s.title}
+                          className="w-full text-left pl-2 pr-7 py-2 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                        >
+                          <div className="flex items-center">
+                            <span className="truncate">{s.title}</span>
+                            {statusBadge(s)}
+                          </div>
+                          <div className="text-dim">{formatRelativeTime(s.trashed_at ?? s.created_at)}</div>
+                        </button>
+                        {actionsButton(s)}
                       </div>
                     )}
                   </li>

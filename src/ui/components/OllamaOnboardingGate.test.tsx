@@ -51,3 +51,15 @@ it("clears the pending copy-feedback timer on unmount", async () => {
   setTimeoutSpy.mockRestore();
   clearTimeoutSpy.mockRestore();
 });
+
+it("is a labelled modal dialog with focus inside, and Escape doesn't dismiss it", () => {
+  vi.mocked(useOllamaReadiness).mockReturnValue({ status: "unreachable", recheck: vi.fn(), isRechecking: false });
+  render(<OllamaOnboardingGate />);
+
+  const dialog = screen.getByRole("dialog", { name: "[SETUP REQUIRED]" });
+  expect(dialog).toHaveAttribute("aria-modal", "true");
+  expect(screen.getByRole("link", { name: "Download Ollama" })).toHaveFocus();
+
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+});

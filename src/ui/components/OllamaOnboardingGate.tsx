@@ -1,11 +1,26 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useOllamaReadiness } from "../hooks/useOllamaReadiness";
+import { useDialog } from "../hooks/useDialog";
 
 const OLLAMA_DOWNLOAD_URL = "https://ollama.com/download";
 
 type OllamaOnboardingGateProps = {
   active?: boolean;
 };
+
+// The gate's modal frame, split out so useDialog only runs while the gate
+// is actually shown (the gate itself returns early otherwise). No Escape:
+// it's answered with "Check again" or "Continue anyway", same as clicking.
+function GateDialog({ children }: { children: (titleId: string) => ReactNode }) {
+  const { dialogProps, titleId } = useDialog();
+  return (
+    <div className="absolute inset-0 z-40 bg-void flex items-center justify-center px-8">
+      <div {...dialogProps} className="max-w-md flex flex-col items-center gap-3 text-center focus:outline-none">
+        {children(titleId)}
+      </div>
+    </div>
+  );
+}
 
 export default function OllamaOnboardingGate({ active = true }: OllamaOnboardingGateProps) {
   const readiness = useOllamaReadiness(active);
@@ -40,70 +55,72 @@ export default function OllamaOnboardingGate({ active = true }: OllamaOnboarding
   };
 
   return (
-    <div className="absolute inset-0 z-40 bg-void flex items-center justify-center px-8">
-      <div className="max-w-md flex flex-col items-center gap-3 text-center">
-        <h2 className="text-sm font-semibold tracking-wide uppercase text-phosphor">
-          [SETUP REQUIRED]
-        </h2>
+    <GateDialog>
+      {(titleId) => (
+        <>
+          <h2 id={titleId} className="text-sm font-semibold tracking-wide uppercase text-phosphor">
+            [SETUP REQUIRED]
+          </h2>
 
-        {readiness.status === "unreachable" && (
-          <>
-            <p className="text-xs text-dim">
-              This app uses <span className="text-phosphor">Ollama</span> to run its chat and
-              summarization features locally. Ollama isn't reachable right now.
-            </p>
-            <a
-              href={OLLAMA_DOWNLOAD_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="text-xs text-signal underline"
-            >
-              Download Ollama
-            </a>
-          </>
-        )}
+          {readiness.status === "unreachable" && (
+            <>
+              <p className="text-xs text-dim">
+                This app uses <span className="text-phosphor">Ollama</span> to run its chat and
+                summarization features locally. Ollama isn't reachable right now.
+              </p>
+              <a
+                href={OLLAMA_DOWNLOAD_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-signal underline focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+              >
+                Download Ollama
+              </a>
+            </>
+          )}
 
-        {readiness.status === "model-missing" && (
-          <>
-            <p className="text-xs text-dim">
-              Ollama is running, but the configured model{" "}
-              <span className="text-phosphor">{readiness.model}</span> isn't pulled yet.
-            </p>
-            <div className="flex flex-col items-center gap-1">
-              <div className="flex items-center justify-center gap-2">
-                <code className="text-xs bg-panel border border-line rounded-sm px-2 py-1 text-phosphor select-all">
-                  ollama pull {readiness.model}
-                </code>
-                <button
-                  onClick={() => handleCopy(`ollama pull ${readiness.model}`)}
-                  className="px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-                >
-                  {copyState === "copied" ? "Copied" : "Copy"}
-                </button>
+          {readiness.status === "model-missing" && (
+            <>
+              <p className="text-xs text-dim">
+                Ollama is running, but the configured model{" "}
+                <span className="text-phosphor">{readiness.model}</span> isn't pulled yet.
+              </p>
+              <div className="flex flex-col items-center gap-1">
+                <div className="flex items-center justify-center gap-2">
+                  <code className="text-xs bg-panel border border-line rounded-sm px-2 py-1 text-phosphor select-all">
+                    ollama pull {readiness.model}
+                  </code>
+                  <button
+                    onClick={() => handleCopy(`ollama pull ${readiness.model}`)}
+                    className="px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                  >
+                    {copyState === "copied" ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                {copyState === "failed" && (
+                  <p className="text-xs text-dim">Copy failed — select above</p>
+                )}
               </div>
-              {copyState === "failed" && (
-                <p className="text-xs text-dim">Copy failed — select above</p>
-              )}
-            </div>
-          </>
-        )}
+            </>
+          )}
 
-        <div className="flex items-center justify-center gap-3 mt-1">
-          <button
-            onClick={readiness.recheck}
-            disabled={readiness.isRechecking}
-            className="px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {readiness.isRechecking ? "Checking…" : "Check again"}
-          </button>
-          <button
-            onClick={() => setDismissed(true)}
-            className="text-xs text-dim underline hover:text-phosphor"
-          >
-            Continue anyway
-          </button>
-        </div>
-      </div>
-    </div>
+          <div className="flex items-center justify-center gap-3 mt-1">
+            <button
+              onClick={readiness.recheck}
+              disabled={readiness.isRechecking}
+              className="px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {readiness.isRechecking ? "Checking…" : "Check again"}
+            </button>
+            <button
+              onClick={() => setDismissed(true)}
+              className="text-xs text-dim underline hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+            >
+              Continue anyway
+            </button>
+          </div>
+        </>
+      )}
+    </GateDialog>
   );
 }

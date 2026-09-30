@@ -64,10 +64,63 @@ const SessionContextMenu: React.FC<Props> = ({
 }) => {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const cancelDeleteRef = useRef<HTMLButtonElement | null>(null);
+
+  // Keyboard users arrive here from a row's "⋯" button or the context-menu
+  // key: focus the first item on open, and hand focus back to whatever
+  // opened the menu when it closes -- but only if focus would otherwise be
+  // lost (an item was focused when the menu went away), never pulling it
+  // back from a rename input or a dialog the chosen action just opened.
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    menuItems()[0]?.focus();
+    return () => {
+      const active = document.activeElement;
+      if ((active === null || active === document.body) && opener?.isConnected) opener.focus();
+    };
+  }, []);
+
+  // The "[delete forever]" item is replaced by the confirm step; without
+  // this, focus fell out of the menu entirely when it disappeared. Lands on
+  // [cancel], not [confirm] -- the delete is permanent.
+  useEffect(() => {
+    if (confirmingDelete) cancelDeleteRef.current?.focus();
+  }, [confirmingDelete]);
+
+  function menuItems(): HTMLElement[] {
+    return Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+  }
+
+  // Standard menu keys: arrows move (wrapping), Home/End jump, Tab leaves
+  // the menu (closing it, like a native one). Escape is handled below with
+  // the outside-click close.
+  const handleMenuKeyDown = (e: React.KeyboardEvent) => {
+    const items = menuItems();
+    if (items.length === 0) return;
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    let next: number | null = null;
+    if (e.key === "ArrowDown") next = index < 0 ? 0 : (index + 1) % items.length;
+    else if (e.key === "ArrowUp") next = index < 0 ? items.length - 1 : (index - 1 + items.length) % items.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = items.length - 1;
+    else if (e.key === "Tab") {
+      e.preventDefault();
+      onClose();
+      return;
+    }
+    if (next === null) return;
+    e.preventDefault();
+    items[next].focus();
+  };
 
   useEffect(() => {
     const handlePointerDown = (e: MouseEvent) => {
-      if (!menuRef.current?.contains(e.target as Node)) onClose();
+      const target = e.target as Element | null;
+      if (menuRef.current?.contains(target)) return;
+      // The row's own "⋯" button toggles the menu itself (Sidebar) --
+      // closing here first would make its click reopen it.
+      if (target?.closest?.("[data-session-menu-trigger]")) return;
+      onClose();
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -89,13 +142,18 @@ const SessionContextMenu: React.FC<Props> = ({
   return (
     <div
       ref={menuRef}
+      role="menu"
+      aria-label={`Actions for ${session.title}`}
+      onKeyDown={handleMenuKeyDown}
       style={{ left, top, width: MENU_WIDTH }}
       className="fixed z-50 bg-panel border border-line rounded-sm shadow-lg py-1 text-phosphor [-webkit-app-region:no-drag]"
     >
-      <button className={itemClass} onClick={() => onOpenNotes(session)}>
+      <button role="menuitem" tabIndex={-1} className={itemClass} onClick={() => onOpenNotes(session)}>
         [notes]
       </button>
       <button
+        role="menuitem"
+        tabIndex={-1}
         className={itemClass}
         onClick={() => {
           exportViaFetch(exportSessionNotesUrl(session.id), "notes", onExportError);
@@ -105,6 +163,8 @@ const SessionContextMenu: React.FC<Props> = ({
         [export notes]
       </button>
       <button
+        role="menuitem"
+        tabIndex={-1}
         className={itemClass}
         onClick={() => {
           exportViaFetch(exportSessionZipUrl(session.id), "recording", onExportError);
@@ -116,10 +176,10 @@ const SessionContextMenu: React.FC<Props> = ({
 
       {view === "active" && (
         <>
-          <button className={itemClass} onClick={() => onRename(session)}>
+          <button role="menuitem" tabIndex={-1} className={itemClass} onClick={() => onRename(session)}>
             [rename]
           </button>
-          <button className={itemClass} onClick={() => onTrash(session)}>
+          <button role="menuitem" tabIndex={-1} className={itemClass} onClick={() => onTrash(session)}>
             [trash]
           </button>
         </>
@@ -127,20 +187,25 @@ const SessionContextMenu: React.FC<Props> = ({
 
       {view === "trash" && (
         <>
-          <button className={itemClass} onClick={() => onRestore(session)}>
+          <button role="menuitem" tabIndex={-1} className={itemClass} onClick={() => onRestore(session)}>
             [restore]
           </button>
           {confirmingDelete ? (
-            <div className="px-2 py-1.5 text-xs text-red-400 flex flex-col gap-1">
-              <span>delete forever?</span>
+            <div role="group" aria-label="delete forever?" className="px-2 py-1.5 text-xs text-red-400 flex flex-col gap-1">
+              <span aria-hidden="true">delete forever?</span>
               <div className="flex gap-2">
                 <button
+                  role="menuitem"
+                  tabIndex={-1}
                   className="text-red-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                   onClick={() => onDeleteForever(session)}
                 >
                   [confirm]
                 </button>
                 <button
+                  ref={cancelDeleteRef}
+                  role="menuitem"
+                  tabIndex={-1}
                   className="text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                   onClick={() => setConfirmingDelete(false)}
                 >
@@ -149,7 +214,12 @@ const SessionContextMenu: React.FC<Props> = ({
               </div>
             </div>
           ) : (
-            <button className={itemClass + " hover:text-red-400"} onClick={() => setConfirmingDelete(true)}>
+            <button
+              role="menuitem"
+              tabIndex={-1}
+              className={itemClass + " hover:text-red-400"}
+              onClick={() => setConfirmingDelete(true)}
+            >
               [delete forever]
             </button>
           )}

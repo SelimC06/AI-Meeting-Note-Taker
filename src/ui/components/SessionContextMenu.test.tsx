@@ -228,3 +228,94 @@ it("closes on outside click and on Escape", () => {
   fireEvent.keyDown(document, { key: "Escape" });
   expect(onClose).toHaveBeenCalledTimes(2);
 });
+
+// ---------- menu semantics & keyboard ----------
+
+function renderMenu(view: "active" | "trash", overrides: Partial<Parameters<typeof SessionContextMenu>[0]> = {}) {
+  const props = {
+    session: view === "active" ? session : trashedSession,
+    view,
+    x: 10,
+    y: 10,
+    onClose: vi.fn(),
+    onOpenNotes: vi.fn(),
+    onRename: vi.fn(),
+    onTrash: vi.fn(),
+    onRestore: vi.fn(),
+    onDeleteForever: vi.fn(),
+    onExportError: vi.fn(),
+    ...overrides,
+  };
+  render(<SessionContextMenu {...props} />);
+  return props;
+}
+
+it("is a labelled menu of menuitems, with focus on the first item when it opens", () => {
+  renderMenu("active");
+  expect(screen.getByRole("menu", { name: "Actions for Sprint Planning" })).toBeInTheDocument();
+  const items = screen.getAllByRole("menuitem");
+  expect(items.map((i) => i.textContent)).toEqual([
+    "[notes]", "[export notes]", "[export recording]", "[rename]", "[trash]",
+  ]);
+  expect(items[0]).toHaveFocus();
+});
+
+it("arrow keys move between items (wrapping), Home/End jump to the ends", () => {
+  renderMenu("active");
+  const menu = screen.getByRole("menu");
+  const items = screen.getAllByRole("menuitem");
+
+  fireEvent.keyDown(menu, { key: "ArrowDown" });
+  expect(items[1]).toHaveFocus();
+  fireEvent.keyDown(menu, { key: "End" });
+  expect(items[4]).toHaveFocus();
+  fireEvent.keyDown(menu, { key: "ArrowDown" });
+  expect(items[0]).toHaveFocus();
+  fireEvent.keyDown(menu, { key: "ArrowUp" });
+  expect(items[4]).toHaveFocus();
+  fireEvent.keyDown(menu, { key: "Home" });
+  expect(items[0]).toHaveFocus();
+});
+
+it("Enter on a focused item activates it (real buttons)", () => {
+  const props = renderMenu("active");
+  const menu = screen.getByRole("menu");
+  fireEvent.keyDown(menu, { key: "End" });
+  fireEvent.click(document.activeElement!);
+  expect(props.onTrash).toHaveBeenCalledWith(session);
+});
+
+it("Escape and Tab both close the menu", () => {
+  const props = renderMenu("active");
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "Tab" });
+  expect(props.onClose).toHaveBeenCalledTimes(1);
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  expect(props.onClose).toHaveBeenCalledTimes(2);
+});
+
+it("the delete-forever confirm step keeps focus in the menu, on [cancel]", () => {
+  const props = renderMenu("trash");
+  fireEvent.click(screen.getByRole("menuitem", { name: "[delete forever]" }));
+  expect(screen.getByRole("menuitem", { name: "[cancel]" })).toHaveFocus();
+  expect(screen.getByRole("group", { name: "delete forever?" })).toBeInTheDocument();
+
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "ArrowUp" });
+  expect(screen.getByRole("menuitem", { name: "[confirm]" })).toHaveFocus();
+  fireEvent.click(document.activeElement!);
+  expect(props.onDeleteForever).toHaveBeenCalledWith(trashedSession);
+});
+
+it("a click on a row's actions button doesn't count as an outside click", () => {
+  const trigger = document.createElement("button");
+  trigger.setAttribute("data-session-menu-trigger", "");
+  document.body.appendChild(trigger);
+  try {
+    const props = renderMenu("active");
+    fireEvent.mouseDown(trigger);
+    expect(props.onClose).not.toHaveBeenCalled();
+    fireEvent.mouseDown(document.body);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  } finally {
+    trigger.remove();
+  }
+});

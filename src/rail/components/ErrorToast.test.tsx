@@ -107,3 +107,8 @@ it("clicking the action button does not also dismiss the toast", () => {
   expect(onClick).toHaveBeenCalledTimes(1);
   expect(onDismiss).not.toHaveBeenCalled();
 });
+
+it("announces the error to screen readers (role=alert)", () => {
+  const { getByRole } = render(<ErrorToast message="Upload failed" onDismiss={vi.fn()} />);
+  expect(getByRole("alert")).toHaveTextContent("Upload failed");
+});

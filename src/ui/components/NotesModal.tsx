@@ -7,6 +7,7 @@ import {
   type Session,
   type TranscriptSegment,
 } from "../api";
+import { useDialog } from "../hooks/useDialog";
 
 interface Props {
   session: Session;
@@ -238,14 +239,7 @@ const NotesModal: React.FC<Props> = ({ session, onClose }) => {
   const [view, setView] = useState<ModalView>("notes");
   const [actionItems, setActionItems] = useState<ActionItem[] | null>(null);
   const [checkedIndexes, setCheckedIndexes] = useState<Set<number>>(new Set());
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  const { dialogProps, titleId } = useDialog({ onEscape: onClose });
 
   useEffect(() => {
     let cancelled = false;
@@ -276,9 +270,14 @@ const NotesModal: React.FC<Props> = ({ session, onClose }) => {
 
   return (
     <div className="absolute inset-0 z-50 bg-void/80 flex items-center justify-center px-6 py-6 [-webkit-app-region:no-drag]">
-      <div className="w-full max-w-md h-full max-h-[80%] bg-panel border border-line rounded-sm flex flex-col">
+      <div
+        {...dialogProps}
+        className="w-full max-w-md h-full max-h-[80%] bg-panel border border-line rounded-sm flex flex-col focus:outline-none"
+      >
         <div className="px-3 py-2 border-b border-line flex items-center justify-between text-xs text-phosphor">
-          <span className="truncate">{session.title}</span>
+          <h2 id={titleId} className="truncate font-normal">
+            {session.title}
+          </h2>
           <button
             onClick={onClose}
             aria-label="Close notes"

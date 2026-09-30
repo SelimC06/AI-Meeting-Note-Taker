@@ -273,3 +273,13 @@ it("an older rename failing doesn't undo a newer rename of the same speaker", as
   await waitFor(() => expect(screen.getByText("Bob")).toBeInTheDocument());
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
+
+it("is a modal dialog labelled by the session title, focusing its first control and closing on Escape", () => {
+  const onClose = vi.fn();
+  render(<NotesModal session={session} onClose={onClose} />);
+  const dialog = screen.getByRole("dialog", { name: "Sprint Planning" });
+  expect(dialog).toHaveAttribute("aria-modal", "true");
+  expect(screen.getByRole("button", { name: "Close notes" })).toHaveFocus();
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  expect(onClose).toHaveBeenCalledTimes(1);
+});

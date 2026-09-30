@@ -254,16 +254,17 @@ it("fetches trashed sessions separately when view is trash", async () => {
   expect(getSessions).toHaveBeenCalledWith(true);
 });
 
-it("trash-view rows are not clickable and carry no onSelect affordance", async () => {
+it("trash-view rows never select the session -- activating one opens its actions menu instead", async () => {
   vi.mocked(getSessions).mockResolvedValue([
     { ...sessionA, trashed_at: "2026-08-02T00:00:00Z" },
   ]);
   const props = renderSidebar({ view: "trash" });
 
   const row = await screen.findByText("Sprint Planning");
-  expect(row.closest("button")).toBeNull();
   fireEvent.click(row);
   expect(props.onSelect).not.toHaveBeenCalled();
+  expect(screen.getByRole("menu", { name: "Actions for Sprint Planning" })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "[restore]" })).toBeInTheDocument();
 });
 
 it("right-click in trash view offers restore, which calls restoreSession and reloads both lists", async () => {
@@ -507,4 +508,59 @@ it("refetches the trash list when trashRefreshKey changes (Settings' Empty Trash
   rerender(<Sidebar {...props} trashRefreshKey={1} />);
   await waitFor(() => expect(getSessions).toHaveBeenCalledTimes(2));
   expect(getSessions).toHaveBeenLastCalledWith(true);
+});
+
+// ---------- keyboard access to row actions ----------
+
+it("each active row has a visible actions button that opens the same menu, and focus returns to it on Escape", () => {
+  renderSidebar();
+  const actions = screen.getByRole("button", { name: "Actions for Sprint Planning" });
+  expect(actions).toHaveAttribute("aria-haspopup", "menu");
+  expect(actions).toHaveAttribute("aria-expanded", "false");
+
+  actions.focus();
+  fireEvent.click(actions);
+
+  expect(screen.getByRole("menu", { name: "Actions for Sprint Planning" })).toBeInTheDocument();
+  expect(actions).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByRole("menuitem", { name: "[notes]" })).toHaveFocus();
+
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+
+  expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  expect(actions).toHaveFocus();
+});
+
+it("clicking the actions button again closes the menu", () => {
+  renderSidebar();
+  const actions = screen.getByRole("button", { name: "Actions for Retro" });
+  fireEvent.mouseDown(actions);
+  fireEvent.click(actions);
+  expect(screen.getByRole("menu")).toBeInTheDocument();
+  fireEvent.mouseDown(actions);
+  fireEvent.click(actions);
+  expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+});
+
+it("a keyboard-triggered context menu (no pointer position) opens the menu from the row", () => {
+  renderSidebar();
+  const row = screen.getByTitle("Sprint Planning");
+  fireEvent.contextMenu(row, { clientX: 0, clientY: 0 });
+  expect(screen.getByRole("menu", { name: "Actions for Sprint Planning" })).toBeInTheDocument();
+});
+
+it("trash rows are keyboard-reachable buttons whose menu restores the meeting", async () => {
+  vi.mocked(getSessions).mockResolvedValue([{ ...sessionA, trashed_at: "2026-08-02T00:00:00Z" }]);
+  vi.mocked(restoreSession).mockResolvedValue({ ...sessionA, trashed_at: null });
+  renderSidebar({ view: "trash" });
+
+  const actions = await screen.findByRole("button", { name: "Actions for Sprint Planning" });
+  fireEvent.click(actions);
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "End" });
+  // [notes], [export notes], [export recording], [restore], [delete forever]
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "ArrowUp" });
+  expect(screen.getByRole("menuitem", { name: "[restore]" })).toHaveFocus();
+  fireEvent.click(document.activeElement!);
+
+  await waitFor(() => expect(restoreSession).toHaveBeenCalledWith("a1"));
 });

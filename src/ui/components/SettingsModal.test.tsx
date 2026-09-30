@@ -55,3 +55,20 @@ it("calls onClose on Escape", async () => {
   fireEvent.keyDown(document, { key: "Escape" });
   expect(onClose).toHaveBeenCalledTimes(1);
 });
+
+it("is a modal dialog labelled [SETTINGS] that takes focus and gives it back on close", () => {
+  const opener = document.createElement("button");
+  document.body.appendChild(opener);
+  opener.focus();
+  try {
+    const { unmount } = render(<SettingsModal active onClose={vi.fn()} />);
+    const dialog = screen.getByRole("dialog", { name: "[SETTINGS]" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    unmount();
+    expect(opener).toHaveFocus();
+  } finally {
+    opener.remove();
+  }
+});

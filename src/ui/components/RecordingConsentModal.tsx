@@ -1,4 +1,5 @@
-import { useEffect } from "react";
+import { useRef } from "react";
+import { useDialog } from "../hooks/useDialog";
 
 interface Props {
   onCancel: () => void;
@@ -7,19 +8,20 @@ interface Props {
 
 export default function RecordingConsentModal({ onCancel, onConfirm }: Props) {
   const isMac = window.electronAPI?.platform === "darwin";
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onCancel]);
+  // Starts on the confirm button: the user just clicked Record (in the rail
+  // window -- main brings this window forward for the notice), so Enter
+  // continues what they were doing and Escape backs out.
+  const confirmRef = useRef<HTMLButtonElement | null>(null);
+  const { dialogProps, titleId } = useDialog({ onEscape: onCancel, initialFocusRef: confirmRef });
 
   return (
     <div className="absolute inset-0 z-50 bg-void/90 flex items-center justify-center px-6 py-6 [-webkit-app-region:no-drag]">
-      <div className="w-full max-w-sm bg-panel border border-line rounded-sm p-5 flex flex-col gap-3">
+      <div
+        {...dialogProps}
+        className="w-full max-w-sm bg-panel border border-line rounded-sm p-5 flex flex-col gap-3 focus:outline-none"
+      >
         <p className="text-[10px] uppercase tracking-widest text-dim">before your first recording</p>
-        <h2 className="text-sm font-semibold text-phosphor leading-snug">
+        <h2 id={titleId} className="text-sm font-semibold text-phosphor leading-snug">
           Let people know they're being recorded.
         </h2>
         <p className="text-xs text-dim leading-relaxed">
@@ -42,6 +44,7 @@ export default function RecordingConsentModal({ onCancel, onConfirm }: Props) {
             not now
           </button>
           <button
+            ref={confirmRef}
             onClick={onConfirm}
             className="px-3 py-1.5 rounded-sm text-xs bg-red-500 text-void font-semibold hover:brightness-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
           >

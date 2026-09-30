@@ -33,13 +33,16 @@ export default function ErrorToast({ message, onDismiss, action }: ErrorToastPro
   if (message === null) return null;
 
   return (
-    <div className="flex-1 flex flex-col gap-1.5 px-3 py-2 text-xs bg-panel border border-signal rounded-sm">
+    // role="alert": the rail's errors (a failed upload, a capture that
+    // couldn't start) appear without focus moving, so screen readers
+    // announced nothing at all.
+    <div role="alert" className="flex-1 flex flex-col gap-1.5 px-3 py-2 text-xs bg-panel border border-signal rounded-sm">
       <div className="flex items-start justify-between gap-2">
         <span className="flex-1">{message}</span>
         <button
           aria-label="close"
           onClick={onDismiss}
-          className="text-dim hover:text-phosphor focus:outline-none shrink-0"
+          className="text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal shrink-0"
         >
           [x]
         </button>
