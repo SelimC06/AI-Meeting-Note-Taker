@@ -55,6 +55,36 @@ def _best_turn_for_range(
     return best_speaker
 
 
+# What a segment pyannote attributed to no one gets labeled, when no turn is
+# close enough to borrow a speaker from (see _fallback_speaker). A real
+# label, not None: transcript_.txt is written as "<speaker>: <text>" and
+# used to get literal "None: ..." lines, and a string label can also be
+# renamed like any other speaker.
+UNKNOWN_SPEAKER = "Unknown"
+
+# How far (seconds) outside every turn a segment can sit and still be given
+# the nearest turn's speaker. Unattributed segments are mostly speech at
+# the ragged edge of a turn -- a trailing word, a breath before the next
+# sentence -- which pyannote's boundaries clip by a fraction of a second,
+# so the adjacent speaker is almost always right. Further away than this,
+# a guess would be as likely to name the wrong person as the right one,
+# which is worse than an honest "Unknown".
+NEAREST_TURN_MAX_GAP_SECONDS = 1.0
+
+
+def _fallback_speaker(
+    start: float, end: float, turns: List[Tuple[str, float, float]], fallback: str
+) -> str:
+    best_speaker = None
+    best_gap = NEAREST_TURN_MAX_GAP_SECONDS
+    for speaker, t_start, t_end in turns:
+        gap = max(t_start - end, start - t_end, 0.0)
+        if gap <= best_gap and (best_speaker is None or gap < best_gap):
+            best_gap = gap
+            best_speaker = speaker
+    return best_speaker if best_speaker is not None else fallback
+
+
 def _split_segment_by_words(seg: dict, turns: List[Tuple[str, float, float]]) -> List[Dict]:
     """Split one Whisper segment at word boundaries wherever the
     best-overlapping pyannote turn changes between consecutive words. A word
@@ -91,7 +121,9 @@ def _split_segment_by_words(seg: dict, turns: List[Tuple[str, float, float]]) ->
 
 
 def align_speaker_turns(
-    segments: List[dict], turns: List[Tuple[str, float, float]]
+    segments: List[dict],
+    turns: List[Tuple[str, float, float]],
+    fallback_speaker: str = UNKNOWN_SPEAKER,
 ) -> List[Dict]:
     """Assign a pyannote speaker label to each Whisper segment via
     majority-overlap matching against pyannote's speaker turns.
@@ -109,8 +141,12 @@ def align_speaker_turns(
     carried through `merge_track_segments` in the first place. Without word
     timestamps available, a straddling segment falls back to majority
     overlap over the whole segment rather than splitting. A segment with no
-    overlapping turn at all gets speaker=None rather than crashing or being
-    dropped.
+    overlapping turn at all (or leading words of a split segment that
+    precede every turn) is never dropped: it takes the nearest turn's
+    speaker if one is within NEAREST_TURN_MAX_GAP_SECONDS, else
+    `fallback_speaker` -- "Unknown" by default; server.py passes "Others"
+    when refining the system track, since that audio is known to be a
+    remote participant even when pyannote can't say which one.
     """
     result: List[Dict] = []
     for seg in segments:
@@ -139,6 +175,10 @@ def align_speaker_turns(
             continue
 
         result.extend(_split_segment_by_words(seg, overlapping))
+
+    for item in result:
+        if item["speaker"] is None:
+            item["speaker"] = _fallback_speaker(item["start"], item["end"], turns, fallback_speaker)
 
     result.sort(key=lambda s: s["start"])
     return result

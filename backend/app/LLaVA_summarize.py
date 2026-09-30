@@ -295,10 +295,11 @@ def complete(
     ):
 
     active_client = client if client is not None else _client
+    # Ollama only: a custom provider's /models is optional (see
+    # llm_provider.OpenAICompatClient.list), so its real call below is the
+    # check -- and fails with the provider's real error.
     if client is None:
         _assert_ollama_up()
-    else:
-        client.list()
 
     transcript = Path(raw_txt_path).read_text(encoding="utf-8")
 
@@ -556,10 +557,11 @@ def extract_action_items(
     failed to produce parseable structured data.
     """
     active_client = client if client is not None else _client
+    # Ollama only: a custom provider's /models is optional (see
+    # llm_provider.OpenAICompatClient.list), so its real call below is the
+    # check -- and fails with the provider's real error.
     if client is None:
         _assert_ollama_up()
-    else:
-        client.list()
 
     transcript = Path(raw_txt_path).read_text(encoding="utf-8")
 

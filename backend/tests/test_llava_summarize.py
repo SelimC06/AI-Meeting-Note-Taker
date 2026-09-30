@@ -715,3 +715,37 @@ def test_extract_action_items_falls_back_to_none_past_the_chunk_cap(tmp_path, mo
 
     assert llava_module.extract_action_items(raw_txt_path=str(txt), client=fake) is None
     assert fake.calls == []
+
+
+class _ProviderWithoutModelsEndpoint:
+    """An OpenAI-compatible proxy that doesn't implement GET /models."""
+
+    def list(self):
+        raise httpx.HTTPStatusError("404 Not Found", request=None, response=None)
+
+    def chat(self, model, messages, options, stream, format=None):
+        if format == "json":
+            return {"message": {"content": '{"action_items": [{"text": "ship it", "owner": null, "due": null}]}'}}
+        return {"message": {"content": "# Notes\n- summary"}}
+
+
+def test_complete_does_not_preflight_a_custom_provider(tmp_path):
+    txt_path = tmp_path / "raw.txt"
+    txt_path.write_text("transcript text", encoding="utf-8")
+
+    result = llava_module.complete(
+        raw_txt_path=str(txt_path), model="m", client=_ProviderWithoutModelsEndpoint(), stream=False
+    )
+
+    assert result == "# Notes\n- summary"
+
+
+def test_extract_action_items_does_not_preflight_a_custom_provider(tmp_path):
+    txt_path = tmp_path / "raw.txt"
+    txt_path.write_text("transcript text", encoding="utf-8")
+
+    items = llava_module.extract_action_items(
+        raw_txt_path=str(txt_path), model="m", client=_ProviderWithoutModelsEndpoint()
+    )
+
+    assert [i["text"] for i in items] == ["ship it"]

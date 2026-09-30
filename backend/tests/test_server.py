@@ -3,6 +3,7 @@ import io
 import json
 import os
 import tempfile
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -4270,3 +4271,329 @@ def test_startup_with_corrupt_settings_reports_it_and_guards_the_sweeps(tmp_path
         monkeypatch.delenv("APP_DATA_DIR", raising=False)
         monkeypatch.undo()
         importlib.reload(server_module)
+
+
+# ---------- intermediate file cleanup ----------
+
+_INTERMEDIATES = {"system.wav", "mic.wav", "mixed.wav", "screen.webm", "system.webm", "mic.webm"}
+
+
+def test_successful_job_deletes_intermediates_and_keeps_what_features_read(client, monkeypatch):
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    assert job["status"] == "done"
+
+    session_dir = server_module.STORE / job["session_id"]
+    remaining = {p.name for p in session_dir.iterdir()}
+    assert remaining.isdisjoint(_INTERMEDIATES), remaining
+    # Playback/export, the transcript view, and the summary input stay.
+    # (notes.md isn't here only because the faked llava_complete doesn't
+    # write it; it isn't in the delete list.)
+    assert {"final.webm", "transcript_.txt", "transcript.json"} <= remaining
+
+    # Export still has everything it ships.
+    zf = zipfile.ZipFile(io.BytesIO(client.get(f"/sessions/{job['session_id']}/export/zip").content))
+    assert {"final.webm", "notes.md", "transcript_.txt"} <= set(zf.namelist())
+
+
+def test_single_track_fallback_job_deletes_transcript_wav(client, monkeypatch):
+    """stop_recording_and_transcribe's own transcript_.wav extract goes too."""
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", _fake_mux)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
+
+    def fake_stop_and_transcribe(video_path, transcript_prefix, **kwargs):
+        Path(transcript_prefix).with_suffix(".wav").write_bytes(b"pcm")
+        txt = Path(transcript_prefix).with_suffix(".txt")
+        txt.write_text("hello", encoding="utf-8")
+        return str(txt), None
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_and_transcribe)
+
+    resp = client.post("/process", files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")})
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+
+    remaining = {p.name for p in (server_module.STORE / job["session_id"]).iterdir()}
+    assert "transcript_.wav" not in remaining and "screen.webm" not in remaining
+    assert {"final.webm", "transcript_.txt"} <= remaining
+
+
+def test_failed_mux_keeps_every_intermediate(client, monkeypatch):
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+
+    def failing_mux(video, audio, out_path):
+        raise RuntimeError("mux exploded")
+
+    monkeypatch.setattr(server_module, "mux_video_audio", failing_mux)
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "failed"
+
+    remaining = {p.name for p in (server_module.STORE / job["session_id"]).iterdir()}
+    assert _INTERMEDIATES <= remaining
+
+
+def test_job_without_any_transcript_keeps_intermediates(client, monkeypatch):
+    """Muxed fine, but every transcription pass failed: nothing to retry
+    from except the intermediates, so they stay."""
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", _fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+
+    def failing_transcribe(*args, **kwargs):
+        raise RuntimeError("whisper unavailable")
+
+    monkeypatch.setattr(server_module, "transcribe_wav", failing_transcribe)
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", failing_transcribe)
+    monkeypatch.setattr(server_module, "transcribe_audio", failing_transcribe)
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+
+    remaining = {p.name for p in (server_module.STORE / job["session_id"]).iterdir()}
+    assert _INTERMEDIATES <= remaining
+
+
+def test_delete_job_intermediates_refuses_without_a_usable_final_file(tmp_path):
+    session = tmp_path / "s"
+    session.mkdir()
+    wav = session / "mixed.wav"
+    wav.write_bytes(b"pcm")
+    final = session / "final.webm"
+
+    assert server_module._delete_job_intermediates(session, final, [wav]) == []  # missing
+    final.write_bytes(b"")
+    assert server_module._delete_job_intermediates(session, final, [wav]) == []  # empty
+    assert wav.exists()
+
+
+def test_delete_job_intermediates_only_touches_the_session_folder(tmp_path):
+    session = tmp_path / "s"
+    session.mkdir()
+    final = session / "final.webm"
+    final.write_bytes(b"video")
+    outside = tmp_path / "mixed.wav"
+    outside.write_bytes(b"pcm")
+
+    deleted = server_module._delete_job_intermediates(session, final, [outside, final, None])
+
+    assert deleted == []
+    assert outside.exists() and final.exists()
+
+
+# ---------- export zip ----------
+
+def _export_session(client, video_bytes=b"fake video bytes"):
+    from app.sessions_store import append_session
+
+    session_dir = server_module.STORE / "abc"
+    session_dir.mkdir()
+    (session_dir / "final.webm").write_bytes(video_bytes)
+    (session_dir / "transcript_.txt").write_text("You: hello " * 200, encoding="utf-8")
+    (session_dir / "frames").mkdir()
+    (session_dir / "frames" / "frame_00001.png").write_bytes(b"png bytes")
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00",
+        "title": "My Meeting", "notes": "notes",
+        "video_path": str(session_dir / "final.webm"), "trashed_at": None,
+    })
+
+
+def test_export_zip_stores_media_and_deflates_text(client: TestClient):
+    _export_session(client)
+
+    resp = client.get("/sessions/abc/export/zip")
+
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    types = {info.filename: info.compress_type for info in zf.infolist()}
+    assert types["final.webm"] == zipfile.ZIP_STORED
+    assert types["frames/frame_00001.png"] == zipfile.ZIP_STORED
+    assert types["notes.md"] == zipfile.ZIP_DEFLATED
+    assert types["transcript_.txt"] == zipfile.ZIP_DEFLATED
+    assert zf.read("final.webm") == b"fake video bytes"
+
+
+def test_export_zip_is_built_under_the_storage_folder(client: TestClient):
+    _export_session(client)
+
+    tmp_paths_used = []
+    real_named_temp_file = tempfile.NamedTemporaryFile
+
+    def spying_named_temp_file(*args, **kwargs):
+        f = real_named_temp_file(*args, **kwargs)
+        tmp_paths_used.append(f.name)
+        return f
+
+    with mock.patch("app.server.tempfile.NamedTemporaryFile", side_effect=spying_named_temp_file):
+        assert client.get("/sessions/abc/export/zip").status_code == 200
+
+    assert Path(tmp_paths_used[0]).parent == server_module.STORE / server_module.EXPORT_DIR_NAME
+    assert not Path(tmp_paths_used[0]).exists()  # still cleaned up after sending
+
+
+def test_sweep_stale_export_zips_covers_the_storage_export_folder(tmp_path, monkeypatch):
+    os_tmp = tmp_path / "os-tmp"
+    os_tmp.mkdir()
+    monkeypatch.setattr("app.server.tempfile.gettempdir", lambda: str(os_tmp))
+    store = tmp_path / "store"
+    export_dir = store / server_module.EXPORT_DIR_NAME
+    export_dir.mkdir(parents=True)
+
+    old = time.time() - 7200
+    stale_new_location = export_dir / f"{server_module.EXPORT_TEMP_PREFIX}a.zip"
+    stale_legacy = os_tmp / f"{server_module.EXPORT_TEMP_PREFIX}b.zip"
+    fresh = export_dir / f"{server_module.EXPORT_TEMP_PREFIX}c.zip"
+    unrelated = export_dir / "keep-me.zip"
+    for p in (stale_new_location, stale_legacy, fresh, unrelated):
+        p.write_bytes(b"zip")
+    for p in (stale_new_location, stale_legacy, unrelated):
+        os.utime(p, (old, old))
+
+    server_module._sweep_stale_export_zips(max_age_seconds=3600, store_dir=store)
+
+    assert not stale_new_location.exists()
+    assert not stale_legacy.exists()
+    assert fresh.exists() and unrelated.exists()
+
+
+def test_export_folder_is_not_mistaken_for_a_session(client: TestClient):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    _export_session(client)
+    client.get("/sessions/abc/export/zip")
+
+    assert sweep_orphaned_sessions(server_module.STORE) == {"adopted": [], "deleted": []}
+    assert (server_module.STORE / server_module.EXPORT_DIR_NAME).is_dir()
+
+
+# ---------- custom provider: no /models pre-flight, settings validation ----------
+
+class _NoModelsClient:
+    """A provider without GET /models: list() 404s, chat works."""
+
+    def list(self):
+        raise AssertionError("custom provider must not be pre-flighted with /models")
+
+    def chat(self, model, messages, options=None, format=None, stream=False):
+        if stream:
+            return iter([{"message": {"content": "hi from provider"}}])
+        return {"message": {"content": "# Title: Provider notes\n"}}
+
+
+def test_chat_with_custom_provider_skips_models_preflight(client, monkeypatch):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "abc", "created_at": "2026-08-01T00:00:00+00:00", "title": "T",
+        "notes": "notes", "video_path": "", "trashed_at": None,
+    })
+    monkeypatch.setattr(
+        server_module.llm_provider, "resolve_active_client", lambda settings: (_NoModelsClient(), "m")
+    )
+
+    def ollama_down():
+        raise RuntimeError("ollama is not running")
+
+    monkeypatch.setattr(server_module, "assert_ollama_up", ollama_down)
+    monkeypatch.setattr(
+        server_module, "stream_chat_reply",
+        lambda notes, message, history, model=None, client=None: iter(["hi from provider"]),
+    )
+
+    resp = client.post("/chat/abc", json={"message": "hello", "history": []})
+
+    assert resp.status_code == 200
+    assert "hi from provider" in resp.text
+
+
+def test_summary_failure_with_custom_provider_quotes_the_real_error(client, monkeypatch):
+    monkeypatch.setattr(
+        server_module.llm_provider, "resolve_active_client", lambda settings: (_NoModelsClient(), "m")
+    )
+
+    def failing_complete(**kwargs):
+        raise RuntimeError("Custom AI provider returned HTTP 401: Invalid API key")
+
+    monkeypatch.setattr(server_module, "llava_complete", failing_complete)
+    client.patch("/settings", json={"ai_provider": "custom", "custom_api_base_url": "https://p.example/v1"})
+
+    job = _post_dual_track_with(client, monkeypatch)
+
+    assert job["status"] == "done"
+    assert "Invalid API key" in job["notes"]
+    assert "not found" not in job["notes"]
+
+
+def _post_dual_track_with(client, monkeypatch):
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", _fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+    monkeypatch.setattr(server_module, "transcribe_wav", _two_speaker_system_transcribe_wav)
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    return wait_for_job(client, resp.json()["job_id"])
+
+
+@pytest.fixture()
+def ollama_provider(monkeypatch):
+    # These tests assert on AI_PROVIDER, a module global a successful PATCH
+    # rewrites -- restore it (and the URL) so later tests aren't affected.
+    monkeypatch.setattr(server_module, "AI_PROVIDER", "ollama")
+    monkeypatch.setattr(server_module, "CUSTOM_API_BASE_URL", "")
+
+
+def test_patch_settings_rejects_unknown_ai_provider(client, ollama_provider):
+    resp = client.patch("/settings", json={"ai_provider": "openai"})
+    assert resp.status_code == 400
+    assert server_module.AI_PROVIDER == "ollama"
+
+
+@pytest.mark.parametrize("url", ["api.openai.com/v1", "ftp://x.example", "https://", "not a url"])
+def test_patch_settings_rejects_malformed_base_url(client, ollama_provider, url):
+    assert client.patch("/settings", json={"custom_api_base_url": url}).status_code == 400
+    assert server_module.CUSTOM_API_BASE_URL == ""
+
+
+def test_patch_settings_rejects_clearing_the_url_while_on_custom(client, ollama_provider):
+    assert client.patch(
+        "/settings", json={"ai_provider": "custom", "custom_api_base_url": " https://p.example/v1 "}
+    ).status_code == 200
+    assert server_module.CUSTOM_API_BASE_URL == "https://p.example/v1"  # trimmed
+
+    assert client.patch("/settings", json={"custom_api_base_url": "  "}).status_code == 400
+    assert client.patch(
+        "/settings", json={"ai_provider": "custom", "custom_api_base_url": ""}
+    ).status_code == 400
+    assert server_module.CUSTOM_API_BASE_URL == "https://p.example/v1"
+
+
+def test_patch_settings_allows_switching_to_custom_before_a_url_is_entered(client, ollama_provider):
+    """The Settings page saves the provider choice first, then shows the
+    URL field -- that first save must not be rejected."""
+    assert client.patch("/settings", json={"ai_provider": "custom"}).status_code == 200
+    # ...and clearing the URL is fine once back on Ollama.
+    assert client.patch("/settings", json={"ai_provider": "ollama"}).status_code == 200
+    assert client.patch("/settings", json={"custom_api_base_url": ""}).status_code == 200

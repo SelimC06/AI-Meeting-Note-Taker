@@ -133,6 +133,8 @@ async def _lifespan(app: FastAPI):
         yield
     finally:
         task.cancel()
+        # Cached custom-provider clients hold open connection pools.
+        llm_provider.close_all_clients()
 
 
 app = FastAPI(lifespan=_lifespan)
@@ -328,34 +330,61 @@ _app_data_dir_env = os.getenv("APP_DATA_DIR")
 ROOT = Path(_app_data_dir_env) if _app_data_dir_env else Path(__file__).resolve().parent
 SETTINGS_PATH = ROOT / "settings.json"
 
-# export_session_zip below builds its temp zip in the OS temp dir with this
-# prefix, distinguishing it from anything else that might live there so
+# export_session_zip below builds its temp zip with this prefix,
+# distinguishing it from anything else that might live alongside it so
 # _sweep_stale_export_zips can safely target only this app's own leaked
 # files.
 EXPORT_TEMP_PREFIX = "meeting-export-"
 
+# Where export_session_zip builds its zip: a folder inside the storage dir,
+# not the OS temp dir. The archive is roughly the size of the recording
+# (up to several GB), and storage is often on an external or larger drive
+# than the system disk -- building it in the system temp dir failed with
+# disk-full exactly for the users whose recordings live elsewhere. Dotted
+# and not session-shaped, so the session sweeps in sessions_store never
+# touch it.
+EXPORT_DIR_NAME = ".exports"
 
-def _sweep_stale_export_zips(max_age_seconds: int = 3600) -> None:
+
+def _sweep_stale_export_zips(max_age_seconds: int = 3600, store_dir: Optional[Path] = None) -> None:
     """Best-effort: removes export zips leaked by a previous run.
 
     export_session_zip's temp file is meant to be cleaned up either by its
     own except handler (if building the zip throws) or by the response's
     BackgroundTask (on a normal completed download) -- but a hard kill
     mid-build, or a client disconnecting mid-download (some Starlette
-    versions skip the BackgroundTask for that), can leak it in the OS temp
-    dir forever. Age-gated so a download actually in progress right now is
-    never touched, and scoped to EXPORT_TEMP_PREFIX so this never touches
-    anything else in that shared directory.
+    versions skip the BackgroundTask for that), can leak it forever.
+    Age-gated so a download actually in progress right now is never
+    touched, and scoped to EXPORT_TEMP_PREFIX so this never touches
+    anything else in those directories.
+
+    Covers store_dir/EXPORT_DIR_NAME (where exports are built now) and the
+    OS temp dir (where builds before that change put them).
     """
-    tmp_dir = Path(tempfile.gettempdir())
+    dirs = [Path(tempfile.gettempdir())]
+    if store_dir is not None:
+        dirs.append(store_dir / EXPORT_DIR_NAME)
     cutoff = time.time() - max_age_seconds
-    for entry in tmp_dir.glob(f"{EXPORT_TEMP_PREFIX}*.zip"):
-        try:
-            if entry.stat().st_mtime > cutoff:
+    for directory in dirs:
+        for entry in directory.glob(f"{EXPORT_TEMP_PREFIX}*.zip"):
+            try:
+                if entry.stat().st_mtime > cutoff:
+                    continue
+                entry.unlink()
+            except OSError:
                 continue
-            entry.unlink()
-        except OSError:
-            continue
+
+
+# Only text is worth deflating in an export. The recording (webm/mp4) and
+# frames (png) are already compressed: deflating them saves ~nothing and
+# spent minutes of CPU on a multi-GB webm.
+_EXPORT_DEFLATE_SUFFIXES = {".md", ".txt", ".json"}
+
+
+def _export_compress_type(name: str) -> int:
+    if Path(name).suffix.lower() in _EXPORT_DEFLATE_SUFFIXES:
+        return zipfile.ZIP_DEFLATED
+    return zipfile.ZIP_STORED
 
 
 _settings, _settings_error = load_settings_checked(SETTINGS_PATH, ROOT / "uploads")
@@ -391,7 +420,7 @@ try:
     sweep_stale_partial_mux_files(STORE)
 except Exception as e:
     print(f"[server] startup partial-mux sweep failed (continuing): {e}", flush=True)
-_sweep_stale_export_zips()
+_sweep_stale_export_zips(store_dir=STORE)
 WHISPER_MODEL = _settings["whisper_model"]
 OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
 CUSTOM_VOCABULARY = _settings["custom_vocabulary"]
@@ -743,6 +772,19 @@ def delete_session(session_id: str):
     return {"ok": True}
 
 
+AI_PROVIDER_VALUES = {"ollama", "custom"}
+
+
+def _is_http_url(value: str) -> bool:
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
 class SettingsUpdate(BaseModel):
     whisper_model: Optional[str] = None
     storage_dir: Optional[str] = None
@@ -805,6 +847,22 @@ def patch_settings(body: SettingsUpdate):
 
     if body.storage_dir is not None and not Path(body.storage_dir).is_absolute():
         raise HTTPException(400, "Storage folder must be an absolute path")
+
+    if body.ai_provider is not None and body.ai_provider not in AI_PROVIDER_VALUES:
+        raise HTTPException(400, f"Invalid ai_provider: {body.ai_provider!r}")
+
+    if body.custom_api_base_url is not None:
+        body.custom_api_base_url = body.custom_api_base_url.strip()
+        if body.custom_api_base_url and not _is_http_url(body.custom_api_base_url):
+            raise HTTPException(400, "Base URL must be a full http:// or https:// URL")
+        # Only an explicit save of an empty URL while on the custom provider
+        # is rejected. Switching the provider to custom before any URL is
+        # entered has to stay allowed -- the Settings page saves the
+        # provider choice first and only then shows the URL field; calls
+        # made in that window fail with a clear "no base URL" error (see
+        # llm_provider.OpenAICompatClient._url).
+        if not body.custom_api_base_url and (body.ai_provider or AI_PROVIDER) == "custom":
+            raise HTTPException(400, "Enter the custom provider's base URL")
 
     # Hold SAVE_LOCK across the move AND the save AND the global reassignment
     # so a second concurrent PATCH /settings changing storage_dir can't start
@@ -974,13 +1032,16 @@ def chat(session_id: str, body: ChatRequest):
 
     session_record = _get_session_or_404(store, session_id)
 
-    try:
-        if active_client is None:
+    # Ollama only. A custom provider isn't pre-flighted with GET /models:
+    # many OpenAI-compatible providers and proxies don't implement it, and
+    # that 404 used to 503 every chat on a provider that works. Its real
+    # errors (bad key, unknown model, no base URL) come back through the
+    # stream's {"error": ...} line instead.
+    if active_client is None:
+        try:
             assert_ollama_up()
-        else:
-            active_client.list()
-    except Exception as e:
-        raise HTTPException(503, f"Local model unavailable: {e}")
+        except Exception as e:
+            raise HTTPException(503, f"Local model unavailable: {e}")
 
     history = [{"role": m.role, "content": m.content} for m in body.history]
 
@@ -1019,13 +1080,16 @@ def graph_chat(body: ChatRequest):
     if stream_graph_chat_reply is None or find_relevant_sessions is None or assert_ollama_up is None:
         raise HTTPException(503, "Chat is unavailable on this server")
 
-    try:
-        if active_client is None:
+    # Ollama only. A custom provider isn't pre-flighted with GET /models:
+    # many OpenAI-compatible providers and proxies don't implement it, and
+    # that 404 used to 503 every chat on a provider that works. Its real
+    # errors (bad key, unknown model, no base URL) come back through the
+    # stream's {"error": ...} line instead.
+    if active_client is None:
+        try:
             assert_ollama_up()
-        else:
-            active_client.list()
-    except Exception as e:
-        raise HTTPException(503, f"Local model unavailable: {e}")
+        except Exception as e:
+            raise HTTPException(503, f"Local model unavailable: {e}")
 
     history = [{"role": m.role, "content": m.content} for m in body.history]
 
@@ -1051,6 +1115,54 @@ def graph_chat(body: ChatRequest):
             yield json.dumps({"error": str(e)}) + "\n"
 
     return StreamingResponse(token_stream(), media_type="application/x-ndjson")
+
+
+def _delete_job_intermediates(session: Path, final_path: Path, paths: List[Optional[Path]]) -> List[str]:
+    """Delete a SUCCESSFUL job's intermediate files; returns the names
+    actually deleted. Only ever called once the session is indexed as
+    done and has a transcript -- a failed job keeps everything, so it can
+    be retried or debugged.
+
+    What gets deleted, and why nothing needs it afterwards (checked across
+    backend, src/ui, src/electron and src/rail -- nothing outside
+    _run_process_job opens any of these names):
+    - system.wav, mic.wav, mixed.wav: 16 kHz PCM made only to feed Whisper,
+      pyannote and the mux, all of which already ran. ~115 MB/hour each.
+    - transcript_.wav: stop_recording_and_transcribe's own audio extract
+      for the same one-shot Whisper pass.
+    - screen.webm: its video stream was copied into final.* (-c:v copy, or
+      a straight file copy when there's no audio), so it's a duplicate.
+    - system.webm, mic.webm: the raw uploaded tracks. Their audio is mixed
+      into final.*, and no feature re-transcribes, re-diarizes or plays
+      the tracks separately. (If one ever does, it'll need to keep these.)
+    Export ships final.*, notes.md, transcript_*.txt and frames/, playback
+    uses video_path (final.*), and the transcript view reads
+    transcript.json / transcript_*.txt -- all kept.
+
+    Refuses to delete anything unless final_path is a non-empty file, and
+    only deletes paths directly inside `session` (never final_path itself).
+    Per-file best-effort: a locked file is logged and left behind.
+    """
+    try:
+        if not final_path.is_file() or final_path.stat().st_size == 0:
+            return []
+    except OSError:
+        return []
+
+    deleted: List[str] = []
+    for path in paths:
+        if path is None or path.parent != session or path.name == final_path.name:
+            continue
+        try:
+            path.unlink()
+            deleted.append(path.name)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            log(f"couldn't delete intermediate {path}: {e}")
+    if deleted:
+        log(f"deleted intermediates for {session.name}: {', '.join(deleted)}")
+    return deleted
 
 
 def _record_failed_session(session: Path, error: str) -> None:
@@ -1164,6 +1276,10 @@ def _run_process_job(job_id: str) -> None:
         notes: str = ""
         structured_action_items: Optional[list] = None
         txt_path: Optional[str] = None
+        # Whether any transcription pass actually produced a transcript --
+        # the intermediates are only deleted at the end if so (see
+        # _delete_job_intermediates).
+        transcribed = False
         jobs.update_job(job_id, stage="transcribing")
 
         # Track A: when both the mic and system tracks were captured
@@ -1200,7 +1316,7 @@ def _run_process_job(job_id: str) -> None:
                         turns = pyannote_diarize(str(system_wav), token=huggingface_token)
                         others = [s for s in transcript_segments if s["speaker"] == "Others"]
                         you = [s for s in transcript_segments if s["speaker"] != "Others"]
-                        refined_others = align_speaker_turns(others, turns)
+                        refined_others = align_speaker_turns(others, turns, fallback_speaker="Others")
                         transcript_segments = sorted(
                             you + refined_others, key=lambda s: s["start"]
                         )
@@ -1298,6 +1414,7 @@ def _run_process_job(job_id: str) -> None:
                 log(f"stop_recording_and_transcribe failed, falling back to raw transcription: {e}")
                 txt_path = None
 
+        transcribed = txt_path is not None
         jobs.update_job(job_id, stage="summarizing")
         if txt_path is not None:
             # Long transcripts are summarized in several model calls (see
@@ -1380,22 +1497,25 @@ def _run_process_job(job_id: str) -> None:
                             "_AI summarization timed out (the local model didn't "
                             "respond in time) -- showing the raw transcript instead._\n\n"
                         )
+                    elif job_settings_snapshot["ai_provider"] == "custom":
+                        # Quote the provider's own error (llm_provider puts
+                        # its message in the exception) rather than guessing:
+                        # a 404 from a custom provider is as likely a wrong
+                        # base URL as an unknown model.
+                        explanation = (
+                            "_AI summarization failed: the custom AI provider returned an error "
+                            f"({str(e)[:300]}) -- showing the raw transcript instead. Check the "
+                            "provider settings._\n\n"
+                        )
                     elif "not found" in str(e).lower():
                         # Ollama answers 404 for a model that was never pulled.
                         # Naming the model and the exact command beats a bare
                         # "failed", which gives the user nothing to act on.
-                        if job_settings_snapshot["ai_provider"] == "custom":
-                            explanation = (
-                                f"_AI summarization failed: the model `{ollama_chat_model}` was not "
-                                "found by the configured custom provider -- showing the raw transcript "
-                                "instead. Check the model name in Settings._\n\n"
-                            )
-                        else:
-                            explanation = (
-                                f"_AI summarization failed: the model `{ollama_chat_model}` isn't "
-                                "installed in Ollama -- showing the raw transcript instead. "
-                                f"Run `ollama pull {ollama_chat_model}` to enable summaries._\n\n"
-                            )
+                        explanation = (
+                            f"_AI summarization failed: the model `{ollama_chat_model}` isn't "
+                            "installed in Ollama -- showing the raw transcript instead. "
+                            f"Run `ollama pull {ollama_chat_model}` to enable summaries._\n\n"
+                        )
                     else:
                         explanation = (
                             "_AI summarization failed -- showing the raw transcript instead._\n\n"
@@ -1423,6 +1543,7 @@ def _run_process_job(job_id: str) -> None:
                     model, str(final_path), initial_prompt=custom_vocabulary.strip() or None
                 )
                 transcript = "\n".join(s.text.strip() for s in segments if s.text)
+                transcribed = True
                 notes = (
                     "# Title: Zoom Meeting\n\n"
                     "# Transcript (auto)\n"
@@ -1451,6 +1572,12 @@ def _run_process_job(job_id: str) -> None:
             write_action_items(session, structured_action_items)
         if graph_jobs is not None:
             graph_jobs.enqueue_session(record["id"])
+
+        if transcribed:
+            _delete_job_intermediates(session, final_path, [
+                system_wav, mic_wav, mixed_wav, session / "transcript_.wav",
+                screen_webm, system_webm, mic_webm,
+            ])
 
         jobs.update_job(job_id, status="done", notes=notes, video_path=str(final_path))
     except Exception as e:
@@ -1737,10 +1864,16 @@ def export_session_zip(session_id: str):
     # _sweep_stale_export_zips is a backstop for the remaining leak class: a
     # hard kill mid-build, or a client disconnecting mid-download (some
     # Starlette versions skip the BackgroundTask for that).
-    tmp = tempfile.NamedTemporaryFile(delete=False, prefix=EXPORT_TEMP_PREFIX, suffix=".zip")
+    export_dir = store / EXPORT_DIR_NAME
+    export_dir.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(
+        delete=False, prefix=EXPORT_TEMP_PREFIX, suffix=".zip", dir=str(export_dir)
+    )
     tmp_path = tmp.name
     try:
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Per-entry compression (see _export_compress_type): stored for
+        # media, deflated for text.
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:
             # The mux picks its container from the available encoders (webm
             # normally, mp4 on an aac-only ffmpeg) -- the literal "final.webm"
             # name silently dropped the recording from exports for
@@ -1756,21 +1889,21 @@ def export_session_zip(session_id: str):
                     video_file = candidate
                     break
             if video_file is not None:
-                zf.write(video_file, arcname=video_file.name)
+                zf.write(video_file, arcname=video_file.name, compress_type=_export_compress_type(video_file.name))
 
             notes_md = session_dir / "notes.md"
             if notes_md.exists():
-                zf.write(notes_md, arcname="notes.md")
+                zf.write(notes_md, arcname="notes.md", compress_type=zipfile.ZIP_DEFLATED)
             else:
-                zf.writestr("notes.md", record.get("notes", ""))
+                zf.writestr("notes.md", record.get("notes", ""), compress_type=zipfile.ZIP_DEFLATED)
 
             for transcript in sorted(session_dir.glob("transcript_*.txt")):
-                zf.write(transcript, arcname=transcript.name)
+                zf.write(transcript, arcname=transcript.name, compress_type=zipfile.ZIP_DEFLATED)
 
             frames_dir = session_dir / "frames"
             if frames_dir.is_dir():
                 for frame in sorted(frames_dir.glob("*.png")):
-                    zf.write(frame, arcname=f"frames/{frame.name}")
+                    zf.write(frame, arcname=f"frames/{frame.name}", compress_type=zipfile.ZIP_STORED)
     except Exception:
         tmp.close()
         try:

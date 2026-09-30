@@ -14,11 +14,52 @@ of their own module-level Ollama client.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterator, List, Optional
+import threading
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import httpx
 
 from . import ollama_client
+
+
+class MissingBaseURLError(RuntimeError):
+    pass
+
+
+def _raise_for_status(resp) -> None:
+    """raise_for_status(), but with the provider's own error text in the
+    message. httpx's default ("Client error '404 Not Found' for url ...")
+    hides the useful part -- OpenAI-style APIs put the real reason ("The
+    model `x` does not exist", "Invalid API key") in the JSON body, and that
+    message is what ends up in the chat error line and the job log.
+    """
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        detail = ""
+        try:
+            # A streamed response's body isn't loaded yet (.json()/.text
+            # would raise ResponseNotRead); a no-op for a normal one.
+            resp.read()
+        except Exception:
+            pass
+        try:
+            body = resp.json()
+            err = body.get("error") if isinstance(body, dict) else None
+            detail = err.get("message", "") if isinstance(err, dict) else (err or "")
+        except Exception:
+            try:
+                detail = (resp.text or "")[:300]
+            except Exception:
+                detail = ""
+        message = f"Custom AI provider returned HTTP {resp.status_code}"
+        if detail:
+            message += f": {detail}"
+        try:
+            request = e.request
+        except RuntimeError:  # .request raises when it was never set
+            request = None
+        raise httpx.HTTPStatusError(message, request=request, response=e.response) from e
 
 
 class OpenAICompatClient:
@@ -30,11 +71,30 @@ class OpenAICompatClient:
         }
         self._client = httpx.Client(timeout=timeout)
 
+    def close(self) -> None:
+        self._client.close()
+
+    def _url(self, path: str) -> str:
+        # Settings allow provider=custom with no URL yet (the UI saves the
+        # provider choice before showing the URL field), so say what's
+        # missing rather than letting httpx fail on a relative "/chat/...".
+        if not self._base_url:
+            raise MissingBaseURLError(
+                "The custom AI provider has no base URL -- add one in Settings > AI provider."
+            )
+        return f"{self._base_url}{path}"
+
     def list(self) -> dict:
-        """Health check: GET {base_url}/models. Raises on failure, the
-        same contract as ollama.Client.list()."""
-        resp = self._client.get(f"{self._base_url}/models", headers=self._headers)
-        resp.raise_for_status()
+        """GET {base_url}/models, the same contract as ollama.Client.list().
+
+        Kept for interface parity only -- nothing calls it as a pre-flight
+        check any more: plenty of OpenAI-compatible providers and proxies
+        don't implement /models, and a 404 there used to fail every chat
+        (503) and every summary ("model not found") on a provider whose
+        /chat/completions works fine.
+        """
+        resp = self._client.get(self._url("/models"), headers=self._headers)
+        _raise_for_status(resp)
         return resp.json()
 
     def chat(
@@ -62,7 +122,7 @@ class OpenAICompatClient:
 
     def _chat_once(self, payload: Dict[str, Any]) -> dict:
         resp = self._client.post(
-            f"{self._base_url}/chat/completions", headers=self._headers, json=payload
+            self._url("/chat/completions"), headers=self._headers, json=payload
         )
         if resp.status_code == 400 and "response_format" in payload:
             # Not every OpenAI-compatible endpoint honors response_format
@@ -73,18 +133,18 @@ class OpenAICompatClient:
             # in LLaVA_summarize.extract_action_items).
             retry_payload = {k: v for k, v in payload.items() if k != "response_format"}
             resp = self._client.post(
-                f"{self._base_url}/chat/completions", headers=self._headers, json=retry_payload
+                self._url("/chat/completions"), headers=self._headers, json=retry_payload
             )
-        resp.raise_for_status()
+        _raise_for_status(resp)
         data = resp.json()
         content = data["choices"][0]["message"]["content"] or ""
         return {"message": {"content": content}}
 
     def _stream_chat(self, payload: Dict[str, Any]) -> Iterator[dict]:
         with self._client.stream(
-            "POST", f"{self._base_url}/chat/completions", headers=self._headers, json=payload
+            "POST", self._url("/chat/completions"), headers=self._headers, json=payload
         ) as resp:
-            resp.raise_for_status()
+            _raise_for_status(resp)
             for line in resp.iter_lines():
                 if not line or not line.startswith("data: "):
                     continue
@@ -117,6 +177,41 @@ def _translate_format(format: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+# One OpenAICompatClient per distinct (base_url, api_key, read timeout),
+# reused across calls. resolve_active_client used to build a new
+# httpx.Client (its own connection pool) on every chat request, every
+# summary job, and twice per knowledge-graph session, and nothing ever
+# closed them. Entries for superseded settings stay until shutdown rather
+# than being closed on a settings change: a job that snapshotted the old
+# settings may still be mid-call on that client. That's bounded by how many
+# times the user edits the connection settings in one run.
+_clients: Dict[Tuple[str, str, float], OpenAICompatClient] = {}
+_clients_lock = threading.Lock()
+
+
+def _get_client(base: str, key: str, read_seconds: float) -> OpenAICompatClient:
+    cache_key = (base, key, read_seconds)
+    with _clients_lock:
+        client = _clients.get(cache_key)
+        if client is None:
+            client = OpenAICompatClient(base, key, ollama_client.generation_timeout(read_seconds))
+            _clients[cache_key] = client
+        return client
+
+
+def close_all_clients() -> None:
+    """Close every cached client's connection pool (server.py's lifespan
+    shutdown)."""
+    with _clients_lock:
+        clients = list(_clients.values())
+        _clients.clear()
+    for client in clients:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
 def resolve_active_client(settings: Dict[str, Any]):
     """Pick which LLM backend a request/job should use, from a
     settings-shaped dict (the live settings globals in server.py, or a
@@ -132,9 +227,7 @@ def resolve_active_client(settings: Dict[str, Any]):
         base = settings.get("custom_api_base_url") or ""
         key = settings.get("custom_api_key") or ""
         model = settings.get("custom_model_name") or ""
-        timeout = ollama_client.generation_timeout(
-            ollama_client.resolve_timeout_seconds("llm_provider")
-        )
-        return OpenAICompatClient(base, key, timeout), model
+        read_seconds = ollama_client.resolve_timeout_seconds("llm_provider")
+        return _get_client(base, key, read_seconds), model
 
     return None, settings.get("ollama_chat_model", "")

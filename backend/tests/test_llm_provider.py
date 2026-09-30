@@ -215,3 +215,90 @@ def test_resolve_active_client_returns_openai_compat_client_for_custom_provider(
     assert isinstance(client, OpenAICompatClient)
     assert model == "gpt-4o-mini"
     assert client._base_url == "https://api.openai.com/v1"
+
+
+# ---------- client reuse / shutdown ----------
+
+from app import llm_provider
+
+
+@pytest.fixture()
+def fresh_client_cache(monkeypatch):
+    monkeypatch.setattr(llm_provider, "_clients", {})
+    yield
+    llm_provider.close_all_clients()
+
+
+def _custom(base="https://api.example.com/v1", key="sk-1"):
+    return {
+        "ai_provider": "custom", "ollama_chat_model": "", "custom_api_base_url": base,
+        "custom_api_key": key, "custom_model_name": "m",
+    }
+
+
+def test_resolve_active_client_reuses_one_client_per_connection_settings(fresh_client_cache):
+    a1, _ = resolve_active_client(_custom())
+    a2, _ = resolve_active_client(_custom())
+    b, _ = resolve_active_client(_custom(key="sk-2"))
+    c, _ = resolve_active_client(_custom(base="https://other.example/v1"))
+
+    assert a1 is a2
+    assert len({id(a1), id(b), id(c)}) == 3
+
+
+def test_resolve_active_client_keys_on_the_timeout_too(fresh_client_cache, monkeypatch):
+    first, _ = resolve_active_client(_custom())
+    monkeypatch.setenv("OLLAMA_TIMEOUT_SECONDS", "999")
+    second, _ = resolve_active_client(_custom())
+    assert first is not second
+
+
+def test_close_all_clients_closes_and_forgets_them(fresh_client_cache):
+    client, _ = resolve_active_client(_custom())
+
+    llm_provider.close_all_clients()
+
+    assert client._client.is_closed
+    fresh, _ = resolve_active_client(_custom())
+    assert fresh is not client and not fresh._client.is_closed
+
+
+def test_server_shutdown_closes_cached_clients(fresh_client_cache):
+    from fastapi.testclient import TestClient
+    import app.server as server_module
+
+    client, _ = resolve_active_client(_custom())
+    with TestClient(server_module.app, base_url="http://127.0.0.1"):
+        pass  # lifespan startup + shutdown
+
+    assert client._client.is_closed
+
+
+# ---------- errors ----------
+
+def test_missing_base_url_fails_with_a_clear_message():
+    c = OpenAICompatClient("", "sk", httpx.Timeout(5.0))
+    with pytest.raises(llm_provider.MissingBaseURLError, match="no base URL"):
+        c.chat(model="m", messages=[])
+    with pytest.raises(llm_provider.MissingBaseURLError):
+        list(c.chat(model="m", messages=[], stream=True))
+
+
+def _mock_transport_client(handler):
+    c = OpenAICompatClient("https://api.example.com/v1", "sk", httpx.Timeout(5.0))
+    c._client = httpx.Client(transport=httpx.MockTransport(handler))
+    return c
+
+
+def test_http_error_carries_the_providers_own_message():
+    c = _mock_transport_client(
+        lambda request: httpx.Response(404, json={"error": {"message": "The model `gpt-9` does not exist"}})
+    )
+    with pytest.raises(httpx.HTTPStatusError, match="HTTP 404: The model `gpt-9` does not exist"):
+        c.chat(model="gpt-9", messages=[])
+
+
+def test_streaming_http_error_carries_the_providers_own_message():
+    c = _mock_transport_client(lambda request: httpx.Response(401, text="Invalid API key"))
+    with pytest.raises(httpx.HTTPStatusError, match="HTTP 401: Invalid API key"):
+        list(c.chat(model="m", messages=[], stream=True))

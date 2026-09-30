@@ -112,7 +112,7 @@ def test_align_speaker_turns_picks_the_turn_with_greatest_overlap():
     assert result[0]["speaker"] == "SPEAKER_01"
 
 
-def test_align_speaker_turns_falls_back_to_none_when_no_turn_overlaps():
+def test_align_speaker_turns_labels_a_far_unmatched_segment_unknown():
     from app.diarization import align_speaker_turns
 
     segments = [{"start": 10.0, "end": 11.0, "text": "silence gap", "words": []}]
@@ -121,7 +121,7 @@ def test_align_speaker_turns_falls_back_to_none_when_no_turn_overlaps():
     result = align_speaker_turns(segments, turns)
 
     assert result == [
-        {"start": 10.0, "end": 11.0, "speaker": None, "text": "silence gap", "words": []}
+        {"start": 10.0, "end": 11.0, "speaker": "Unknown", "text": "silence gap", "words": []}
     ]
 
 
@@ -131,7 +131,7 @@ def test_align_speaker_turns_handles_no_turns_at_all():
     segments = [{"start": 0.0, "end": 1.0, "text": "hi", "words": []}]
 
     assert align_speaker_turns(segments, []) == [
-        {"start": 0.0, "end": 1.0, "speaker": None, "text": "hi", "words": []}
+        {"start": 0.0, "end": 1.0, "speaker": "Unknown", "text": "hi", "words": []}
     ]
     assert align_speaker_turns([], [("SPEAKER_00", 0.0, 1.0)]) == []
 
@@ -197,3 +197,45 @@ def test_align_speaker_turns_orders_multiple_segments_by_start_time():
     result = align_speaker_turns(segments, turns)
 
     assert [r["text"] for r in result] == ["first", "second"]
+
+
+def test_align_speaker_turns_borrows_the_nearest_speaker_within_the_gap():
+    """Speech just past a turn's edge (pyannote clipping a trailing word)
+    belongs to the adjacent speaker, not "Unknown"."""
+    from app.diarization import align_speaker_turns
+
+    segments = [{"start": 5.4, "end": 6.0, "text": "right.", "words": []}]
+    turns = [("SPEAKER_00", 0.0, 2.0), ("SPEAKER_01", 2.0, 5.0), ("SPEAKER_02", 6.8, 9.0)]
+
+    assert align_speaker_turns(segments, turns)[0]["speaker"] == "SPEAKER_01"
+
+
+def test_align_speaker_turns_uses_the_given_fallback_label():
+    from app.diarization import align_speaker_turns
+
+    segments = [{"start": 10.0, "end": 11.0, "text": "far away", "words": []}]
+
+    result = align_speaker_turns(segments, [("SPEAKER_00", 0.0, 1.0)], fallback_speaker="Others")
+
+    assert result[0]["speaker"] == "Others"
+
+
+def test_align_speaker_turns_never_leaves_a_split_group_unlabeled():
+    """Words before the first overlapping turn of a straddling segment used
+    to form a speaker=None group."""
+    from app.diarization import align_speaker_turns
+
+    seg = {
+        "start": 0.0, "end": 9.0, "text": "early words then alice then bob",
+        "words": [
+            {"word": "early", "start": 0.0, "end": 0.5},
+            {"word": "alice", "start": 3.0, "end": 3.5},
+            {"word": "bob", "start": 6.0, "end": 6.5},
+        ],
+    }
+    turns = [("SPEAKER_00", 2.9, 5.0), ("SPEAKER_01", 5.5, 9.0)]
+
+    result = align_speaker_turns([seg], turns)
+
+    assert all(r["speaker"] is not None for r in result)
+    assert [r["speaker"] for r in result] == ["Unknown", "SPEAKER_00", "SPEAKER_01"]
