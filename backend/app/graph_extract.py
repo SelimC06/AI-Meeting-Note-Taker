@@ -67,7 +67,16 @@ EXTRACT_SYSTEM_PROMPT = (
     "Entity names should be the SHORTEST natural form (e.g. a person's "
     "first name); if an entity is referred to multiple ways, put the "
     "primary form as 'name' and other forms in 'aliases'.\n"
-    "Do not invent facts not present in the notes."
+    "Do not invent facts not present in the notes.\n"
+    # Spelled out, not left to format=: a provider that ignores
+    # response_format (or the retry without it, see llm_provider) otherwise
+    # answers in prose, which fails validation every time.
+    "Respond with ONLY a JSON object, no prose and no code fences, shaped "
+    'exactly like: {"entities": [{"id": 0, "type": "person", "name": "Sarah", '
+    '"aliases": []}], "relations": [{"source_id": 0, "relation": "leads", '
+    '"target_id": 1}]}. "type" is one of: person, project, decision, '
+    'action_item, topic, organization. Use {"entities": [], "relations": []} '
+    "if the notes contain nothing to extract."
 )
 
 VERIFY_SYSTEM_PROMPT = (
@@ -75,7 +84,8 @@ VERIFY_SYSTEM_PROMPT = (
     "For EACH numbered claim, answer true if the notes actually support "
     "it, false if they do not (including claims the notes explicitly "
     "negate, attribute to the wrong person, or never state).\n"
-    "Return exactly one verdict per claim, in the same order."
+    "Return exactly one verdict per claim, in the same order, as ONLY a JSON "
+    'object like {"verdicts": [true, false]}.'
 )
 
 _EXTRACT_OPTIONS = {"temperature": 0.2, "num_predict": 900, "num_ctx": 4096, "num_gpu": 0}
@@ -130,15 +140,25 @@ def verify_pass(notes: str, extraction: Extraction, model: str, client=None) -> 
     return Extraction(entities=extraction.entities, relations=kept)
 
 
+class ExtractionFailed(Exception):
+    """The extract pass returned something that isn't a valid Extraction.
+
+    Distinct from a valid but EMPTY Extraction: that's a real answer (the
+    notes had nothing to extract) and gets recorded as indexed; this one is
+    counted toward knowledge_graph.MAX_EXTRACTION_ATTEMPTS instead.
+    """
+
+
 def extract_from_notes(notes: str, model: str, client=None) -> Extraction:
     """Run both passes. Schema failures degrade per the design's table:
-    extract failing -> empty Extraction (session stays unindexed, retried
-    by backfill); verify failing -> unverified extraction passes through.
+    extract failing -> ExtractionFailed (session stays unindexed, retried by
+    backfill up to a cap); verify failing -> unverified extraction passes
+    through.
     """
     try:
         extraction = extract_pass(notes, model, client=client)
-    except (ValidationError, ValueError):
-        return Extraction()
+    except (ValidationError, ValueError) as e:
+        raise ExtractionFailed(str(e)) from e
     try:
         return verify_pass(notes, extraction, model, client=client)
     except (ValidationError, ValueError):

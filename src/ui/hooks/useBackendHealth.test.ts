@@ -126,3 +126,16 @@ it("stops polling when active flips from true to false", async () => {
 
   expect(getHealthStatus).toHaveBeenCalledTimes(1);
 });
+
+it("polls one request at a time while the backend is hanging", async () => {
+  vi.useFakeTimers();
+  vi.mocked(getHealthStatus).mockReturnValue(new Promise(() => {}));
+
+  renderHook(() => useBackendHealth(true));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10000);
+  });
+
+  // Startup polling is every 1s -- without the in-flight guard this was ~10.
+  expect(getHealthStatus).toHaveBeenCalledTimes(1);
+});

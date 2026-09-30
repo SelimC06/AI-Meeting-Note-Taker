@@ -1269,3 +1269,117 @@ it("acks with hasPendingUpload: false when a stopForClose upload succeeds and no
 
   await waitFor(() => expect(notifyStopAndSaveComplete).toHaveBeenCalledWith({ hasPendingUpload: false }));
 });
+
+// ---------- retry upload while a new recording is live ----------
+
+function setupRetryWhileRecording() {
+  let commandCallback: ((action: string) => void) | undefined;
+  const onRailCommand = vi.fn((cb: (action: string) => void) => {
+    commandCallback = cb;
+    return () => {};
+  });
+  const notifyStopAndSaveComplete = vi.fn();
+  const pushRailStatus = vi.fn();
+  vi.stubGlobal("windowControls", { pushRailStatus, onRailCommand, notifyStopAndSaveComplete });
+
+  // Status stays "recording": after the first (failed) upload the user has
+  // started a NEW recording.
+  const stop = vi.fn().mockResolvedValue({ screen: new Blob(["x"]) });
+  mockHook({ status: "recording", stop, error: null });
+
+  let resolveRetry!: (v: unknown) => void;
+  const fetchMock = vi
+    .fn()
+    // 1: first recording's upload fails
+    .mockResolvedValueOnce({ ok: false, status: 500, text: () => Promise.resolve("boom") })
+    // 2: the manual retry of it -- held until the test releases it
+    .mockReturnValueOnce(new Promise((resolve) => { resolveRetry = resolve; }))
+    // 3: the live recording's upload, once stopped for the close
+    .mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ job_id: "job-2", session_id: "session-2" }),
+    });
+  vi.stubGlobal("fetch", fetchMock);
+  return {
+    stop, fetchMock, notifyStopAndSaveComplete, pushRailStatus,
+    command: (a: string) => commandCallback?.(a),
+    releaseRetry: () =>
+      resolveRetry({ ok: true, status: 200, json: () => Promise.resolve({ job_id: "job-1", session_id: "session-1" }) }),
+  };
+}
+
+it("a quit during a manual retry still stops and uploads the live recording, then acks once", async () => {
+  const t = setupRetryWhileRecording();
+  const { container, getByRole } = render(<RailApp />);
+  fireEvent.click(container.querySelectorAll("button")[0]); // stop #1 -> upload fails
+  fireEvent.click(await waitFor(() => getByRole("button", { name: "retry upload" })));
+  await waitFor(() => expect(t.fetchMock).toHaveBeenCalledTimes(2)); // retry in flight
+  t.notifyStopAndSaveComplete.mockClear(); // the first (failed) stop's own ack
+
+  t.command("stopForClose");
+  await act(() => Promise.resolve());
+  // Waits for the retry: nothing acked, the live recording not stopped yet.
+  expect(t.notifyStopAndSaveComplete).not.toHaveBeenCalled();
+  expect(t.stop).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    t.releaseRetry();
+  });
+
+  // Then stops the live recording, uploads it, and acks exactly once.
+  await waitFor(() => expect(t.stop).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(t.fetchMock).toHaveBeenCalledTimes(3));
+  await waitFor(() => expect(t.notifyStopAndSaveComplete).toHaveBeenCalledTimes(1));
+  expect(t.notifyStopAndSaveComplete).toHaveBeenCalledWith({ hasPendingUpload: false });
+});
+
+it("a manual retry doesn't ack main by itself (only a close handoff's own handler does)", async () => {
+  const t = setupRetryWhileRecording();
+  const { container, getByRole } = render(<RailApp />);
+  fireEvent.click(container.querySelectorAll("button")[0]);
+  fireEvent.click(await waitFor(() => getByRole("button", { name: "retry upload" })));
+  t.notifyStopAndSaveComplete.mockClear(); // the failed stop's own ack
+  await act(async () => {
+    t.releaseRetry();
+  });
+  await waitFor(() => expect(t.fetchMock).toHaveBeenCalledTimes(2));
+  await act(() => Promise.resolve());
+  expect(t.notifyStopAndSaveComplete).not.toHaveBeenCalled();
+});
+
+it("a retry upload in flight doesn't block stopping the live recording", async () => {
+  const t = setupRetryWhileRecording();
+  const { container, getByRole, getByLabelText } = render(<RailApp />);
+  fireEvent.click(container.querySelectorAll("button")[0]);
+  fireEvent.click(await waitFor(() => getByRole("button", { name: "retry upload" })));
+  await waitFor(() => expect(t.fetchMock).toHaveBeenCalledTimes(2));
+
+  const stopButton = getByLabelText("Stop recording");
+  expect(stopButton).toBeEnabled();
+  fireEvent.click(stopButton);
+
+  await waitFor(() => expect(t.stop).toHaveBeenCalledTimes(2));
+});
+
+it("a 'retryUpload' command (from the docked pill) retries the pending upload", async () => {
+  const t = setupRetryWhileRecording();
+  const { container, getByRole } = render(<RailApp />);
+  fireEvent.click(container.querySelectorAll("button")[0]);
+  await waitFor(() => getByRole("button", { name: "retry upload" }));
+
+  t.command("retryUpload");
+
+  await waitFor(() => expect(t.fetchMock).toHaveBeenCalledTimes(2));
+});
+
+it("pushes the error kind along with the message, so the docked pill can offer an action", async () => {
+  const t = setupRetryWhileRecording();
+  const { container } = render(<RailApp />);
+  fireEvent.click(container.querySelectorAll("button")[0]);
+  await waitFor(() =>
+    expect(t.pushRailStatus).toHaveBeenLastCalledWith(
+      expect.objectContaining({ recordErrorKind: "generic", hasPendingUpload: true })
+    )
+  );
+});

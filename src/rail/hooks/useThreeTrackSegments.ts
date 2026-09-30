@@ -131,6 +131,27 @@ export function useThreeTrackSegments() {
       systemRec?.ondata((b) => segsRef.current.systemAudio.push(b));
       micRec?.ondata((b) => segsRef.current.micAudio.push(b));
 
+      // A source can end by itself mid-recording -- the mic disconnects,
+      // the user clicks macOS's "Stop sharing", the recorder errors out.
+      // The other tracks keep recording, but the user must be told this
+      // one stopped (stop() ending tracks itself fires no 'ended', and the
+      // recRef check skips anything after our own stop).
+      const warn = (message: string) => {
+        if (recRef.current === null) return;
+        setError({ kind: "generic", message });
+      };
+      const watch = (stream: MediaStream | null | undefined, rec: StreamRecorder | undefined, message: string) => {
+        stream?.getTracks?.().forEach((track) => track.addEventListener("ended", () => warn(message)));
+        rec?.mediaRecorder?.addEventListener?.("error", () => warn(message));
+      };
+      watch(streams.mic, micRec, "Microphone disconnected — the rest of the recording continues without it.");
+      watch(streams.system, systemRec, "System audio stopped — the rest of the recording continues without it.");
+      watch(
+        streams.screen,
+        screenRec,
+        "Screen capture stopped — audio keeps recording. Stop the recording when you're done."
+      );
+
       screenRec?.start();
       systemRec?.start();
       micRec?.start();

@@ -302,3 +302,15 @@ def test_streaming_http_error_carries_the_providers_own_message():
     c = _mock_transport_client(lambda request: httpx.Response(401, text="Invalid API key"))
     with pytest.raises(httpx.HTTPStatusError, match="HTTP 401: Invalid API key"):
         list(c.chat(model="m", messages=[], stream=True))
+
+
+def test_json_schema_formats_are_sent_non_strict():
+    """OpenAI strict mode rejects Pydantic schemas (optional fields, no
+    additionalProperties:false) with a 400 -- every graph extraction failed."""
+    from app.llm_provider import _translate_format
+    from app.graph_extract import Extraction
+
+    fmt = _translate_format(Extraction.model_json_schema())
+    assert fmt["type"] == "json_schema"
+    assert fmt["json_schema"]["strict"] is False
+    assert _translate_format("json") == {"type": "json_object"}

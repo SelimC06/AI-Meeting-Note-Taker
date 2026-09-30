@@ -78,6 +78,36 @@ def empty_graph() -> dict:
     return {"nodes": {}, "edges": [], "indexed_sessions": []}
 
 
+# How many times a session whose extraction came back unusable (not valid
+# JSON / not the schema) is retried before backfill stops re-queueing it.
+# Every launch used to retry every such session again -- on a custom
+# provider that's two paid calls per session per launch, re-sending the
+# notes each time, for extractions that were never going to parse.
+MAX_EXTRACTION_ATTEMPTS = 3
+
+
+def extraction_failures(graph: dict) -> dict:
+    """session_id -> failed attempts so far. Optional key: graphs written
+    before it existed simply have none."""
+    failures = graph.get("extraction_failures")
+    return failures if isinstance(failures, dict) else {}
+
+
+def extraction_gave_up(graph: dict, session_id: str) -> bool:
+    return extraction_failures(graph).get(session_id, 0) >= MAX_EXTRACTION_ATTEMPTS
+
+
+def record_extraction_failure(store_dir: Path, session_id: str) -> int:
+    """Count one failed extraction for session_id; returns the new count."""
+    with _GRAPH_LOCK:
+        graph = load_graph(store_dir)
+        failures = dict(extraction_failures(graph))
+        failures[session_id] = failures.get(session_id, 0) + 1
+        graph["extraction_failures"] = failures
+        _write_graph_atomic(store_dir, graph)
+        return failures[session_id]
+
+
 def _graph_path(store_dir: Path) -> Path:
     return store_dir / KNOWLEDGE_GRAPH_FILENAME
 
@@ -225,6 +255,12 @@ def merge_extraction(store_dir: Path, session_id: str, extraction: dict) -> None
             })
 
         graph["indexed_sessions"].append(session_id)
+        # Indexed now (possibly with nothing in it -- an empty extraction is
+        # a real answer): drop any earlier failure count.
+        if session_id in extraction_failures(graph):
+            graph["extraction_failures"] = {
+                k: v for k, v in extraction_failures(graph).items() if k != session_id
+            }
         _write_graph_atomic(store_dir, graph)
 
 
@@ -245,7 +281,11 @@ def remove_session(store_dir: Path, session_id: str) -> bool:
     """
     with _GRAPH_LOCK:
         graph = load_graph(store_dir)
-        changed = session_id in graph["indexed_sessions"]
+        changed = session_id in graph["indexed_sessions"] or session_id in extraction_failures(graph)
+        if session_id in extraction_failures(graph):
+            graph["extraction_failures"] = {
+                k: v for k, v in extraction_failures(graph).items() if k != session_id
+            }
         graph["indexed_sessions"] = [s for s in graph["indexed_sessions"] if s != session_id]
 
         removed_nodes = set()

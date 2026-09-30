@@ -418,3 +418,49 @@ it("stops settling after a timeout when main's floatingChanged push never arrive
     vi.useRealTimers();
   }
 });
+
+// ---------- errors while docked (the rail's own toast is hidden) ----------
+
+it("shows a failed upload's message and a retry that goes to the rail", () => {
+  const { emitStatus, sendRailCommand } = stubWindowControls();
+  render(<DockedRail />);
+  emitStatus({
+    ...IDLE_STATUS,
+    recordError: "Couldn't reach the app backend — is it running?",
+    recordErrorKind: "generic",
+    hasPendingUpload: true,
+  });
+
+  expect(screen.getByRole("alert")).toHaveTextContent("Couldn't reach the app backend");
+  fireEvent.click(screen.getByRole("button", { name: "[retry upload]" }));
+  expect(sendRailCommand).toHaveBeenCalledWith("retryUpload");
+});
+
+it("offers privacy settings for a permission error", () => {
+  const openPrivacySettings = vi.fn();
+  vi.stubGlobal("settingsAPI", { openPrivacySettings });
+  vi.stubGlobal("electronAPI", { platform: "darwin" });
+  const { emitStatus } = stubWindowControls();
+  render(<DockedRail />);
+  emitStatus({ ...IDLE_STATUS, recordError: "Screen or microphone access denied", recordErrorKind: "permission-denied" });
+
+  fireEvent.click(screen.getByRole("button", { name: "[open privacy settings]" }));
+  expect(openPrivacySettings).toHaveBeenCalledWith("screenRecording");
+});
+
+it("shows a plain error with no action when there's nothing to retry", () => {
+  const { emitStatus } = stubWindowControls();
+  render(<DockedRail />);
+  emitStatus({ ...IDLE_STATUS, recordError: "Processing failed.", recordErrorKind: "generic" });
+  expect(screen.getByRole("alert")).toHaveTextContent("Processing failed.");
+  expect(screen.queryByRole("button", { name: /retry upload|privacy/ })).not.toBeInTheDocument();
+});
+
+it("keeps Stop enabled while an upload is in flight during a recording", () => {
+  const { emitStatus } = stubWindowControls();
+  render(<DockedRail />);
+  emitStatus({ ...IDLE_STATUS, status: "recording", isProcessing: true });
+  expect(screen.getByLabelText("Stop recording")).toBeEnabled();
+  emitStatus({ ...IDLE_STATUS, status: "idle", isProcessing: true });
+  expect(screen.getByLabelText("Start recording")).toBeDisabled();
+});

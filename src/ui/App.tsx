@@ -46,6 +46,11 @@ function App() {
     setTrashRefreshKey((k) => k + 1);
     reloadSessions();
   };
+  // Storage folder changed (Settings): both meeting lists are stale.
+  const handleLibraryChanged = () => {
+    setTrashRefreshKey((k) => k + 1);
+    reloadSessions();
+  };
   const health = useBackendHealth(true);
   const backendUp = health?.backend ?? false;
   // Sidebar/Chat use this to stop suppressing sessionsError once the backend
@@ -203,6 +208,7 @@ function App() {
                 active
                 onClose={() => setSettingsOpen(false)}
                 onSessionsDeleted={handleSessionsDeleted}
+                onLibraryChanged={handleLibraryChanged}
               />
             )}
           </div>

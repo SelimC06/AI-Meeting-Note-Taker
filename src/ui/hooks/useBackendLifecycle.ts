@@ -82,9 +82,20 @@ export function useBackendLifecycle(): BackendLifecycleState {
   // messaging).
   useEffect(() => {
     let cancelled = false;
+    // One probe at a time: a tick that lands while the previous probe is
+    // still waiting on a slow backend is skipped (checkHealth has its own
+    // deadline, after which it counts as a failure).
+    let inFlight = false;
 
     const poll = async () => {
-      const ok = await checkHealth();
+      if (inFlight) return;
+      inFlight = true;
+      let ok: boolean;
+      try {
+        ok = await checkHealth();
+      } finally {
+        inFlight = false;
+      }
       if (cancelled) return;
       if (ok) {
         firstFailureAtRef.current = null;

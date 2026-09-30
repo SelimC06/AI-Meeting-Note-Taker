@@ -92,6 +92,10 @@ def _index_exists_but_is_corrupt(store_dir: Path) -> bool:
     return False
 
 
+def _is_valid_record(record) -> bool:
+    return isinstance(record, dict) and isinstance(record.get("id"), str) and bool(record["id"])
+
+
 def load_sessions(store_dir: Path) -> List[dict]:
     """Read the sessions index. Missing file -> empty list; a file that
     exists but won't parse (or isn't a list) -> SessionsIndexCorruptError,
@@ -123,7 +127,11 @@ def load_sessions(store_dir: Path) -> List[dict]:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (ValueError, OSError):
             data = None
-        if not isinstance(data, list):
+        # Every element must be a record with an id, not just "a list":
+        # a stray null / string / id-less object used to make every endpoint
+        # 500 on r.get(...), and since the file still parsed as a list,
+        # recover-index thought it was healthy and couldn't fix it.
+        if not isinstance(data, list) or not all(_is_valid_record(r) for r in data):
             _index_cache.pop(key, None)
             raise SessionsIndexCorruptError(path, preserve_corrupt_copy(path))
 

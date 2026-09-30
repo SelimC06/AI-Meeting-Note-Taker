@@ -1456,3 +1456,26 @@ def test_write_speaker_names_cleans_up_temp_file_on_failure(tmp_path: Path, monk
     with pytest.raises(OSError):
         write_speaker_names(session_dir, {"SPEAKER_00": "Alice"})
     assert list(session_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("bad", [
+    '[{"id": "aaa"}, null]',
+    '[{"id": "aaa"}, "stray string"]',
+    '[{"title": "no id"}]',
+    '[{"id": ""}]',
+    '[{"id": 42}]',
+])
+def test_an_index_with_a_malformed_record_is_treated_as_corrupt(tmp_path: Path, bad):
+    (tmp_path / "sessions_index.json").write_text(bad, encoding="utf-8")
+    with pytest.raises(SessionsIndexCorruptError):
+        load_sessions(tmp_path)
+
+
+def test_recover_repairs_an_index_with_a_malformed_record(tmp_path: Path):
+    append_session(tmp_path, _rec(A_ID, title="Kept"))
+    (tmp_path / "sessions_index.json").write_text(f'[{{"id": "{A_ID}", "title": "x"}}, null]', encoding="utf-8")
+
+    result = sessions_store.recover_sessions_index(tmp_path)
+
+    assert result["source"] == "backup"
+    assert [r["title"] for r in load_sessions(tmp_path)] == ["Kept"]

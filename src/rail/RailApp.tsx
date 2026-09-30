@@ -121,7 +121,23 @@ export default function RailApp() {
     // flight -- a close/quit arriving in that window used to slip past the
     // guard entirely and kill the rail window (and the in-flight POST
     // /process with it) mid-upload.
-    const inFlightUploadRef = useRef<Promise<void> | null>(null);
+    //
+    // `kind` says who acks main's close/quit handoff for it: a "stop"
+    // (stopAndUpload) always acks once it settles; a "retry" (the toast's /
+    // docked pill's "retry upload") never does -- it can run while a NEW
+    // recording is live, and its ack used to let a quit destroy the window
+    // with that recording still in it (handleStopForClose now waits for
+    // the retry and then stops the live recording itself).
+    const inFlightUploadRef = useRef<{ promise: Promise<void>; kind: "stop" | "retry" } | null>(null);
+
+    // Mirrors `status` for code that reads it after an await -- the closure's
+    // copy is from before the wait (see handleStopForClose).
+    const statusRef = useRef(status);
+    statusRef.current = status;
+
+    // Uploads in flight (a stop's and a retry's can overlap), so isProcessing
+    // only clears when the last one settles.
+    const activeUploadsRef = useRef(0);
 
     // Every recording whose upload has failed and not yet succeeded on a
     // retry, oldest first, so "retry upload" can re-POST the exact same
@@ -168,11 +184,12 @@ export default function RailApp() {
     // nothing else can run (this is single-threaded JS) until at least the
     // first await inside fn -- any concurrent check of inFlightUploadRef
     // always sees it already set.
-    function trackInFlight(fn: () => Promise<void>): Promise<void> {
+    function trackInFlight(kind: "stop" | "retry", fn: () => Promise<void>): Promise<void> {
         const promise = fn();
-        inFlightUploadRef.current = promise;
+        const entry = { promise, kind };
+        inFlightUploadRef.current = entry;
         return promise.finally(() => {
-            if (inFlightUploadRef.current === promise) {
+            if (inFlightUploadRef.current === entry) {
                 inFlightUploadRef.current = null;
             }
         });
@@ -184,6 +201,7 @@ export default function RailApp() {
     // just this call) -- see trackInFlight above for why the assignment
     // can't live in here.
     const runUpload = async (formData: FormData) => {
+        activeUploadsRef.current += 1;
         setIsProcessing(true);
         try {
             let result: { job_id: string; session_id: string };
@@ -212,7 +230,8 @@ export default function RailApp() {
             setPendingUploadCount(pendingUploadsRef.current.length);
             setUploadError(err instanceof Error ? err.message : String(err));
         } finally {
-            setIsProcessing(false);
+            activeUploadsRef.current -= 1;
+            if (activeUploadsRef.current === 0) setIsProcessing(false);
         }
     };
 
@@ -222,7 +241,7 @@ export default function RailApp() {
     // rail:command and awaits the ack — never hangs waiting for one that
     // was never coming. See stopAndSaveRailRecording() in main.js.
     const stopAndUpload = () =>
-        trackInFlight(async () => {
+        trackInFlight("stop", async () => {
             try {
                 const blobs = await stop();
 
@@ -264,25 +283,20 @@ export default function RailApp() {
         }
     };
 
-    // Re-POSTs every failed upload still queued. Fire-and-
-    // forget from the caller's perspective (ErrorToast's action.onClick is
-    // synchronous) -- trackInFlight covers it via inFlightUploadRef the same
-    // as any other upload. Acks on its own once settled, same as
-    // stopAndUpload does, so a close/quit that arrives while a retry is
-    // mid-flight (handleStopForClose's inFlightUploadRef wait below) isn't
-    // left waiting on an ack nothing would otherwise ever send.
+    // Re-POSTs every failed upload still queued. Fire-and-forget from the
+    // caller's perspective (ErrorToast's action.onClick is synchronous, and
+    // the docked pill's "retry upload" arrives as a rail:command) --
+    // trackInFlight covers it via inFlightUploadRef the same as any other
+    // upload. Deliberately does NOT ack main's close/quit handoff: a close
+    // arriving meanwhile is handled by handleStopForClose /
+    // handleRetryUploadForClose, which wait for this and then ack exactly
+    // once themselves.
     const handleRetryUpload = () => {
         // inFlightUploadRef, not isProcessing: same stale-state hole
         // handleRecordClick's guard closes -- trackInFlight sets the ref
         // synchronously, React state a render later.
         if (pendingUploadsRef.current.length === 0 || inFlightUploadRef.current) return;
-        void trackInFlight(async () => {
-            try {
-                await retryPendingUploads();
-            } finally {
-                ackStopAndSave();
-            }
-        });
+        void trackInFlight("retry", retryPendingUploads);
     };
 
     // True only while the upload error is what's actually showing -- not
@@ -291,10 +305,12 @@ export default function RailApp() {
     const canRetryUpload = !recordError && pendingUploadCount > 0;
 
     const handleRecordClick = async () => {
-        if (isProcessing) return;
-
         try {
             if (status === "idle") {
+                // Only STARTING is held back by an upload in flight -- a
+                // retry upload used to block Stop too, for as long as the
+                // (possibly multi-minute) upload took.
+                if (isProcessing) return;
                 // Checked and set before the first await -- see startingRef.
                 if (startingRef.current) return;
                 startingRef.current = true;
@@ -317,7 +333,9 @@ export default function RailApp() {
                 // A stop+upload span is already running (double-click landed in the
                 // recorder-flush window) -- layers below make stop() re-entrant, but
                 // without this check the same Combined would be uploaded twice.
-                if (inFlightUploadRef.current) return;
+                // A RETRY in flight doesn't block this: it's re-sending older
+                // recordings, and this live one still has to be stopped.
+                if (inFlightUploadRef.current?.kind === "stop") return;
                 await stopAndUpload();
             }
         } catch (err) {
@@ -326,32 +344,30 @@ export default function RailApp() {
         }
     };
 
+    // Settles `promise` without throwing -- runUpload already reports its
+    // own errors via setUploadError.
+    const settled = (promise: Promise<void>) => promise.catch(() => {});
+
     // Handles main.js's "retryUploadForClose" rail:command (see
     // retryRailUploadAndWait() there), sent when the user picks "Retry and
-    // wait" on the pending-upload close dialog (G3). Acks unconditionally on
+    // wait" on the pending-upload close dialog (G3). Acks exactly once on
     // every exit for the same reason stopAndUpload does: main awaits this
     // ack before destroying the rail window, and must never hang on one that
-    // was never coming. Deliberately doesn't ack after an already-in-flight
-    // upload (the first branch) -- that operation (stopAndUpload or a
-    // manually-clicked retry) already guarantees its own single ack once it
-    // settles, so acking again here would double-ack.
+    // was never coming -- except after an in-flight STOP, which acks itself.
     const handleRetryUploadForClose = async () => {
-        if (inFlightUploadRef.current) {
-            try {
-                await inFlightUploadRef.current;
-            } catch {
-                // runUpload already reports its own errors via setUploadError.
-            }
-            return;
-        }
-        if (pendingUploadsRef.current.length === 0) {
-            // Nothing pending -- either it never failed, or it already
-            // resolved (succeeded/discarded) by the time this arrived.
-            ackStopAndSave();
-            return;
+        // Only awaited when something IS in flight: with nothing running,
+        // the retry below must start in this same tick (trackInFlight sets
+        // the ref synchronously) so a "retry upload" click racing this
+        // command sees it and doesn't POST the same recording twice.
+        const inFlight = inFlightUploadRef.current;
+        if (inFlight) {
+            await settled(inFlight.promise);
+            if (inFlight.kind === "stop") return; // it acked for itself
         }
         try {
-            await trackInFlight(retryPendingUploads);
+            if (pendingUploadsRef.current.length > 0) {
+                await trackInFlight("retry", retryPendingUploads);
+            }
         } finally {
             ackStopAndSave();
         }
@@ -364,24 +380,23 @@ export default function RailApp() {
     // idle here, but main hasn't heard about it yet over the rail:pushStatus
     // round-trip).
     const handleStopForClose = async () => {
-        if (inFlightUploadRef.current) {
-            // Something -- a manual stop's own upload, or the user clicking
-            // "retry upload" on a previously failed one -- already kicked
-            // off an upload and it's mid-flight. Wait for that same
-            // operation instead of starting a new one or acking
-            // immediately, or the close would destroy this window (and the
-            // in-flight POST /process with it) mid-upload. Whichever flow
-            // started it (stopAndUpload or handleRetryUpload) already
-            // guarantees its own single ack once it settles, so there's
-            // nothing further to do here either way.
-            try {
-                await inFlightUploadRef.current;
-            } catch {
-                // runUpload already reports its own errors via setUploadError.
-            }
-            return;
+        // Something may already be uploading -- a manual stop's own upload,
+        // or a "retry upload" of older recordings. Wait for it rather than
+        // start a competing one, or the close would destroy this window
+        // (and the in-flight POST /process with it) mid-upload. A stop acks
+        // for itself. A retry doesn't -- and a NEW recording can be live
+        // while it runs, which then still has to be stopped and uploaded
+        // below; this used to return here and let the window be destroyed
+        // with that recording in it.
+        const inFlight = inFlightUploadRef.current;
+        if (inFlight) {
+            await settled(inFlight.promise);
+            if (inFlight.kind === "stop") return; // it acked for itself
         }
-        if (status !== "recording" && status !== "paused" && status !== "starting") {
+        // Read through the ref: after the wait above, this closure's
+        // `status` is from before it.
+        const liveStatus = statusRef.current;
+        if (liveStatus !== "recording" && liveStatus !== "paused" && liveStatus !== "starting") {
             // Nothing recording and nothing uploading -- ack immediately
             // instead of hanging main's guarded close on an ack that was
             // never coming.
@@ -418,6 +433,9 @@ export default function RailApp() {
             elapsedLabel: elapsed,
             level: pushedLevels,
             recordError: displayError?.message ?? null,
+            // Lets the docked pill offer the right action (retry upload vs.
+            // open privacy settings) -- see DockedRail.
+            recordErrorKind: displayError?.kind ?? null,
             isProcessing,
             hasPendingUpload: pendingUploadCount > 0,
         });
@@ -429,6 +447,7 @@ export default function RailApp() {
         handlePlayClick,
         handleStopForClose,
         handleRetryUploadForClose,
+        handleRetryUpload,
     });
     commandHandlersRef.current = {
         handleRecordClick,
@@ -436,6 +455,7 @@ export default function RailApp() {
         handlePlayClick,
         handleStopForClose,
         handleRetryUploadForClose,
+        handleRetryUpload,
     };
 
     useEffect(() => {
@@ -443,6 +463,7 @@ export default function RailApp() {
             if (action === "toggleRecord") commandHandlersRef.current.handleRecordClick();
             else if (action === "pause") commandHandlersRef.current.handlePauseClick();
             else if (action === "resume") commandHandlersRef.current.handlePlayClick();
+            else if (action === "retryUpload") commandHandlersRef.current.handleRetryUpload();
             else if (action === "stopForClose") commandHandlersRef.current.handleStopForClose();
             else if (action === "retryUploadForClose") commandHandlersRef.current.handleRetryUploadForClose();
         });
@@ -484,7 +505,7 @@ export default function RailApp() {
                 }
             >
                 <div className="[-webkit-app-region:no-drag]">
-                    <Record onClick={handleRecordClick} isRecording={isRecording} isStarting={isStarting} disabled={isProcessing || isStarting || isStartPending}/>
+                    <Record onClick={handleRecordClick} isRecording={isRecording} isStarting={isStarting} disabled={(isProcessing && !isRecording && !isPaused) || isStarting || isStartPending}/>
                 </div>
 
                 <span

@@ -67,6 +67,9 @@ export function logRendererCrash(logDir, { reason, exitCode }) {
 // arrives over IPC, so its shape and size are whatever the page sent.
 export const RENDERER_ERROR_FIELD_MAX_CHARS = { kind: 64, message: 2000, stack: 8000 };
 export const RENDERER_ERRORS_LOG_MAX_BYTES = 1024 * 1024;
+// Same cap for main-crashes.log's IPC-listener errors, which a misbehaving
+// renderer can also trigger over and over (see ipcOn in main.js).
+export const MAIN_CRASHES_LOG_MAX_BYTES = 1024 * 1024;
 
 function clampString(value, maxChars) {
     if (typeof value !== 'string') return null;

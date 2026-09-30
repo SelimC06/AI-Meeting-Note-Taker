@@ -748,3 +748,23 @@ it("on macOS, offers a download link for a new version instead of an install but
   expect(link).toHaveAttribute("target", "_blank");
   expect(screen.queryByRole("button", { name: "restart to update" })).not.toBeInTheDocument();
 });
+
+it("tells the app the library changed after the storage folder moves (and not when the move fails)", async () => {
+  window.settingsAPI!.chooseFolder = vi.fn().mockResolvedValue("D:\\new-recordings");
+  vi.mocked(updateSettings)
+    .mockRejectedValueOnce(new Error("Destination folder is not empty"))
+    .mockResolvedValueOnce({ ...baseSettings, storage_dir: "D:\\new-recordings" });
+  const onLibraryChanged = vi.fn();
+
+  render(<SettingsPage active onLibraryChanged={onLibraryChanged} />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("Storage");
+  const browse = await screen.findByRole("button", { name: /browse/i });
+
+  fireEvent.click(browse);
+  expect(await screen.findByText("Destination folder is not empty")).toBeInTheDocument();
+  expect(onLibraryChanged).not.toHaveBeenCalled();
+
+  fireEvent.click(browse);
+  await waitFor(() => expect(onLibraryChanged).toHaveBeenCalledTimes(1));
+});

@@ -109,11 +109,60 @@ def test_index_session_does_not_merge_a_session_deleted_during_extraction(tmp_pa
     assert knowledge_graph.load_graph(tmp_path) == knowledge_graph.empty_graph()
 
 
-def test_index_session_leaves_session_unindexed_on_empty_extraction(tmp_path, monkeypatch):
+def test_index_session_records_a_valid_empty_extraction_as_indexed(tmp_path, monkeypatch):
+    """A meeting with nothing to extract used to stay unindexed and be
+    re-extracted (re-billed, on a custom provider) on every launch."""
     append_session(tmp_path, _record("s1"))
     monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", lambda notes, model, client=None: Extraction())
     graph_jobs.index_session(tmp_path, "s1", model="m")
-    assert knowledge_graph.load_graph(tmp_path)["indexed_sessions"] == []
+    graph = knowledge_graph.load_graph(tmp_path)
+    assert graph["indexed_sessions"] == ["s1"]
+    assert graph["nodes"] == {}
+    assert graph_jobs.backfill_unindexed(tmp_path) == 0
+
+
+def _failing_extract(notes, model, client=None):
+    raise graph_jobs.graph_extract.ExtractionFailed("not json")
+
+
+def test_unusable_extractions_are_retried_only_up_to_the_cap(tmp_path, monkeypatch):
+    append_session(tmp_path, _record("s1"))
+    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", _failing_extract)
+
+    for attempt in range(1, knowledge_graph.MAX_EXTRACTION_ATTEMPTS + 1):
+        assert graph_jobs.backfill_unindexed(tmp_path) == 1, attempt
+        graph_jobs._QUEUE.get_nowait()
+        graph_jobs.index_session(tmp_path, "s1", model="m")
+
+    graph = knowledge_graph.load_graph(tmp_path)
+    assert graph["indexed_sessions"] == []
+    assert knowledge_graph.extraction_gave_up(graph, "s1")
+    # Given up: no longer re-queued on launch.
+    assert graph_jobs.backfill_unindexed(tmp_path) == 0
+
+
+def test_a_later_success_clears_the_failure_count(tmp_path, monkeypatch):
+    append_session(tmp_path, _record("s1"))
+    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", _failing_extract)
+    graph_jobs.index_session(tmp_path, "s1", model="m")
+    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", lambda notes, model, client=None: SAMPLE_EXTRACTION)
+    graph_jobs.index_session(tmp_path, "s1", model="m")
+
+    graph = knowledge_graph.load_graph(tmp_path)
+    assert graph["indexed_sessions"] == ["s1"]
+    assert knowledge_graph.extraction_failures(graph) == {}
+
+
+def test_transport_errors_are_not_counted_as_failed_extractions(tmp_path, monkeypatch):
+    append_session(tmp_path, _record("s1"))
+
+    def unreachable(notes, model, client=None):
+        raise ConnectionError("ollama down")
+
+    monkeypatch.setattr(graph_jobs.graph_extract, "extract_from_notes", unreachable)
+    with pytest.raises(ConnectionError):
+        graph_jobs.index_session(tmp_path, "s1", model="m")
+    assert knowledge_graph.extraction_failures(knowledge_graph.load_graph(tmp_path)) == {}
 
 
 def test_worker_processes_enqueued_sessions(tmp_path, monkeypatch):

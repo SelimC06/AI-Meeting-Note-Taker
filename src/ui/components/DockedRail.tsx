@@ -206,7 +206,8 @@ export default function DockedRail({ collapsed = false }: Props) {
     }, [isFloating, collapsed]);
 
     const hasStatus = railStatus !== null;
-    const { status, elapsedLabel, level: rawLevel, recordError, isProcessing } = railStatus ?? DEFAULT_STATUS;
+    const { status, elapsedLabel, level: rawLevel, recordError, recordErrorKind, isProcessing, hasPendingUpload } =
+        railStatus ?? DEFAULT_STATUS;
     // main.js's rail:pushStatus handler already sanitizes every pushed
     // status (see railValidation.js), but this is a second, cheap defense:
     // a malformed `level` here throwing on .slice() below would otherwise
@@ -308,69 +309,107 @@ export default function DockedRail({ collapsed = false }: Props) {
     // snap) before the reattach button replaced it.
     const isPlaceholder = isDragging || isSettling;
 
+    // While docked, main keeps the rail window hidden, so its ErrorToast --
+    // the only place a failed upload's "retry upload" (or a permission
+    // error's "open privacy settings") used to appear -- is never seen: a
+    // failed upload showed up here as nothing but a red dot with a hover
+    // title. Show the message and the same action under the pill instead.
+    const errorAction =
+        hasPendingUpload && recordErrorKind !== "permission-denied"
+            ? { label: "[retry upload]", onClick: () => sendCommand("retryUpload") }
+            : recordErrorKind === "permission-denied"
+            ? {
+                  label: "[open privacy settings]",
+                  onClick: () =>
+                      window.settingsAPI?.openPrivacySettings?.(
+                          window.electronAPI?.platform === "darwin" ? "screenRecording" : "microphone"
+                      ),
+              }
+            : null;
+
     return (
-        <div
-            key={dockGeneration}
-            ref={containerRef}
-            className={
-                "relative h-10 w-full flex-none rounded-full rail-pop-in " +
-                (isPlaceholder ? "border border-dashed border-signal/60" : "")
-            }
-        >
+        <div className="flex w-full flex-none flex-col gap-1">
             <div
+                key={dockGeneration}
+                ref={containerRef}
                 className={
-                    "flex h-10 w-full flex-none items-center gap-2 rounded-full border border-signal/40 bg-void px-2 select-none " +
-                    (isPlaceholder ? "opacity-0" : "")
+                    "relative h-10 w-full flex-none rounded-full rail-pop-in " +
+                    (isPlaceholder ? "border border-dashed border-signal/60" : "")
                 }
             >
                 <div
-                    onPointerDown={handlePointerDown}
-                    onPointerMove={handlePointerMove}
-                    onPointerUp={handlePointerUp}
-                    onPointerCancel={handlePointerCancel}
-                    onLostPointerCapture={handlePointerCancel}
-                    role="button"
-                    aria-label="Drag to detach the rail"
-                    className="grid h-6 w-3 flex-none cursor-grab place-items-center touch-none"
-                >
-                    <div className="flex flex-col gap-[3px]">
-                        <span className="h-[3px] w-[3px] rounded-full bg-dim" />
-                        <span className="h-[3px] w-[3px] rounded-full bg-dim" />
-                        <span className="h-[3px] w-[3px] rounded-full bg-dim" />
-                    </div>
-                </div>
-
-                <Record
-                    onClick={() => sendCommand("toggleRecord")}
-                    isRecording={isRecording}
-                    isStarting={isStarting}
-                    disabled={isProcessing || isStarting || isSettling || !hasStatus}
-                />
-
-                <span
-                    aria-label="Elapsed recording time"
-                    role="timer"
-                    className="font-mono text-[11px] tabular-nums text-phosphor"
-                >{elapsedLabel}</span>
-
-                <LevelMeter levels={level.slice(-DOCKED_METER_SAMPLES)} active={isRecording} />
-
-                <div className="h-4 w-px flex-none bg-line" />
-
-                <PauseResume
-                    status={isPaused ? "paused" : "recording"}
-                    onClick={() => sendCommand(isPaused ? "resume" : "pause")}
-                    disabled={(!isRecording && !isPaused) || isSettling}
-                />
-
-                <span
-                    title={recordError ?? undefined}
                     className={
-                        "ml-auto h-2.5 w-2.5 flex-none rounded-full border border-void transition-colors " +
-                        (recordError ? "bg-red-500" : "bg-dim")
+                        "flex h-10 w-full flex-none items-center gap-2 rounded-full border border-signal/40 bg-void px-2 select-none " +
+                        (isPlaceholder ? "opacity-0" : "")
                     }
-                />
+                >
+                    <div
+                        onPointerDown={handlePointerDown}
+                        onPointerMove={handlePointerMove}
+                        onPointerUp={handlePointerUp}
+                        onPointerCancel={handlePointerCancel}
+                        onLostPointerCapture={handlePointerCancel}
+                        role="button"
+                        aria-label="Drag to detach the rail"
+                        className="grid h-6 w-3 flex-none cursor-grab place-items-center touch-none"
+                    >
+                        <div className="flex flex-col gap-[3px]">
+                            <span className="h-[3px] w-[3px] rounded-full bg-dim" />
+                            <span className="h-[3px] w-[3px] rounded-full bg-dim" />
+                            <span className="h-[3px] w-[3px] rounded-full bg-dim" />
+                        </div>
+                    </div>
+
+                    <Record
+                        onClick={() => sendCommand("toggleRecord")}
+                        isRecording={isRecording}
+                        isStarting={isStarting}
+                        // An upload in flight only blocks STARTING a recording --
+                        // RailApp lets a live one be stopped during a retry upload.
+                        disabled={(isProcessing && !isRecording && !isPaused) || isStarting || isSettling || !hasStatus}
+                    />
+
+                    <span
+                        aria-label="Elapsed recording time"
+                        role="timer"
+                        className="font-mono text-[11px] tabular-nums text-phosphor"
+                    >{elapsedLabel}</span>
+
+                    <LevelMeter levels={level.slice(-DOCKED_METER_SAMPLES)} active={isRecording} />
+
+                    <div className="h-4 w-px flex-none bg-line" />
+
+                    <PauseResume
+                        status={isPaused ? "paused" : "recording"}
+                        onClick={() => sendCommand(isPaused ? "resume" : "pause")}
+                        disabled={(!isRecording && !isPaused) || isSettling}
+                    />
+
+                    <span
+                        title={recordError ?? undefined}
+                        className={
+                            "ml-auto h-2.5 w-2.5 flex-none rounded-full border border-void transition-colors " +
+                            (recordError ? "bg-red-500" : "bg-dim")
+                        }
+                    />
+                </div>
             </div>
+            {recordError && !isPlaceholder && (
+                <div
+                    role="alert"
+                    className="flex flex-col gap-1 rounded-sm border border-red-500/50 bg-void px-2 py-1.5 text-xs text-red-400"
+                >
+                    <span>{recordError}</span>
+                    {errorAction && (
+                        <button
+                            onClick={errorAction.onClick}
+                            className="self-start text-signal hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                        >
+                            {errorAction.label}
+                        </button>
+                    )}
+                </div>
+            )}
         </div>
     );
 }

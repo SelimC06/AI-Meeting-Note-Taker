@@ -17,6 +17,11 @@ def get_whisper_model(model_cls, model_name, **kwargs):
         model = _cache.get(key)
         if model is None:
             model = model_cls(model_name, **kwargs)
+            # Only the most recently used model stays loaded. Each is
+            # hundreds of MB to ~1.5 GB of RAM (medium.en), and switching
+            # the Whisper model in Settings used to keep every one ever
+            # loaded alive for the rest of the session.
+            _cache.clear()
             _cache[key] = model
         return model
 

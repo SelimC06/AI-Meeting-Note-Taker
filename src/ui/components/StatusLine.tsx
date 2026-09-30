@@ -24,17 +24,26 @@ const StatusLine: React.FC<Props> = ({ active, showViewToggle, view, onViewChang
     if (!active) return;
     let cancelled = false;
 
+    // Single-flight: skip a tick while the previous round is still out
+    // (checkHealth carries its own deadline) instead of piling requests up
+    // against a slow backend.
+    let inFlight = false;
     const poll = () => {
-      checkHealth().then((ok) => {
+      if (inFlight) return;
+      inFlight = true;
+      const health = checkHealth().then((ok) => {
         if (!cancelled) setOnline(ok);
       });
-      getSettings()
+      const settingsRequest = getSettings()
         .then((s) => {
           if (!cancelled) setSettings(s);
         })
         .catch(() => {
           if (!cancelled) setSettings(null);
         });
+      Promise.allSettled([health, settingsRequest]).then(() => {
+        inFlight = false;
+      });
     };
 
     poll();

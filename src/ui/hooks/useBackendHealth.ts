@@ -27,13 +27,23 @@ export function useBackendHealth(active: boolean) {
     let everHealthy = false;
     let lastPollAt = Date.now();
 
+    // Single-flight, like useBackendLifecycle's probe: getHealthStatus has
+    // its own deadline, and a tick that lands before it settles is skipped
+    // rather than stacking another request on a slow backend.
+    let inFlight = false;
     const poll = () => {
+      if (inFlight) return;
+      inFlight = true;
       lastPollAt = Date.now();
-      getHealthStatus().then((h) => {
-        if (cancelled) return;
-        setHealth(h);
-        if (h.backend) everHealthy = true;
-      });
+      getHealthStatus()
+        .then((h) => {
+          if (cancelled) return;
+          setHealth(h);
+          if (h.backend) everHealthy = true;
+        })
+        .finally(() => {
+          inFlight = false;
+        });
     };
 
     poll();

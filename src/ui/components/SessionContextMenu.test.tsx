@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import SessionContextMenu from "./SessionContextMenu";
 import type { Session } from "../api";
 
@@ -339,4 +339,38 @@ it("leaves Escape to a dialog that's open on top of the menu", async () => {
 
   expect(onDialogEscape).toHaveBeenCalledTimes(1);
   expect(props.onClose).not.toHaveBeenCalled();
+});
+
+it("shows an export in progress and won't start a second one of the same session", async () => {
+  let resolveFetch!: (r: Response) => void;
+  const fetchMock = vi.fn(() => new Promise<Response>((resolve) => { resolveFetch = resolve; }));
+  vi.stubGlobal("fetch", fetchMock);
+  const urlStatics = URL as unknown as Record<string, unknown>;
+  const savedUrlStatics = { createObjectURL: urlStatics.createObjectURL, revokeObjectURL: urlStatics.revokeObjectURL };
+  urlStatics.createObjectURL = vi.fn(() => "blob:x");
+  urlStatics.revokeObjectURL = vi.fn();
+  try {
+
+    const first = renderMenu("active");
+    fireEvent.click(screen.getByRole("menuitem", { name: "[export recording]" }));
+    expect(first.onClose).toHaveBeenCalled();
+    cleanup();
+
+    // Reopened while the export is still running.
+    renderMenu("active");
+    const item = screen.getByRole("menuitem", { name: "[exporting recording…]" });
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(item);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Other exports aren't blocked.
+    expect(screen.getByRole("menuitem", { name: "[export notes]" })).not.toHaveAttribute("aria-disabled");
+
+    await act(async () => {
+      resolveFetch(new Response("zip", { status: 200 }));
+    });
+    await waitFor(() => expect(screen.getByRole("menuitem", { name: "[export recording]" })).toBeInTheDocument());
+  } finally {
+    Object.assign(urlStatics, savedUrlStatics);
+    vi.unstubAllGlobals();
+  }
 });

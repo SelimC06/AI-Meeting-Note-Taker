@@ -420,3 +420,23 @@ it("listJobs and getJobStatus pass a caller's abort signal through to fetch", as
 
   expect((fetchMock.mock.calls[0][1] as RequestInit).signal).toBe(controller.signal);
 });
+
+it("health checks carry a deadline and read a timeout as unhealthy", async () => {
+  const fetchMock = vi.fn().mockRejectedValue(new DOMException("signal timed out", "TimeoutError"));
+  vi.stubGlobal("fetch", fetchMock);
+
+  expect(await checkHealth()).toBe(false);
+  expect((fetchMock.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+
+  const status = await getHealthStatus();
+  expect(status.backend).toBe(false);
+  expect((fetchMock.mock.calls[1][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+});
+
+it("startProcessing never throws an empty message", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 502 })));
+  await expect(startProcessing(new FormData())).rejects.toThrow("Upload failed: HTTP 502");
+
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("   ", { status: 500 })));
+  await expect(startProcessing(new FormData())).rejects.toThrow("Upload failed: HTTP 500");
+});

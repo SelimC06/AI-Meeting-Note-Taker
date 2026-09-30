@@ -22,3 +22,13 @@ export function computeResizedBounds(startBounds, direction, dx, dy, minWidth, m
 
     return { x, y, width, height };
 }
+
+// The only directions ResizeHandles.tsx ever sends. window:beginResize used
+// to accept any value from the renderer and stash it for every later
+// resizeMove -- a non-string threw on .includes() in each tick, and a string
+// like "news" resized from every edge at once.
+const RESIZE_DIRECTIONS = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']);
+
+export function isValidResizeDirection(direction) {
+    return typeof direction === 'string' && RESIZE_DIRECTIONS.has(direction);
+}

@@ -6,9 +6,10 @@ interface Props {
   active: boolean;
   onClose: () => void;
   onSessionsDeleted?: (ids: string[]) => void;
+  onLibraryChanged?: () => void;
 }
 
-const SettingsModal: React.FC<Props> = ({ active, onClose, onSessionsDeleted }) => {
+const SettingsModal: React.FC<Props> = ({ active, onClose, onSessionsDeleted, onLibraryChanged }) => {
   const { dialogProps, titleId } = useDialog({ onEscape: onClose });
 
   return (
@@ -34,7 +35,7 @@ const SettingsModal: React.FC<Props> = ({ active, onClose, onSessionsDeleted }) 
             </svg>
           </button>
         </div>
-        <SettingsPage active={active} onSessionsDeleted={onSessionsDeleted} />
+        <SettingsPage active={active} onSessionsDeleted={onSessionsDeleted} onLibraryChanged={onLibraryChanged} />
       </div>
     </div>
   );

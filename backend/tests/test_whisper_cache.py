@@ -77,3 +77,23 @@ def test_transcribe_audio_default_params_are_consistent_across_all_call_sites():
     assert captured["vad_filter"] is False
     assert captured["word_timestamps"] is True
     assert captured["condition_on_previous_text"] is True
+
+
+def test_only_the_most_recently_used_model_stays_cached(monkeypatch):
+    from app import whisper_cache
+
+    monkeypatch.setattr(whisper_cache, "_cache", {})
+    built = []
+
+    class FakeModel:
+        def __init__(self, name, **kwargs):
+            built.append(name)
+
+    tiny = whisper_cache.get_whisper_model(FakeModel, "tiny.en", device="cpu")
+    whisper_cache.get_whisper_model(FakeModel, "medium.en", device="cpu")
+
+    assert len(whisper_cache._cache) == 1
+    assert tiny not in whisper_cache._cache.values()
+    # Same model again: served from the cache, not rebuilt.
+    whisper_cache.get_whisper_model(FakeModel, "medium.en", device="cpu")
+    assert built == ["tiny.en", "medium.en"]

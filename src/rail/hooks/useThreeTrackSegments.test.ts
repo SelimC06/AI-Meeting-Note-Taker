@@ -365,3 +365,76 @@ it("types each Combined blob with its recorder's actual mimeType instead of hard
   expect(combined.micAudio?.type).toBe("audio/ogg;codecs=opus");
   expect(combined.screen?.type).toBe("video/webm");
 });
+
+// ---------- a source ending mid-recording ----------
+
+function fakeTrackStream() {
+  const target = new EventTarget();
+  const track = Object.assign(target, { stop: vi.fn() });
+  return { stream: { getTracks: () => [track] } as unknown as MediaStream, endTrack: () => target.dispatchEvent(new Event("ended")) };
+}
+
+it("warns when the microphone disconnects mid-recording, and keeps recording", async () => {
+  const mic = fakeTrackStream();
+  vi.mocked(getSeparateCapture).mockResolvedValueOnce({
+    screen: undefined, system: undefined, mic: mic.stream, stopAll: vi.fn(),
+  });
+  const { result } = renderHook(() => useThreeTrackSegments());
+  await act(async () => {
+    await result.current.record();
+  });
+  expect(result.current.status).toBe("recording");
+
+  act(() => mic.endTrack());
+
+  expect(result.current.error).toEqual({
+    kind: "generic",
+    message: "Microphone disconnected — the rest of the recording continues without it.",
+  });
+  expect(result.current.status).toBe("recording");
+});
+
+it("pausing still pauses the remaining recorders and flips status after one source ended", async () => {
+  const pauseCalls: string[] = [];
+  vi.mocked(getVideoRecorder).mockReturnValueOnce({
+    ondata: vi.fn(), start: vi.fn(), pause: vi.fn(() => pauseCalls.push("screen")), resume: vi.fn(), stop: vi.fn(),
+  } as unknown as ReturnType<typeof getVideoRecorder>);
+  vi.mocked(getAudioRecorder).mockReturnValueOnce({
+    // The mic's recorder went inactive; recorder.ts makes this a no-op.
+    ondata: vi.fn(), start: vi.fn(), pause: vi.fn(), resume: vi.fn(), stop: vi.fn(),
+  } as unknown as ReturnType<typeof getAudioRecorder>);
+  const mic = fakeTrackStream();
+  vi.mocked(getSeparateCapture).mockResolvedValueOnce({
+    screen: new MediaStream(), system: undefined, mic: mic.stream, stopAll: vi.fn(),
+  });
+  const { result } = renderHook(() => useThreeTrackSegments());
+  await act(async () => {
+    await result.current.record();
+  });
+  act(() => mic.endTrack());
+
+  await act(async () => {
+    await result.current.pause();
+  });
+
+  expect(pauseCalls).toEqual(["screen"]);
+  expect(result.current.status).toBe("paused");
+});
+
+it("tracks ending after the recording was stopped don't raise a warning", async () => {
+  const mic = fakeTrackStream();
+  vi.mocked(getSeparateCapture).mockResolvedValueOnce({
+    screen: undefined, system: undefined, mic: mic.stream, stopAll: vi.fn(),
+  });
+  const { result } = renderHook(() => useThreeTrackSegments());
+  await act(async () => {
+    await result.current.record();
+  });
+  await act(async () => {
+    await result.current.stop();
+  });
+
+  act(() => mic.endTrack());
+
+  expect(result.current.error).toBeNull();
+});

@@ -55,3 +55,9 @@ test('shrinking past the minimum height clamps instead of collapsing further', (
     const bounds = computeResizedBounds(START, 's', 0, -1000, MIN_WIDTH, MIN_HEIGHT);
     assert.equal(bounds.height, MIN_HEIGHT);
 });
+
+test('isValidResizeDirection accepts the eight compass handles only', async () => {
+    const { isValidResizeDirection } = await import('./resizeGeometry.js');
+    for (const d of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) assert.equal(isValidResizeDirection(d), true, d);
+    for (const d of ['news', '', 'x', null, undefined, 1, ['e']]) assert.equal(isValidResizeDirection(d), false, String(d));
+});

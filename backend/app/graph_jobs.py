@@ -95,11 +95,15 @@ def backfill_unindexed(store_dir: Path) -> int:
     indexed_sessions. Covers pre-feature sessions and any session whose
     extraction previously failed. Returns how many were enqueued.
     """
-    indexed = set(knowledge_graph.load_graph(store_dir)["indexed_sessions"])
+    graph = knowledge_graph.load_graph(store_dir)
+    indexed = set(graph["indexed_sessions"])
     count = 0
     for record in load_sessions(store_dir):
         sid = record.get("id")
         if not sid or record.get("trashed_at") or sid in indexed:
+            continue
+        # Its extraction kept coming back unusable -- stop paying to retry.
+        if knowledge_graph.extraction_gave_up(graph, sid):
             continue
         enqueue_session(sid)
         count += 1
@@ -108,17 +112,26 @@ def backfill_unindexed(store_dir: Path) -> int:
 
 def index_session(store_dir: Path, session_id: str, model: str, client=None) -> None:
     """Extract + merge one session. Skips (no-op) unknown, trashed, or
-    already-indexed sessions. An empty extraction (extract pass failed or
-    found nothing) leaves the session unindexed so the next backfill sweep
-    retries it.
+    already-indexed sessions.
+
+    A valid extraction is merged even when it's EMPTY -- the notes simply
+    have nothing to extract (a two-line meeting), and leaving it unindexed
+    re-extracted it on every launch forever. An unusable one
+    (ExtractionFailed) leaves the session unindexed and counts an attempt;
+    backfill_unindexed stops retrying after MAX_EXTRACTION_ATTEMPTS.
+    Transport errors (model unreachable) propagate as before and count
+    nothing -- those are worth retrying next launch.
     """
     record = next((r for r in load_sessions(store_dir) if r.get("id") == session_id), None)
     if record is None or record.get("trashed_at"):
         return
     if session_id in knowledge_graph.load_graph(store_dir)["indexed_sessions"]:
         return
-    extraction = graph_extract.extract_from_notes(record.get("notes") or "", model=model, client=client)
-    if not extraction.entities:
+    try:
+        extraction = graph_extract.extract_from_notes(record.get("notes") or "", model=model, client=client)
+    except graph_extract.ExtractionFailed as e:
+        attempts = knowledge_graph.record_extraction_failure(store_dir, session_id)
+        print(f"[graph_jobs] extraction for {session_id} was unusable (attempt {attempts}): {e}", flush=True)
         return
     # Extraction can take minutes; the session may have been permanently
     # deleted meanwhile. Re-check under _GRAPH_LOCK (the lock

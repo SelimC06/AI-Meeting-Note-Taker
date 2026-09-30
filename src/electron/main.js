@@ -7,6 +7,7 @@ import { resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, k
 import { attemptRecovery, isRecovering, statusForHealthyRetry } from './backendRecovery.js';
 import { nextWatchdogState, probeHealthOnce, fetchBackendBusy, watchdogThreshold, watchdogBusy, knownBusyAfterRailStatus, WATCHDOG_INTERVAL_MS } from './backendWatchdog.js';
 import { isTrustedIpcSender } from './ipcGuard.js';
+import { isAllowedPermission } from './permissions.js';
 import { armAutoUpdate, getLastStatus, installUpdateOrQuit } from './updater.js';
 import {
     computeRailBounds,
@@ -19,14 +20,15 @@ import {
     RAIL_GAP,
     RAIL_ERROR_PANEL_HEIGHT,
 } from './railGeometry.js';
-import { computeResizedBounds } from './resizeGeometry.js';
+import { computeResizedBounds, isValidResizeDirection } from './resizeGeometry.js';
 import { sanitizeCaptureSourceTypes } from './captureSources.js';
 import { distReactPath } from './paths.js';
 import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence, beforeQuitStep, pendingUploadFromAck, runGuardedClose } from './closeGuard.js';
-import { sanitizeRailStatus, isValidSlotRect } from './railValidation.js';
-import { armProcessCrashLogging, logRendererCrash, logRendererError, safeAppendCrashLog } from './crashLog.js';
+import { sanitizeRailStatus, isValidSlotRect, isValidRailCommand } from './railValidation.js';
+import { armProcessCrashLogging, logRendererCrash, logRendererError, safeAppendCrashLog, MAIN_CRASHES_LOG_MAX_BYTES } from './crashLog.js';
 import { hasSeenRecordingConsentNotice, markRecordingConsentNoticeSeen } from './consentStore.js';
 import { buildAppMenuTemplate, isZoomShortcut } from './appMenu.js';
+import { railStatusAfterRendererGone, withCrashNotice, shouldReloadCrashedRenderer, RAIL_CRASH_NOTICE } from './rendererCrash.js';
 
 let railErrorVisible = false;
 let isRailFloatDragging = false;
@@ -117,6 +119,14 @@ let lastRailHasPendingUpload = false;
 // dashboard reload, during which a stray click on what looks like "Start
 // recording" would actually stop a live one (brief 12 #4).
 let lastFullRailStatus = null;
+// Rail renderer crash handling (see the rail's 'render-process-gone'
+// handler): whether its page is currently dead, the crash notice shown in
+// the dashboard until the next recording, and when each window was last
+// crash-reloaded (to avoid a reload loop).
+let railRendererGone = false;
+let railCrashNotice = null;
+let lastRailCrashReloadAt = null;
+let lastMainCrashReloadAt = null;
 // Set once the user has confirmed closing (via performGuardedClose below,
 // or there was nothing to guard) so the guarded 'close' handler lets a
 // second, self-triggered mainWindow.close() through instead of looping.
@@ -210,12 +220,14 @@ function ipcOn(channel, listener) {
             console.error(`[main] ${channel} listener failed:`, err);
             // crashLogDir needs userData, which is only stable once ready.
             if (app.isReady()) {
+                // Capped like renderer-errors.log: a renderer can trigger
+                // this in a loop, and main-crashes.log must not grow forever.
                 safeAppendCrashLog(crashLogDir(), 'main-crashes.log', {
                     kind: 'ipcListenerError',
                     channel,
                     message: err?.message ?? String(err),
                     stack: err?.stack,
-                });
+                }, { maxBytes: MAIN_CRASHES_LOG_MAX_BYTES });
             }
         }
     });
@@ -485,8 +497,19 @@ function createRailWindow() {
     // The rail window hosts the actual recording engine -- if its renderer
     // process dies outright (OOM kill, GPU crash) rather than just throwing
     // a catchable JS error, a live capture is lost with nothing to say why.
+    //
+    // Recovered, not just logged: main otherwise kept its last cached rail
+    // state forever -- 'recording', so every close asked to "Stop & Save" a
+    // recording that no longer existed, sent stopForClose to a dead page and
+    // hung 120s on the ack; the watchdog stayed on its patient busy
+    // threshold; and nothing could record again until a relaunch.
     railWindow.webContents.on('render-process-gone', (_event, details) => {
         logRendererCrash(crashLogDir(), { window: 'rail', reason: details.reason, exitCode: details.exitCode });
+        if (isQuitting) return;
+        handleRailRendererGone();
+    });
+    railWindow.webContents.on('did-finish-load', () => {
+        railRendererGone = false;
     });
     // Debounced rather than immediate: 'moved' fires continuously while the
     // user is actively dragging the floating window (via its own
@@ -542,16 +565,45 @@ ipcHandle('rail:setErrorVisible', (_event, visible) => {
 });
 
 ipcHandle('rail:command', (_event, action) => {
+    if (!isValidRailCommand(action)) {
+        console.warn('[main] dropped unknown rail:command:', action);
+        return;
+    }
     if (!railWindow || railWindow.isDestroyed()) return;
     railWindow.webContents.send('rail:command', action);
 });
 
+function handleRailRendererGone() {
+    railRendererGone = true;
+    const reset = railStatusAfterRendererGone();
+    railCrashNotice = RAIL_CRASH_NOTICE;
+    lastFullRailStatus = reset;
+    lastRailStatus = reset.status;
+    lastRailIsProcessing = reset.isProcessing;
+    lastRailHasPendingUpload = reset.hasPendingUpload;
+    // A close/quit waiting on this page's ack would otherwise sit out the
+    // full 120s timeout -- the page that would ack is gone, and so is
+    // anything it could have saved (hence hasPendingUpload: false).
+    pendingStopAck?.resolve({ hasPendingUpload: false });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('rail:status', reset);
+    }
+    if (railWindow && !railWindow.isDestroyed() && shouldReloadCrashedRenderer(lastRailCrashReloadAt)) {
+        lastRailCrashReloadAt = Date.now();
+        railWindow.webContents.reload();
+    }
+}
+
 ipcHandle('rail:pushStatus', (_event, status) => {
-    const sanitized = sanitizeRailStatus(status);
-    if (!sanitized) {
+    const parsed = sanitizeRailStatus(status);
+    if (!parsed) {
         console.warn('[main] dropped malformed rail:pushStatus payload:', status);
         return;
     }
+    // The crash notice stays up after the reloaded rail starts pushing its
+    // own idle status, until a new recording starts.
+    if (parsed.status !== 'idle') railCrashNotice = null;
+    const sanitized = withCrashNotice(parsed, railCrashNotice);
     lastFullRailStatus = sanitized;
     lastRailStatus = sanitized.status;
     backendKnownBusy = knownBusyAfterRailStatus(backendKnownBusy, lastRailIsProcessing, sanitized.isProcessing);
@@ -809,7 +861,7 @@ function waitForStopAck(timeoutMs = 120000) {
 // meantime; 'stopForClose' is a no-op (and acks immediately) when there's
 // nothing to stop.
 async function stopAndSaveRailRecording() {
-    if (!railWindow || railWindow.isDestroyed()) return;
+    if (!railWindow || railWindow.isDestroyed() || railRendererGone) return;
     const acked = waitForStopAck();
     railWindow.webContents.send('rail:command', 'stopForClose');
     await acked;
@@ -820,7 +872,7 @@ async function stopAndSaveRailRecording() {
 // ack-based handoff stopAndSaveRailRecording uses -- reuses waitForStopAck
 // since it's the same rail:stopAndSaveComplete channel either way.
 async function retryRailUploadAndWait() {
-    if (!railWindow || railWindow.isDestroyed()) return;
+    if (!railWindow || railWindow.isDestroyed() || railRendererGone) return;
     const acked = waitForStopAck();
     railWindow.webContents.send('rail:command', 'retryUploadForClose');
     await acked;
@@ -888,7 +940,9 @@ async function performGuardedClose() {
     // window is gone there's nothing left to save, and lastRail* are just
     // stale copies of its last push (e.g. a discarded pending upload), which
     // would otherwise re-prompt on the quit that follows a guarded close.
-    if (!railWindow || railWindow.isDestroyed()) return true;
+    // A rail whose renderer died counts as gone too: its recording and any
+    // pending upload died with it, and it can't answer a stop anyway.
+    if (!railWindow || railWindow.isDestroyed() || railRendererGone) return true;
     return runGuardedClose({
         railStatus: lastRailStatus,
         isProcessing: lastRailIsProcessing,
@@ -937,6 +991,14 @@ function createWindow() {
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
         logRendererCrash(crashLogDir(), { window: 'main', reason: details.reason, exitCode: details.exitCode });
         cancelPendingConsentNotice();
+        // A frameless window with a dead renderer is a blank rectangle with
+        // no close button -- reload it (not in a loop, see
+        // shouldReloadCrashedRenderer).
+        if (isQuitting || !mainWindow || mainWindow.isDestroyed()) return;
+        if (shouldReloadCrashedRenderer(lastMainCrashReloadAt)) {
+            lastMainCrashReloadAt = Date.now();
+            mainWindow.webContents.reload();
+        }
     });
     // Fires for a reload (Ctrl+R, crash-recovery reload); on the very first
     // load nothing is pending yet, so it's a no-op then.
@@ -1114,6 +1176,10 @@ ipcHandle('win:minimize', () => mainWindow && mainWindow.minimize());
 // live cursor position itself rather than trusting renderer-supplied
 // coordinates, matching that existing pattern.
 ipcHandle('window:beginResize', (_event, direction) => {
+    if (!isValidResizeDirection(direction)) {
+        console.warn('[main] dropped window:beginResize with an invalid direction:', direction);
+        return;
+    }
     if (!mainWindow || mainWindow.isDestroyed()) return;
     // Clears out a settle check left over from some earlier drag that just
     // happens to still be pending -- without this, it could fire mid-resize
@@ -1362,6 +1428,16 @@ app.whenReady().then(async () => {
     // case we hand back the first screen source with no system audio
     // (there is no Electron-mediated system-audio path on macOS below 15;
     // mic capture is unaffected -- it's handled entirely client-side).
+    // Electron grants every web permission request by default. Only what
+    // the app's own pages actually use is allowed (see permissions.js);
+    // everything else -- and anything from a non-file:// origin -- is denied.
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+        callback(isAllowedPermission(permission, details?.requestingUrl ?? webContents?.getURL?.()));
+    });
+    session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+        return isAllowedPermission(permission, requestingOrigin || webContents?.getURL?.());
+    });
+
     session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
         desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
             callback({ video: sources[0] });
@@ -1498,6 +1574,11 @@ ipcHandle('updater:install', async () => {
     // unguarded -- so the recording/pending-upload guard has to run HERE,
     // before the quit machinery is ever engaged. closeInProgress prevents
     // this overlapping with an already-running close/quit sequence.
+    // Only for a downloaded update: this destroys every window before
+    // installing, so an invoke from any other state (a stale button, a
+    // renderer bug) must not start that. Never on macOS, where updates are
+    // check-only (see armAutoUpdate).
+    if (process.platform === 'darwin' || getLastStatus().state !== 'ready') return;
     if (closeInProgress) return;
     closeInProgress = true;
     try {

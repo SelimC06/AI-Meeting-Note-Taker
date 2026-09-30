@@ -45,6 +45,10 @@ declare global {
     elapsedLabel: string;
     level: number[];
     recordError: string | null;
+    // What kind of error recordError is, so the docked pill can offer the
+    // same action the rail's own toast does. Optional: statuses from before
+    // this field (or a malformed one) just get no action.
+    recordErrorKind?: "permission-denied" | "generic" | null;
     // Uploading the just-stopped recording, before the backend has queued
     // a processing job for it. RailApp.tsx's own Record button disables
     // itself for this same window (a toggleRecord click would no-op there
@@ -67,7 +71,7 @@ declare global {
   // "retryUploadForClose": sent by the pending-upload close dialog's "Retry
   // and wait" choice (retryRailUploadAndWait in main.js) -- re-POSTs the
   // held FormData the same way the toast's own "retry upload" button does.
-  type RailCommandAction = "toggleRecord" | "pause" | "resume" | "stopForClose" | "retryUploadForClose";
+  type RailCommandAction = "toggleRecord" | "pause" | "resume" | "retryUpload" | "stopForClose" | "retryUploadForClose";
 
   type RailRect = { x: number; y: number; width: number; height: number };
 

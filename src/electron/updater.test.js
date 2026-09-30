@@ -287,3 +287,27 @@ test('on Windows, updates still download and install automatically', () => {
     updater.emit('update-available', { version: '1.2.0' });
     assert.deepEqual(getLastStatus(), { state: 'available', version: '1.2.0' });
 });
+
+test('a ready update stays ready when a later periodic check fails', async () => {
+    const { nextStatus } = await import('./updater.js');
+    const ready = { state: 'ready', version: '1.2.0' };
+    assert.equal(nextStatus(ready, { state: 'error', message: 'offline' }), ready);
+    assert.equal(nextStatus(ready, { state: 'checking' }), ready);
+    assert.deepEqual(nextStatus(ready, { state: 'ready', version: '1.3.0' }), { state: 'ready', version: '1.3.0' });
+    assert.deepEqual(nextStatus({ state: 'idle' }, { state: 'error', message: 'x' }), { state: 'error', message: 'x' });
+});
+
+test('once ready, a failing periodic re-check neither runs nor hides "restart to update"', () => {
+    const win = makeFakeWindow();
+    const updater = makeFakeUpdater();
+    let checks = 0;
+    updater.checkForUpdates = () => { checks++; };
+    const interval = armAutoUpdate(() => win, updater, UPDATE_CHECK_INTERVAL_MS, 'win32');
+    clearInterval(interval);
+    assert.equal(checks, 1);
+
+    updater.emit('update-downloaded', { version: '1.2.0' });
+    updater.emit('error', new Error('offline'));
+
+    assert.deepEqual(getLastStatus(), { state: 'ready', version: '1.2.0' });
+});

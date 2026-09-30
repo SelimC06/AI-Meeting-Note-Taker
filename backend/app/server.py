@@ -13,6 +13,7 @@ from typing import Optional, List, Tuple
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 import asyncio
+import functools
 import hmac
 import json
 import secrets
@@ -123,9 +124,19 @@ async def _daily_trash_purge_loop() -> None:
         if STORE_UNTRUSTED:
             continue
         try:
-            await asyncio.to_thread(purge_expired_trash, STORE)
+            await asyncio.to_thread(_purge_trash_unless_moving)
         except Exception as e:
             log(f"daily trash purge failed: {e}")
+
+
+def _purge_trash_unless_moving() -> None:
+    # Same reasoning as _refuses_during_storage_move: a purge running while
+    # the move relocates folders deletes records whose folders it then can't
+    # find (and tombstone). Skipped rather than waited for -- it runs daily.
+    with _store_state_lock:
+        if move_in_progress:
+            return
+        purge_expired_trash(STORE)
 
 
 @asynccontextmanager
@@ -448,6 +459,33 @@ move_in_progress = False
 _store_state_lock = threading.Lock()
 _active_uploads = 0
 
+
+STORAGE_MOVE_IN_PROGRESS_MESSAGE = "The storage folder is being moved -- try again in a moment"
+
+
+def _refuses_during_storage_move(fn):
+    """For endpoints that change the library (rename, trash, restore,
+    delete, speaker names): 409 while a storage move is running, and hold
+    _store_state_lock for the whole change so a move can't START partway
+    through one either.
+
+    Only /process and recover-index used to check. A permanent delete of a
+    folder the move had already relocated removed its record but left no
+    tombstone (the folder wasn't where it looked), so the next launch
+    re-adopted the meeting as "Recovered"; a speaker rename recreated a
+    stray <old store>/<id>/ folder. The changes are small index/file writes,
+    so holding the lock just delays a move (or an upload registering) by
+    that much. Lock order is the same as recover_index's: _store_state_lock
+    first, then the sessions index / knowledge graph locks inside.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _store_state_lock:
+            if move_in_progress:
+                raise HTTPException(409, STORAGE_MOVE_IN_PROGRESS_MESSAGE)
+            return fn(*args, **kwargs)
+    return wrapper
+
 def log(msg: str) -> None:
     print(f"[server] {msg}", flush=True)
 
@@ -727,6 +765,7 @@ class SessionRename(BaseModel):
 
 
 @app.patch("/sessions/{session_id}")
+@_refuses_during_storage_move
 def rename_session(session_id: str, body: SessionRename):
     title = body.title.strip()
     if not title:
@@ -742,6 +781,7 @@ def rename_session(session_id: str, body: SessionRename):
 
 
 @app.post("/sessions/{session_id}/trash")
+@_refuses_during_storage_move
 def trash_session(session_id: str):
     store = STORE
     record = _get_session_or_404(store, session_id)
@@ -754,6 +794,7 @@ def trash_session(session_id: str):
 
 
 @app.post("/sessions/{session_id}/restore")
+@_refuses_during_storage_move
 def restore_session(session_id: str):
     store = STORE
     ok = update_session_fields(store, session_id, trashed_at=None)
@@ -790,6 +831,7 @@ def recover_index():
 
 
 @app.delete("/sessions/{session_id}")
+@_refuses_during_storage_move
 def delete_session(session_id: str):
     store = STORE
     ok = remove_session_permanently(store, session_id)
@@ -1234,6 +1276,21 @@ def _delete_job_intermediates(session: Path, final_path: Path, paths: List[Optio
     return deleted
 
 
+SILENT_RECORDING_NOTES = "# Silent recording\n\n_No speech was detected in this recording._\n"
+
+
+def _transcript_is_empty(txt_path: str) -> bool:
+    """True if the transcript file has no words in it -- speaker labels
+    alone ("You: ") don't count. An unreadable file is NOT treated as empty:
+    that's left to the existing summarization fallbacks."""
+    try:
+        text = Path(txt_path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    words = re.sub(r"(?m)^\s*[^:\n]{1,40}:\s*", "", text)
+    return not words.strip()
+
+
 def _record_failed_session(session: Path, error: str) -> None:
     """Best-effort: append a status:"failed" session record so a failed
     job's already-saved recording data (screen/system/mic webm, whatever got
@@ -1323,6 +1380,10 @@ def _run_process_job(job_id: str) -> None:
     }
     active_client, ollama_chat_model = llm_provider.resolve_active_client(job_settings_snapshot)
 
+    # Set once this session's record is in the index (see the catch-all
+    # below: a failure after that point must update that record, not append
+    # a second one with the same id).
+    indexed = False
     try:
         jobs.update_job(job_id, stage="muxing")
 
@@ -1495,7 +1556,14 @@ def _run_process_job(job_id: str) -> None:
 
         transcribed = txt_path is not None
         jobs.update_job(job_id, stage="summarizing")
-        if txt_path is not None:
+        if txt_path is not None and _transcript_is_empty(txt_path):
+            # Nothing was said (or nothing Whisper could hear). Sending an
+            # empty transcript to the model used to come back with a
+            # confident, invented summary -- complete()'s prompt asks it to
+            # work from screenshots, and there are none. Say so instead, and
+            # skip the model calls (and the action items) entirely.
+            notes = SILENT_RECORDING_NOTES
+        elif txt_path is not None:
             # Long transcripts are summarized in several model calls (see
             # LLaVA_summarize's chunking); report each one so a 2-hour
             # meeting doesn't sit on a bare "summarizing" for many minutes
@@ -1646,9 +1714,14 @@ def _run_process_job(job_id: str) -> None:
             "trashed_at": None,
             "status": "done",
         }
-        append_session(STORE, record)
+        # summary.json is written BEFORE the record is indexed: if it fails,
+        # the catch-all below records the session as failed exactly once,
+        # instead of the index getting the "done" record plus a second,
+        # "failed" one with the same id.
         if structured_action_items is not None:
             write_action_items(session, structured_action_items)
+        append_session(STORE, record)
+        indexed = True
         if graph_jobs is not None:
             graph_jobs.enqueue_session(record["id"])
 
@@ -1680,7 +1753,17 @@ def _run_process_job(job_id: str) -> None:
         # undeletable via DELETE /sessions/{id}.
         log(f"job {job_id} failed unexpectedly: {e}")
         error = f"Something went wrong while processing this recording: {e}"
-        _record_failed_session(session, error)
+        if indexed:
+            # The session is already in the library (with its notes); only
+            # the cleanup after that failed. Mark that record rather than
+            # append a duplicate -- two records with one id broke rename,
+            # trash and delete for both.
+            try:
+                update_session_fields(STORE, session.name, status="failed", error=error)
+            except Exception as update_err:
+                log(f"failed to mark session {session.name} failed: {update_err}")
+        else:
+            _record_failed_session(session, error)
         jobs.update_job(job_id, status="failed", error=error)
 
 
@@ -1897,6 +1980,7 @@ class SpeakerNamesUpdate(BaseModel):
 
 
 @app.patch("/sessions/{session_id}/speaker-names")
+@_refuses_during_storage_move
 def update_speaker_names(session_id: str, body: SpeakerNamesUpdate):
     store = STORE
     _get_session_or_404(store, session_id)

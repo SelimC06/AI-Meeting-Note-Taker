@@ -5,7 +5,7 @@ import re
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .corrupt_files import preserve_corrupt_copy
 
@@ -188,19 +188,50 @@ class StorageMoveError(Exception):
 EXPORT_DIR_NAME = ".exports"
 
 
-def move_storage_dir(old_dir: Path, new_dir: Path) -> None:
-    old_resolved = old_dir.resolve()
-    new_resolved = new_dir.resolve()
+def _relation_to(old_dir: Path, new_dir: Path) -> Optional[str]:
+    """"same" if new_dir IS old_dir, "inside" if it's somewhere under it,
+    else None. Compares existing folders by identity (os.path.samefile:
+    same device + inode), walking up from new_dir -- a string comparison of
+    resolved paths misses "/Users/me/Recordings" vs "/users/me/recordings"
+    on a case-insensitive volume (macOS, Windows), and "moving" a folder
+    into itself then shuffled the library into a subfolder of itself.
+    Parts of new_dir that don't exist yet can't be old_dir, so only
+    existing ancestors are checked.
+    """
+    candidate = Path(os.path.abspath(new_dir))
+    is_new_dir_itself = True
+    while True:
+        if candidate.exists():
+            try:
+                if os.path.samefile(candidate, old_dir):
+                    return "same" if is_new_dir_itself else "inside"
+            except OSError:
+                pass
+        parent = candidate.parent
+        if parent == candidate:
+            return None
+        candidate = parent
+        is_new_dir_itself = False
 
-    if old_dir.exists() and old_resolved == new_resolved:
-        return
 
-    if old_dir.exists() and new_resolved != old_resolved:
+def _move_back(moved: List[str], old_dir: Path, new_dir: Path) -> List[str]:
+    """Best-effort undo of a partial move; returns the names that couldn't
+    be moved back (they're still in new_dir)."""
+    stuck: List[str] = []
+    for name in reversed(moved):
         try:
-            new_resolved.relative_to(old_resolved)
-        except ValueError:
-            pass  # new_dir is not nested inside old_dir; fine to proceed
-        else:
+            shutil.move(str(new_dir / name), str(old_dir / name))
+        except OSError:
+            stuck.append(name)
+    return list(reversed(stuck))
+
+
+def move_storage_dir(old_dir: Path, new_dir: Path) -> None:
+    if old_dir.exists():
+        relation = _relation_to(old_dir, new_dir)
+        if relation == "same":
+            return
+        if relation == "inside":
             raise StorageMoveError("Destination folder cannot be inside the current storage folder")
 
     try:
@@ -225,11 +256,39 @@ def move_storage_dir(old_dir: Path, new_dir: Path) -> None:
         (p for p in old_dir.iterdir() if p.name != EXPORT_DIR_NAME),
         key=lambda p: (p.name == "sessions_index.json", p.name),
     )
-    try:
-        for entry in entries:
+    moved: List[str] = []
+    for entry in entries:
+        try:
             shutil.move(str(entry), str(new_dir / entry.name))
-    except OSError as e:
-        raise StorageMoveError(f"Failed to move recordings: {e}") from e
+        except OSError as e:
+            # A cross-drive move is copy-then-delete: a failed copy can leave
+            # a partial copy at the destination while the source is intact.
+            # Drop it, so it neither shadows the original nor makes a retry
+            # fail with "Destination folder is not empty".
+            partial = new_dir / entry.name
+            if entry.exists() and partial.exists():
+                if partial.is_dir():
+                    shutil.rmtree(partial, ignore_errors=True)
+                else:
+                    try:
+                        partial.unlink()
+                    except OSError:
+                        pass
+            # Put back what already moved: the app keeps using old_dir (the
+            # index never moved -- it goes last), so folders left in new_dir
+            # would be invisible to it, and a retry would refuse the
+            # non-empty destination.
+            stuck = _move_back(moved, old_dir, new_dir)
+            if stuck:
+                raise StorageMoveError(
+                    f"Failed to move recordings: {e}. These could not be moved back and are "
+                    f"still in {new_dir}: {', '.join(stuck)} -- move them back into {old_dir} "
+                    "by hand before trying again."
+                ) from e
+            raise StorageMoveError(
+                f"Failed to move recordings: {e}. Nothing was changed -- everything is still in {old_dir}."
+            ) from e
+        moved.append(entry.name)
     # Best-effort: a zip still open for download stays behind and is cleaned
     # up by server.py's startup export sweep if it's ever pointed here again.
     shutil.rmtree(old_dir / EXPORT_DIR_NAME, ignore_errors=True)

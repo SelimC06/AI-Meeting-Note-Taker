@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { backendFetch, exportSessionNotesUrl, exportSessionZipUrl, type Session } from "../api";
 import { isDialogOpen } from "../hooks/useDialog";
 
@@ -24,7 +24,37 @@ const MENU_HEIGHT_ESTIMATE = 200;
 // ourselves lets a failure surface through onExportError, same as every
 // other session action; on success the response becomes a Blob and is
 // downloaded through a throwaway object-URL link instead.
-async function exportViaFetch(url: string, label: string, onExportError: (message: string) => void) {
+// Exports in flight, as "<sessionId>:<kind>". Module-level, not component
+// state: the menu closes the moment an export starts, and a recording's zip
+// can take minutes -- reopening the menu then showed a fresh "[export
+// recording]" and a second click started a second multi-GB download of the
+// same thing. Now that item shows "exporting…" and does nothing until the
+// first one finishes.
+const exportsInFlight = new Set<string>();
+const exportListeners = new Set<() => void>();
+let exportsVersion = 0;
+
+function setExporting(key: string, exporting: boolean) {
+  if (exporting) exportsInFlight.add(key);
+  else exportsInFlight.delete(key);
+  exportsVersion += 1;
+  exportListeners.forEach((listener) => listener());
+}
+
+function subscribeToExports(listener: () => void) {
+  exportListeners.add(listener);
+  return () => {
+    exportListeners.delete(listener);
+  };
+}
+
+function useExportsVersion() {
+  return useSyncExternalStore(subscribeToExports, () => exportsVersion);
+}
+
+async function exportViaFetch(url: string, label: string, onExportError: (message: string) => void, key: string) {
+  if (exportsInFlight.has(key)) return;
+  setExporting(key, true);
   try {
     // backendFetch, not fetch: the export endpoints need the API token too
     // (another reason a plain <a href> can't work -- it can't send headers).
@@ -47,6 +77,8 @@ async function exportViaFetch(url: string, label: string, onExportError: (messag
   } catch (e) {
     const detail = e instanceof TypeError ? "backend offline" : e instanceof Error ? e.message : String(e);
     onExportError(`Couldn't export ${label} — ${detail}`);
+  } finally {
+    setExporting(key, false);
   }
 }
 
@@ -64,6 +96,11 @@ const SessionContextMenu: React.FC<Props> = ({
   onExportError,
 }) => {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  useExportsVersion(); // re-render when an export starts or finishes
+  const notesKey = `${session.id}:notes`;
+  const recordingKey = `${session.id}:recording`;
+  const exportingNotes = exportsInFlight.has(notesKey);
+  const exportingRecording = exportsInFlight.has(recordingKey);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const cancelDeleteRef = useRef<HTMLButtonElement | null>(null);
 
@@ -157,24 +194,28 @@ const SessionContextMenu: React.FC<Props> = ({
       <button
         role="menuitem"
         tabIndex={-1}
-        className={itemClass}
+        aria-disabled={exportingNotes || undefined}
+        className={itemClass + (exportingNotes ? " cursor-default" : "")}
         onClick={() => {
-          exportViaFetch(exportSessionNotesUrl(session.id), "notes", onExportError);
+          if (exportingNotes) return;
+          exportViaFetch(exportSessionNotesUrl(session.id), "notes", onExportError, notesKey);
           onClose();
         }}
       >
-        [export notes]
+        {exportingNotes ? "[exporting notes…]" : "[export notes]"}
       </button>
       <button
         role="menuitem"
         tabIndex={-1}
-        className={itemClass}
+        aria-disabled={exportingRecording || undefined}
+        className={itemClass + (exportingRecording ? " cursor-default" : "")}
         onClick={() => {
-          exportViaFetch(exportSessionZipUrl(session.id), "recording", onExportError);
+          if (exportingRecording) return;
+          exportViaFetch(exportSessionZipUrl(session.id), "recording", onExportError, recordingKey);
           onClose();
         }}
       >
-        [export recording]
+        {exportingRecording ? "[exporting recording…]" : "[export recording]"}
       </button>
 
       {view === "active" && (

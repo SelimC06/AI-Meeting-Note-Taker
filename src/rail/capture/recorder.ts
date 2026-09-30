@@ -62,8 +62,18 @@ export function getRecorder(
     mediaRecorder: mr,
     mimeType: mimeType || mr.mimeType,
     start: () => mr.start(timesliceMs),
-    pause: () => mr.pause(),
-    resume: () => mr.resume(),
+    // Only from the state each call is valid in. A recorder can go
+    // "inactive" on its own mid-recording -- its only track ended (a
+    // Bluetooth mic disconnecting, macOS's "Stop sharing") -- and pause()/
+    // resume() on it throw InvalidStateError. That used to abort the whole
+    // pause halfway: status never flipped, and the other recorders were
+    // left paused while the UI said recording.
+    pause: () => {
+      if (mr.state === "recording") mr.pause();
+    },
+    resume: () => {
+      if (mr.state === "paused") mr.resume();
+    },
     stop: () => {
       // Same promise for every caller: a second stop() while the first is
       // still flushing must wait for that same final ondataavailable, not

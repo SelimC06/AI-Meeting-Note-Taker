@@ -9,6 +9,18 @@
 // railGeometry.js/closeGuard.js) makes it unit-testable without Electron.
 
 const KNOWN_RAIL_STATUSES = new Set(['idle', 'starting', 'recording', 'paused']);
+const RECORD_ERROR_KINDS = new Set(['permission-denied', 'generic']);
+
+// What the dashboard may ask the rail to do over rail:command. The
+// close-flow commands ('stopForClose', 'retryUploadForClose') are sent by
+// main itself, straight to the rail's webContents, and are deliberately NOT
+// here: a renderer triggering them would ack (and so unblock) a close
+// handoff that main never started.
+const RENDERER_RAIL_COMMANDS = new Set(['toggleRecord', 'pause', 'resume', 'retryUpload']);
+
+export function isValidRailCommand(action) {
+    return typeof action === 'string' && RENDERER_RAIL_COMMANDS.has(action);
+}
 
 // Returns a sanitized copy of `payload`, or null if it's malformed enough
 // that the whole message should be dropped (status.status isn't a known
@@ -26,6 +38,7 @@ export function sanitizeRailStatus(payload) {
             ? payload.level.filter((n) => typeof n === 'number' && Number.isFinite(n))
             : [],
         recordError: typeof payload.recordError === 'string' ? payload.recordError : null,
+        recordErrorKind: RECORD_ERROR_KINDS.has(payload.recordErrorKind) ? payload.recordErrorKind : null,
         isProcessing: !!payload.isProcessing,
         hasPendingUpload: !!payload.hasPendingUpload,
     };

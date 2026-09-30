@@ -96,9 +96,22 @@ export async function recoverSessionsIndex(): Promise<RecoverIndexResult> {
   return (await resp.json()) as RecoverIndexResult;
 }
 
-export async function checkHealth(): Promise<boolean> {
+// Deadline for one /health request. A hung backend accepts the connection
+// and never answers: without a deadline the poll never settled, so the
+// backend was never flagged "unresponsive", and the stuck requests -- from
+// several pollers, every few seconds -- filled Chromium's 6-connections-per-
+// host limit and stalled chat, settings and export behind them. A timeout
+// here reads as "unhealthy" (false / backend:false), which is exactly what
+// the unresponsive threshold should count.
+export const HEALTH_REQUEST_TIMEOUT_MS = 5000;
+
+function healthSignal(): AbortSignal | undefined {
+  return typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS) : undefined;
+}
+
+export async function checkHealth(signal: AbortSignal | undefined = healthSignal()): Promise<boolean> {
   try {
-    const resp = await backendFetch(`${BACKEND_URL}/health`);
+    const resp = await backendFetch(`${BACKEND_URL}/health`, { signal });
     return resp.ok;
   } catch {
     return false;
@@ -115,9 +128,9 @@ export type HealthStatus = {
   settings_error?: string | null;
 };
 
-export async function getHealthStatus(): Promise<HealthStatus> {
+export async function getHealthStatus(signal: AbortSignal | undefined = healthSignal()): Promise<HealthStatus> {
   try {
-    const resp = await backendFetch(`${BACKEND_URL}/health`);
+    const resp = await backendFetch(`${BACKEND_URL}/health`, { signal });
     if (!resp.ok) return { ok: false, backend: false, ollama: false };
     const data = (await resp.json()) as Partial<HealthStatus>;
     return {
@@ -526,7 +539,10 @@ export async function startProcessing(
     } catch {
       detail = text;
     }
-    throw new Error(detail);
+    // An empty body (a proxy's bare 502, a crash mid-response) used to throw
+    // Error("") -- the rail then showed no message and so no "retry upload",
+    // though the recording was queued for one.
+    throw new Error(detail.trim() ? detail : `Upload failed: HTTP ${resp.status}`);
   }
 
   return (await resp.json()) as { job_id: string; session_id: string };

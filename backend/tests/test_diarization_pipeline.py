@@ -72,9 +72,20 @@ def _make_fake_pipeline_cls(tracks, from_pretrained_calls, call_paths):
 
         def __call__(self, wav_path):
             call_paths.append(wav_path)
-            return _FakeAnnotation(tracks)
+            return _FakeDiarizeOutput(tracks)
 
     return FakePipeline
+
+
+class _FakeDiarizeOutput:
+    """pyannote.audio 4.x's pipeline output: an object carrying the
+    Annotation(s), not an Annotation itself (so no .itertracks)."""
+
+    def __init__(self, tracks, exclusive_tracks=None):
+        self.speaker_diarization = _FakeAnnotation(tracks)
+        self.exclusive_speaker_diarization = _FakeAnnotation(
+            exclusive_tracks if exclusive_tracks is not None else tracks
+        )
 
 
 def test_diarize_returns_speaker_turns_sorted_by_start(monkeypatch):
@@ -139,3 +150,56 @@ def test_diarize_raises_on_missing_token_without_calling_the_pipeline(monkeypatc
         dp.diarize("mic.wav", token=None)
 
     assert paths == []
+
+
+def test_diarize_prefers_the_exclusive_diarization_of_a_4x_output(monkeypatch):
+    overlapping = [
+        (_FakeSegment(0.0, 3.0), "a", "SPEAKER_00"),
+        (_FakeSegment(2.0, 4.0), "b", "SPEAKER_01"),
+    ]
+    exclusive = [
+        (_FakeSegment(0.0, 2.0), "a", "SPEAKER_00"),
+        (_FakeSegment(2.0, 4.0), "b", "SPEAKER_01"),
+    ]
+
+    class Pipeline4x:
+        @classmethod
+        def from_pretrained(cls, model_name, token=None):
+            return cls()
+
+        def __call__(self, wav_path):
+            return _FakeDiarizeOutput(overlapping, exclusive)
+
+    _install_fake_pyannote(monkeypatch, Pipeline4x)
+    import app.diarization_pipeline as dp
+
+    assert dp.diarize("mic.wav", token="tok") == [("SPEAKER_00", 0.0, 2.0), ("SPEAKER_01", 2.0, 4.0)]
+
+
+def test_diarize_still_reads_a_3x_style_annotation(monkeypatch):
+    tracks = [(_FakeSegment(1.0, 2.0), "a", "SPEAKER_00")]
+
+    class Pipeline3x:
+        @classmethod
+        def from_pretrained(cls, model_name, token=None):
+            return cls()
+
+        def __call__(self, wav_path):
+            return _FakeAnnotation(tracks)
+
+    _install_fake_pyannote(monkeypatch, Pipeline3x)
+    import app.diarization_pipeline as dp
+
+    assert dp.diarize("mic.wav", token="tok") == [("SPEAKER_00", 1.0, 2.0)]
+
+
+def test_only_the_most_recent_pipeline_is_kept_loaded(monkeypatch):
+    calls, paths = [], []
+    _install_fake_pyannote(monkeypatch, _make_fake_pipeline_cls([], calls, paths))
+    import app.diarization_pipeline as dp
+
+    dp.load_pipeline("token-1")
+    dp.load_pipeline("token-2")
+    assert list(dp._cache) == [(dp.MODEL_NAME, "token-2")]
+    dp.load_pipeline("token-2")
+    assert len(calls) == 2  # still cached

@@ -224,3 +224,38 @@ it("does not override 'restarting' with 'unresponsive' while a main-driven recov
   });
   expect(result.current).toEqual({ phase: "restarting", attempt: 1, maxAttempts: 3 });
 });
+
+it("probes health one request at a time while a probe is hanging", async () => {
+  vi.useFakeTimers();
+  try {
+    stubBackendAPI();
+    vi.mocked(checkHealth).mockReturnValue(new Promise(() => {}));
+    renderHook(() => useBackendLifecycle());
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000 * 5);
+    });
+
+    expect(checkHealth).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("a timed-out probe (checkHealth -> false) counts toward 'unresponsive'", async () => {
+  vi.useFakeTimers();
+  try {
+    stubBackendAPI();
+    // What checkHealth resolves to once its own deadline aborts the fetch.
+    vi.mocked(checkHealth).mockResolvedValue(false);
+    const { result } = renderHook(() => useBackendLifecycle());
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(12000);
+    });
+
+    expect(result.current.phase).toBe("unresponsive");
+  } finally {
+    vi.useRealTimers();
+  }
+});

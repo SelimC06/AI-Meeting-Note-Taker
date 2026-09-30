@@ -10,4 +10,6 @@
 # Advanced diarization for the one-time setup step); see
 # docs/Core pipeline quality fix/06-speaker-diarization-track-b.md for why.
 torch
-pyannote.audio
+# 4.x: pyannote/speaker-diarization-community-1 needs it, and
+# diarization_pipeline.py reads 4.x's output shape (.speaker_diarization).
+pyannote.audio>=4.0,<5

@@ -127,14 +127,32 @@ def test_extract_from_notes_chains_extract_then_verify(monkeypatch):
     assert result.relations[0].relation == "launches on"
 
 
-def test_extract_from_notes_returns_empty_extraction_when_extract_fails_validation(monkeypatch):
+def test_extract_from_notes_raises_extraction_failed_when_extract_fails_validation(monkeypatch):
+    """Unusable output must be told apart from a valid EMPTY extraction:
+    the first is retried (up to a cap), the second is recorded as indexed."""
     def fake_chat(model, messages, format, options, stream):
         return {"message": {"content": "garbage that is not json"}}
 
     monkeypatch.setattr(graph_extract._client, "chat", fake_chat)
-    result = graph_extract.extract_from_notes("notes", model="test-model")
-    assert result.entities == []
-    assert result.relations == []
+    with pytest.raises(graph_extract.ExtractionFailed):
+        graph_extract.extract_from_notes("notes", model="test-model")
+
+
+def test_extract_from_notes_returns_a_valid_empty_extraction(monkeypatch):
+    def fake_chat(model, messages, format, options, stream):
+        return {"message": {"content": '{"entities": [], "relations": []}'}}
+
+    monkeypatch.setattr(graph_extract._client, "chat", fake_chat)
+    result = graph_extract.extract_from_notes("two lines of nothing", model="test-model")
+    assert result.entities == [] and result.relations == []
+
+
+def test_prompts_spell_out_the_json_shape():
+    # Providers that ignore response_format need the shape in the prompt.
+    assert '"entities"' in graph_extract.EXTRACT_SYSTEM_PROMPT
+    assert '"relations"' in graph_extract.EXTRACT_SYSTEM_PROMPT
+    assert "ONLY a JSON object" in graph_extract.EXTRACT_SYSTEM_PROMPT
+    assert '"verdicts"' in graph_extract.VERIFY_SYSTEM_PROMPT
 
 
 def test_extract_from_notes_keeps_unverified_extraction_when_verify_fails(monkeypatch):

@@ -4888,3 +4888,157 @@ def test_recover_index_holds_the_store_lock_so_an_upload_cannot_register_meanwhi
 
     assert client.post("/sessions/recover-index").status_code == 200
     assert lock_held_during_recovery == [True]
+
+
+# ---------- library changes during a storage move ----------
+
+@pytest.mark.parametrize("method,path,body", [
+    ("patch", "/sessions/s1", {"title": "New"}),
+    ("post", "/sessions/s1/trash", None),
+    ("post", "/sessions/s1/restore", None),
+    ("delete", "/sessions/s1", None),
+    ("patch", "/sessions/s1/speaker-names", {"names": {"SPEAKER_00": "Alice"}}),
+])
+def test_library_changes_are_refused_while_the_storage_folder_moves(client, monkeypatch, method, path, body):
+    from app.sessions_store import append_session, load_sessions
+
+    append_session(server_module.STORE, {
+        "id": "s1", "created_at": "2026-08-01T00:00:00+00:00", "title": "Old",
+        "notes": "", "video_path": "", "trashed_at": None,
+    })
+    before = load_sessions(server_module.STORE)
+    monkeypatch.setattr(server_module, "move_in_progress", True)
+
+    kwargs = {"json": body} if body is not None else {}
+    resp = getattr(client, method)(path, **kwargs)
+
+    assert resp.status_code == 409
+    assert "being moved" in resp.json()["detail"]
+    assert load_sessions(server_module.STORE) == before
+    assert not (server_module.STORE / "s1").exists()  # no stray folder recreated
+
+
+def test_library_changes_hold_the_store_lock_so_a_move_cannot_start_midway(client, monkeypatch):
+    from app.sessions_store import append_session
+
+    append_session(server_module.STORE, {
+        "id": "s1", "created_at": "2026-08-01T00:00:00+00:00", "title": "Old",
+        "notes": "", "video_path": "", "trashed_at": None,
+    })
+    held = []
+    real_update = server_module.update_session_fields
+
+    def spying_update(*args, **kwargs):
+        held.append(server_module._store_state_lock.locked())
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(server_module, "update_session_fields", spying_update)
+    assert client.patch("/sessions/s1", json={"title": "New"}).status_code == 200
+    assert held == [True]
+
+
+def test_daily_trash_purge_skips_during_a_move(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server_module, "purge_expired_trash", lambda store: calls.append(store))
+    monkeypatch.setattr(server_module, "move_in_progress", True)
+    server_module._purge_trash_unless_moving()
+    assert calls == []
+    monkeypatch.setattr(server_module, "move_in_progress", False)
+    server_module._purge_trash_unless_moving()
+    assert calls == [server_module.STORE]
+
+
+# ---------- silent recordings ----------
+
+@pytest.mark.parametrize("text,empty", [
+    ("", True),
+    ("   \n\n", True),
+    ("You: \nOthers:   \n", True),
+    ("You: hello", False),
+    ("Others: at 3:00 we ship", False),
+    ("plain transcript without labels", False),
+])
+def test_transcript_is_empty(tmp_path, text, empty):
+    txt = tmp_path / "transcript_.txt"
+    txt.write_text(text, encoding="utf-8")
+    assert server_module._transcript_is_empty(str(txt)) is empty
+
+
+def test_silent_recording_gets_a_plain_note_and_no_model_calls(client, monkeypatch):
+    def must_not_run(**kwargs):
+        raise AssertionError("no LLM call for a silent recording")
+
+    monkeypatch.setattr(server_module, "llava_extract_action_items", must_not_run)
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", _fake_mux)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+    monkeypatch.setattr(server_module, "transcribe_wav", lambda *a, **k: [])
+    monkeypatch.setattr(server_module, "llava_complete", must_not_run)
+
+    def silent_stop_and_transcribe(video_path, transcript_prefix, **kwargs):
+        txt = Path(transcript_prefix).with_suffix(".txt")
+        txt.write_text("", encoding="utf-8")
+        return str(txt), None
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", silent_stop_and_transcribe)
+
+    resp = client.post("/process", files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")})
+    job = wait_for_job(client, resp.json()["job_id"])
+
+    assert job["status"] == "done"
+    assert job["notes"] == server_module.SILENT_RECORDING_NOTES
+    assert not (server_module.STORE / job["session_id"] / "summary.json").exists()
+    session = client.get("/sessions").json()[0]
+    assert session["title"] == "Silent recording"
+
+
+# ---------- a failure after indexing doesn't duplicate the record ----------
+
+def _post_screen_only_job(client, monkeypatch):
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "mux_video_audio", _fake_mux)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n- x")
+
+    def fake_stop_and_transcribe(video_path, transcript_prefix, **kwargs):
+        txt = Path(transcript_prefix).with_suffix(".txt")
+        txt.write_text("hello there", encoding="utf-8")
+        return str(txt), None
+
+    monkeypatch.setattr(server_module, "stop_recording_and_transcribe", fake_stop_and_transcribe)
+    resp = client.post("/process", files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm")})
+    return wait_for_job(client, resp.json()["job_id"])
+
+
+def test_failing_summary_json_write_records_the_session_once(client, monkeypatch):
+    monkeypatch.setattr(server_module, "llava_extract_action_items", lambda **kwargs: [{"text": "ship", "owner": None, "due": None}])
+
+    def failing_write(session_dir, items):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(server_module, "write_action_items", failing_write)
+
+    job = _post_screen_only_job(client, monkeypatch)
+
+    assert job["status"] == "failed"
+    from app.sessions_store import load_sessions
+    records = [r for r in load_sessions(server_module.STORE) if r["id"] == job["session_id"]]
+    assert len(records) == 1
+    assert records[0]["status"] == "failed"
+
+
+def test_failure_after_indexing_marks_the_existing_record(client, monkeypatch):
+    def failing_cleanup(*args, **kwargs):
+        raise RuntimeError("cleanup exploded")
+
+    monkeypatch.setattr(server_module, "_delete_job_intermediates", failing_cleanup)
+
+    job = _post_screen_only_job(client, monkeypatch)
+
+    assert job["status"] == "failed"
+    from app.sessions_store import load_sessions
+    records = [r for r in load_sessions(server_module.STORE) if r["id"] == job["session_id"]]
+    assert len(records) == 1
+    # The real notes are kept; only the status/error changed.
+    assert records[0]["notes"] == "# Notes\n- x"
+    assert records[0]["status"] == "failed"
+    assert "cleanup exploded" in records[0]["error"]

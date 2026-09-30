@@ -16,7 +16,19 @@ export function getLastStatus() {
     return lastStatus;
 }
 
-function sendStatus(getMainWindow, payload) {
+// Once an update is downloaded and 'ready', nothing later may replace that
+// status: the periodic re-check keeps running, and one that fails (offline
+// laptop, a flaky feed) used to overwrite 'ready' with 'error' -- hiding the
+// "restart to update" button for an update that was still sitting there,
+// fully downloaded.
+export function nextStatus(current, incoming) {
+    if (current?.state === 'ready' && incoming.state !== 'ready') return current;
+    return incoming;
+}
+
+function sendStatus(getMainWindow, incoming) {
+    const payload = nextStatus(lastStatus, incoming);
+    if (payload === lastStatus) return;
     lastStatus = payload;
     const mainWindow = getMainWindow();
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -47,6 +59,9 @@ export function armAutoUpdate(
     checkIntervalMs = UPDATE_CHECK_INTERVAL_MS,
     platform = process.platform
 ) {
+    // Fresh per arm (once per app session in practice): the 'ready'
+    // stickiness below must not carry over from a previous arm.
+    lastStatus = { state: 'not-checked' };
     const manualOnly = platform === 'darwin';
     updater.autoDownload = !manualOnly;
     updater.autoInstallOnAppQuit = !manualOnly;
@@ -76,6 +91,8 @@ export function armAutoUpdate(
     });
 
     const check = () => {
+        // Nothing left to check for once an update is waiting to install.
+        if (lastStatus.state === 'ready') return;
         // electron-updater's checkForUpdates() both emits 'error' (handled
         // above, which reports it to the renderer) AND rethrows on failure.
         // Swallow the rejection here so a failed check (e.g. an unreachable

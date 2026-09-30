@@ -74,12 +74,16 @@ function StatusDot({ tone }: { tone: DotTone }) {
 export default function SettingsPage({
   active,
   onSessionsDeleted,
+  onLibraryChanged,
 }: {
   active: boolean;
   // Told which sessions Empty Trash permanently deleted, so the rest of the
   // app can drop them too (the Sidebar's trash list, per-meeting chat
   // state) -- this page has no other way to reach those.
   onSessionsDeleted?: (ids: string[]) => void;
+  // Told when the storage folder changed: every list of meetings on screen
+  // (the sidebar, its trash view) was fetched from the old one.
+  onLibraryChanged?: () => void;
 }) {
   const [activeSection, setActiveSection] = useState<SectionId>("transcription");
 
@@ -334,6 +338,7 @@ export default function SettingsPage({
     try {
       const updated = await updateSettings({ storage_dir: chosen });
       applyServerSettings(updated);
+      onLibraryChanged?.();
     } catch (e) {
       setStorageError(e instanceof Error ? e.message : String(e));
     } finally {

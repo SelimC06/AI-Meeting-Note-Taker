@@ -492,3 +492,115 @@ def test_move_storage_dir_is_not_broken_by_an_export_that_cannot_be_removed(tmp_
     move_storage_dir(old, tmp_path / "new")
 
     assert moved == ["sess1"]  # .exports never attempted
+
+
+def _case_insensitive(tmp_path):
+    probe = tmp_path / "CaseProbe"
+    probe.mkdir()
+    return (tmp_path / "caseprobe").exists()
+
+
+def test_move_storage_dir_treats_a_differently_cased_path_as_the_same_folder(tmp_path):
+    if not _case_insensitive(tmp_path):
+        pytest.skip("case-sensitive filesystem")
+    old = tmp_path / "Recordings"
+    (old / "sess1").mkdir(parents=True)
+
+    move_storage_dir(old, tmp_path / "recordings")  # no-op, not a move into itself
+
+    assert (old / "sess1").is_dir()
+
+
+def test_move_storage_dir_refuses_a_differently_cased_path_inside_itself(tmp_path):
+    if not _case_insensitive(tmp_path):
+        pytest.skip("case-sensitive filesystem")
+    old = tmp_path / "Recordings"
+    (old / "sess1").mkdir(parents=True)
+
+    with pytest.raises(StorageMoveError, match="inside"):
+        move_storage_dir(old, tmp_path / "recordings" / "sub")
+    assert sorted(p.name for p in old.iterdir()) == ["sess1"]
+
+
+def test_move_storage_dir_refuses_a_symlinked_alias_inside_itself(tmp_path):
+    old = tmp_path / "old"
+    (old / "sess1").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(old, target_is_directory=True)
+
+    with pytest.raises(StorageMoveError, match="inside"):
+        move_storage_dir(old, alias / "nested")
+
+
+def test_a_move_that_fails_partway_puts_everything_back(tmp_path, monkeypatch):
+    from app import settings_store
+
+    old = tmp_path / "old"
+    for name in ("a", "b", "c"):
+        (old / name).mkdir(parents=True)
+    (old / "sessions_index.json").write_text("[]", encoding="utf-8")
+    new = tmp_path / "new"
+    real_move = shutil.move
+
+    def failing_on_c(src, dst):
+        if Path(src).name == "c":
+            raise OSError("disk full")
+        return real_move(src, dst)
+
+    monkeypatch.setattr(settings_store.shutil, "move", failing_on_c)
+
+    with pytest.raises(StorageMoveError, match="Nothing was changed"):
+        move_storage_dir(old, new)
+
+    assert sorted(p.name for p in old.iterdir()) == ["a", "b", "c", "sessions_index.json"]
+    assert list(new.iterdir()) == []
+    # ...so a retry isn't refused as "not empty".
+    monkeypatch.setattr(settings_store.shutil, "move", real_move)
+    move_storage_dir(old, new)
+    assert sorted(p.name for p in new.iterdir()) == ["a", "b", "c", "sessions_index.json"]
+
+
+def test_a_move_that_cannot_be_undone_says_exactly_what_is_where(tmp_path, monkeypatch):
+    from app import settings_store
+
+    old = tmp_path / "old"
+    for name in ("a", "b"):
+        (old / name).mkdir(parents=True)
+    new = tmp_path / "new"
+    real_move = shutil.move
+
+    def flaky(src, dst):
+        if Path(src).name == "b":
+            raise OSError("disk full")
+        if Path(src).parent == new:  # moving back
+            raise OSError("permission denied")
+        return real_move(src, dst)
+
+    monkeypatch.setattr(settings_store.shutil, "move", flaky)
+
+    with pytest.raises(StorageMoveError) as excinfo:
+        move_storage_dir(old, new)
+    message = str(excinfo.value)
+    assert "could not be moved back" in message and "a" in message and str(new) in message
+
+
+def test_a_partial_copy_left_by_a_failed_move_is_removed(tmp_path, monkeypatch):
+    from app import settings_store
+
+    old = tmp_path / "old"
+    (old / "a").mkdir(parents=True)
+    (old / "a" / "final.webm").write_bytes(b"video")
+    new = tmp_path / "new"
+
+    def half_copy(src, dst):
+        # A cross-drive copy dying midway: partial destination, source intact.
+        Path(dst).mkdir()
+        (Path(dst) / "final.webm").write_bytes(b"vi")
+        raise OSError("device disconnected")
+
+    monkeypatch.setattr(settings_store.shutil, "move", half_copy)
+
+    with pytest.raises(StorageMoveError):
+        move_storage_dir(old, new)
+    assert (old / "a" / "final.webm").read_bytes() == b"video"
+    assert list(new.iterdir()) == []

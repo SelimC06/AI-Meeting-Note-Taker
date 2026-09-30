@@ -170,9 +170,15 @@ def _translate_format(format: Any) -> Optional[Dict[str, Any]]:
     if format == "json":
         return {"type": "json_object"}
     if isinstance(format, dict):
+        # strict=False: the schemas passed here are Pydantic's
+        # model_json_schema(), with optional/defaulted fields and no
+        # "additionalProperties": false -- OpenAI's strict mode rejects
+        # those outright (400), and the retry without response_format then
+        # got prose. Non-strict still steers the model to the shape; the
+        # callers validate the result themselves.
         return {
             "type": "json_schema",
-            "json_schema": {"name": "response", "schema": format, "strict": True},
+            "json_schema": {"name": "response", "schema": format, "strict": False},
         }
     return None
 

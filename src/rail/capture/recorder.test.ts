@@ -112,3 +112,29 @@ it("extensionForMimeType maps a recorder mimeType to its container's file extens
   expect(extensionForMimeType(undefined)).toBe("webm");
   expect(extensionForMimeType("application/x-unknown")).toBe("webm");
 });
+
+it("pause()/resume() are no-ops on a recorder that went inactive by itself (no InvalidStateError)", () => {
+  class StrictRecorder extends FakeMediaRecorder {
+    pause(): void {
+      if (this.state !== "recording") throw Object.assign(new Error("invalid"), { name: "InvalidStateError" });
+      super.pause();
+    }
+    resume(): void {
+      if (this.state !== "paused") throw Object.assign(new Error("invalid"), { name: "InvalidStateError" });
+      super.resume();
+    }
+  }
+  (globalThis as { MediaRecorder: unknown }).MediaRecorder = StrictRecorder;
+  const rec = getRecorder({} as MediaStream, "video/webm");
+
+  // Never started / track ended: state is "inactive".
+  expect(() => rec.pause()).not.toThrow();
+  expect(() => rec.resume()).not.toThrow();
+
+  rec.start();
+  rec.pause();
+  expect(rec.mediaRecorder.state).toBe("paused");
+  expect(() => rec.pause()).not.toThrow(); // already paused
+  rec.resume();
+  expect(rec.mediaRecorder.state).toBe("recording");
+});

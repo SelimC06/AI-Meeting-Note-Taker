@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizeRailStatus, isValidSlotRect } from './railValidation.js';
+import { sanitizeRailStatus, isValidSlotRect, isValidRailCommand } from './railValidation.js';
 
 const VALID_STATUS = {
     status: 'recording',
     elapsedLabel: '00:12',
     level: [0.1, 0.5, 0.9],
     recordError: null,
+    recordErrorKind: null,
     isProcessing: false,
     hasPendingUpload: false,
 };
@@ -78,4 +79,23 @@ test('isValidSlotRect rejects non-finite coordinates', () => {
 test('isValidSlotRect rejects zero or negative width/height', () => {
     assert.equal(isValidSlotRect({ x: 20, y: 5, width: 0, height: 40 }), false);
     assert.equal(isValidSlotRect({ x: 20, y: 5, width: 280, height: -1 }), false);
+});
+
+
+test('sanitizeRailStatus keeps a known recordErrorKind and drops anything else', () => {
+    assert.equal(sanitizeRailStatus({ ...VALID_STATUS, recordErrorKind: 'permission-denied' }).recordErrorKind, 'permission-denied');
+    assert.equal(sanitizeRailStatus({ ...VALID_STATUS, recordErrorKind: 'rm -rf' }).recordErrorKind, null);
+    const { recordErrorKind: _omit, ...legacy } = VALID_STATUS;
+    assert.equal(sanitizeRailStatus(legacy).recordErrorKind, null);
+});
+
+test('isValidRailCommand allows only what the dashboard may send', () => {
+    for (const action of ['toggleRecord', 'pause', 'resume', 'retryUpload']) {
+        assert.equal(isValidRailCommand(action), true, action);
+    }
+    // Close-flow commands are main-only: a renderer sending them would ack a
+    // close handoff main never started.
+    for (const action of ['stopForClose', 'retryUploadForClose', 'bogus', 42, null]) {
+        assert.equal(isValidRailCommand(action), false, String(action));
+    }
 });
