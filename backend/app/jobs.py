@@ -8,6 +8,7 @@ way a crash mid-request would today.
 """
 from __future__ import annotations
 
+import itertools
 import queue
 import threading
 import uuid
@@ -17,6 +18,13 @@ from typing import Callable, Optional
 _JOBS_LOCK = threading.Lock()
 _JOBS: dict[str, dict] = {}
 _JOB_INPUTS: dict[str, dict] = {}
+# job_id -> creation order, the tie-breaker for sorting by created_at: two
+# jobs created back to back can get the SAME timestamp on Windows (its clock
+# is much coarser than the microseconds isoformat() prints), and a stable
+# sort then kept them oldest-first in "newest first" lists. Kept apart from
+# the job dict so it never shows up in /jobs responses.
+_JOB_SEQ: dict[str, int] = {}
+_next_seq = itertools.count()
 _QUEUE: "queue.Queue[str]" = queue.Queue()
 _MAX_TERMINAL_JOBS = 50
 
@@ -41,6 +49,7 @@ def create_job(session_id: str, inputs: dict) -> str:
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         _JOB_INPUTS[job_id] = dict(inputs)
+        _JOB_SEQ[job_id] = next(_next_seq)
         _prune_terminal_jobs_locked()
     return job_id
 
@@ -52,11 +61,18 @@ def _prune_terminal_jobs_locked() -> None:
     terminal = [j for j in _JOBS.values() if j["status"] in ("done", "failed")]
     if len(terminal) <= _MAX_TERMINAL_JOBS:
         return
-    terminal.sort(key=lambda j: j["created_at"])
+    terminal.sort(key=_creation_order_locked)
     to_drop = terminal[: len(terminal) - _MAX_TERMINAL_JOBS]
     for job in to_drop:
         del _JOBS[job["id"]]
         _JOB_INPUTS.pop(job["id"], None)
+        _JOB_SEQ.pop(job["id"], None)
+
+
+def _creation_order_locked(job: dict) -> tuple:
+    """Sort key: created_at, then creation sequence for identical
+    timestamps (see _JOB_SEQ). Caller must hold _JOBS_LOCK."""
+    return (job["created_at"], _JOB_SEQ.get(job["id"], -1))
 
 
 def enqueue(job_id: str) -> None:
@@ -90,7 +106,7 @@ def is_busy() -> bool:
 def list_jobs() -> list[dict]:
     with _JOBS_LOCK:
         jobs_copy = [dict(j) for j in _JOBS.values()]
-    jobs_copy.sort(key=lambda j: j["created_at"], reverse=True)
+        jobs_copy.sort(key=_creation_order_locked, reverse=True)
     return jobs_copy
 
 

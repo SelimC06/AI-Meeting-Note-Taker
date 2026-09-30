@@ -18,6 +18,7 @@ def _isolated_job_state(monkeypatch):
     """
     monkeypatch.setattr(jobs, "_JOBS", {})
     monkeypatch.setattr(jobs, "_JOB_INPUTS", {})
+    monkeypatch.setattr(jobs, "_JOB_SEQ", {})
     monkeypatch.setattr(jobs, "_QUEUE", queue.Queue())
     monkeypatch.setattr(jobs, "_worker_started", False)
 
@@ -210,3 +211,38 @@ def test_jobs_run_serially_not_concurrently():
 
     assert done_event.wait(timeout=5.0)
     assert max_concurrent["value"] == 1
+
+
+class _FrozenDatetime:
+    """Every job gets the same created_at -- what Windows' coarse clock does
+    to two jobs created back to back."""
+
+    @staticmethod
+    def now(tz=None):
+        from datetime import datetime, timezone
+        return datetime(2026, 9, 30, 12, 0, 0, tzinfo=tz or timezone.utc)
+
+
+def test_list_jobs_newest_first_even_with_identical_timestamps(monkeypatch):
+    monkeypatch.setattr(jobs, "datetime", _FrozenDatetime)
+    ids = [jobs.create_job(session_id=str(i), inputs={}) for i in range(4)]
+    assert len({j["created_at"] for j in jobs.list_jobs()}) == 1
+
+    assert [j["id"] for j in jobs.list_jobs()] == list(reversed(ids))
+
+
+def test_prune_drops_the_oldest_even_with_identical_timestamps(monkeypatch):
+    monkeypatch.setattr(jobs, "datetime", _FrozenDatetime)
+    ids = [jobs.create_job(session_id=str(i), inputs={}) for i in range(52)]
+    for job_id in ids:
+        jobs.update_job(job_id, status="done")
+
+    kept = {j["id"] for j in jobs.list_jobs()}
+    assert kept == set(ids[2:])
+    assert ids[0] not in jobs._JOB_SEQ and ids[1] not in jobs._JOB_SEQ
+
+
+def test_the_sequence_number_never_appears_in_job_dicts():
+    job_id = jobs.create_job(session_id="s", inputs={})
+    assert "seq" not in jobs.get_job(job_id)
+    assert set(jobs.list_jobs()[0]) == set(jobs.get_job(job_id))

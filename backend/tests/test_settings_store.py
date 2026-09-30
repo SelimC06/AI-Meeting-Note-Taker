@@ -153,7 +153,11 @@ def test_load_checked_reports_corrupt_file_and_keeps_a_single_copy(tmp_path):
 
 
 def test_load_checked_salvages_storage_dir_from_a_truncated_file(tmp_path):
-    custom = tmp_path / 'My Recordings "quoted"'
+    # The salvage has to undo JSON escaping. On macOS/Linux, quotes in the
+    # folder name exercise that; Windows forbids '"' in file names, but there
+    # every path is full of backslashes -- which JSON escapes as \\ -- so
+    # the plain name still tests the escaped-character salvage.
+    custom = tmp_path / ('My Recordings "quoted"' if os.name != "nt" else "My Recordings")
     custom.mkdir()
     full = json.dumps({"whisper_model": "small.en", "storage_dir": str(custom), "custom_api_key": "sk-1"})
     settings_path = tmp_path / "settings.json"
