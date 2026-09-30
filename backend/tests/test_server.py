@@ -3,6 +3,7 @@ import io
 import json
 import os
 import tempfile
+import threading
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2003,7 +2004,8 @@ def test_patch_settings_rejects_storage_move_while_graph_indexing_is_busy(client
     if server_module.graph_jobs is None:
         pytest.skip("graph_jobs feature not available in this build")
 
-    monkeypatch.setattr(graph_jobs, "is_busy", lambda: True)
+    # The worker's own "store in use" state -- what try_block_store checks.
+    monkeypatch.setattr(graph_jobs, "_indexing", True)
 
     new_dir = tmp_path.parent / f"{tmp_path.name}-new-storage"
     original_store = server_module.STORE
@@ -2013,6 +2015,7 @@ def test_patch_settings_rejects_storage_move_while_graph_indexing_is_busy(client
     assert resp.status_code == 409
     assert server_module.STORE == original_store
     assert not new_dir.exists()
+    assert graph_jobs._store_blocked is False
 
 
 def test_patch_settings_allows_storage_move_once_jobs_are_terminal(client: TestClient, tmp_path):
@@ -4597,3 +4600,169 @@ def test_patch_settings_allows_switching_to_custom_before_a_url_is_entered(clien
     # ...and clearing the URL is fine once back on Ollama.
     assert client.patch("/settings", json={"ai_provider": "ollama"}).status_code == 200
     assert client.patch("/settings", json={"custom_api_base_url": ""}).status_code == 200
+
+
+# ---------- storage move vs. background work races ----------
+
+@pytest.fixture()
+def graph_worker(monkeypatch):
+    """A real graph_jobs worker on a fresh queue, reading the live STORE."""
+    from app import graph_jobs
+
+    if server_module.graph_jobs is None:
+        pytest.skip("graph_jobs feature not available in this build")
+    import queue as queue_module
+
+    monkeypatch.setattr(graph_jobs, "_QUEUE", queue_module.Queue())
+    monkeypatch.setattr(graph_jobs, "_worker_started", False)
+    monkeypatch.setattr(graph_jobs, "IDLE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(graph_jobs, "_indexing", False)
+    monkeypatch.setattr(graph_jobs, "_store_blocked", False, raising=False)
+    return graph_jobs
+
+
+def test_graph_worker_cannot_claim_the_old_store_during_a_move(client, tmp_path, monkeypatch, graph_worker):
+    """Reproduces the race deterministically: the worker has picked up a
+    session but not yet marked itself busy when the move's checks run.
+    Before the fix the move passed its is_busy() check, the worker then
+    marked itself busy and read the OLD STORE, and went on to write into
+    the folder the move was abandoning.
+    """
+    graph_jobs = graph_worker
+    worker_picked_up = threading.Event()
+    release_worker = threading.Event()
+    stores_indexed = []
+    indexed = threading.Event()
+
+    real_is_busy = graph_jobs.jobs.is_busy
+
+    def is_busy_pausing_the_worker():
+        # Freeze the worker right after it dequeued a session, before it
+        # claims the store; everyone else sees the real answer.
+        if threading.current_thread().name == "graph-index-worker" and not release_worker.is_set():
+            worker_picked_up.set()
+            release_worker.wait(5)
+        return real_is_busy()
+
+    monkeypatch.setattr(graph_jobs.jobs, "is_busy", is_busy_pausing_the_worker)
+
+    def fake_index_session(store_dir, session_id, model, client=None):
+        stores_indexed.append(Path(store_dir))
+        indexed.set()
+
+    monkeypatch.setattr(graph_jobs, "index_session", fake_index_session)
+
+    def move_that_lets_the_worker_run(old_dir, new_dir):
+        # The move has passed its checks. Let the worker continue now, and
+        # give it the chance to grab the store before the files move.
+        release_worker.set()
+        indexed.wait(0.5)
+        new_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(server_module, "move_storage_dir", move_that_lets_the_worker_run)
+
+    graph_jobs.start_worker(lambda: server_module.STORE, lambda: "m")
+    graph_jobs.enqueue_session("s1")
+    assert worker_picked_up.wait(5)
+
+    new_dir = tmp_path.parent / f"{tmp_path.name}-moved"
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+    assert resp.status_code == 200
+
+    assert indexed.wait(5)
+    assert stores_indexed == [new_dir]
+
+
+def test_storage_move_refuses_an_upload_that_finishes_during_its_checks(client, tmp_path, monkeypatch):
+    """The smaller window: an in-flight /process finishes (creating its
+    queued job) between the move's jobs.is_busy() check and its
+    _active_uploads check. Before the fix is_busy() ran outside
+    _store_state_lock, so both checks passed and the queued job's files
+    were moved out from under it.
+    """
+    new_dir = tmp_path.parent / f"{tmp_path.name}-moved-2"
+    real_is_busy = server_module.jobs.is_busy
+    finished = []
+
+    def upload_finishes_right_after(*args, **kwargs):
+        busy = real_is_busy()
+        if not finished:
+            finished.append(True)
+            # What /process's tail does: create the job, then count itself
+            # out under the lock. Run on another thread with a timeout so a
+            # caller holding _store_state_lock can't deadlock the test.
+            def finish_upload():
+                server_module.jobs.create_job("sess", {"store": str(server_module.STORE)})
+                with server_module._store_state_lock:
+                    server_module._active_uploads -= 1
+            t = threading.Thread(target=finish_upload)
+            t.start()
+            t.join(0.5)
+        return busy
+
+    monkeypatch.setattr(server_module, "_active_uploads", 1)
+    monkeypatch.setattr(server_module.jobs, "is_busy", upload_finishes_right_after)
+    moved = []
+    monkeypatch.setattr(server_module, "move_storage_dir", lambda old, new: moved.append(new))
+
+    resp = client.patch("/settings", json={"storage_dir": str(new_dir)})
+
+    assert resp.status_code == 409
+    assert moved == []
+    assert server_module.move_in_progress is False
+
+
+def test_graph_worker_waits_for_a_move_and_then_uses_the_new_store(client, tmp_path, monkeypatch, graph_worker):
+    graph_jobs = graph_worker
+    stores_indexed = []
+    indexed = threading.Event()
+    in_move = threading.Event()
+    finish_move = threading.Event()
+
+    def fake_index_session(store_dir, session_id, model, client=None):
+        stores_indexed.append(Path(store_dir))
+        indexed.set()
+
+    monkeypatch.setattr(graph_jobs, "index_session", fake_index_session)
+
+    def slow_move(old_dir, new_dir):
+        in_move.set()
+        finish_move.wait(5)
+        new_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(server_module, "move_storage_dir", slow_move)
+    graph_jobs.start_worker(lambda: server_module.STORE, lambda: "m")
+
+    new_dir = tmp_path.parent / f"{tmp_path.name}-moved-3"
+    result = {}
+    mover = threading.Thread(
+        target=lambda: result.update(resp=client.patch("/settings", json={"storage_dir": str(new_dir)}))
+    )
+    mover.start()
+    assert in_move.wait(5)
+
+    graph_jobs.enqueue_session("s1")
+    assert not indexed.wait(0.2)  # blocked while the move owns the store
+
+    finish_move.set()
+    mover.join(5)
+    assert result["resp"].status_code == 200
+    assert indexed.wait(5)
+    assert stores_indexed == [new_dir]
+    assert graph_jobs._store_blocked is False
+
+
+def test_failed_move_unblocks_the_graph_worker(client, tmp_path, monkeypatch, graph_worker):
+    graph_jobs = graph_worker
+
+    def exploding_move(old_dir, new_dir):
+        raise OSError("disk yanked")
+
+    monkeypatch.setattr(server_module, "move_storage_dir", exploding_move)
+    new_dir = tmp_path.parent / f"{tmp_path.name}-moved-4"
+
+    with pytest.raises(OSError):
+        client.patch("/settings", json={"storage_dir": str(new_dir)})
+
+    assert graph_jobs._store_blocked is False
+    assert server_module.move_in_progress is False

@@ -908,36 +908,58 @@ def patch_settings(body: SettingsUpdate):
 
         if body.storage_dir is not None:
             new_dir = Path(body.storage_dir)
-            # Reject rather than race the job worker: a mid-job move can
+            # Reject rather than race background work: a mid-job move can
             # PermissionError on Windows (open file handles) or split the
             # session index across old/new dirs if the worker appends to a
             # re-created index in the old location after the move.
-            if jobs.is_busy() or (graph_jobs is not None and graph_jobs.is_busy()):
-                raise HTTPException(409, "Wait for processing to finish before moving the storage folder")
-            # jobs.is_busy() only blocks moves while a job is queued/running --
-            # it says nothing about a fresh POST /process arriving DURING the
-            # move itself (no job exists yet at that point), nor about an
-            # upload already streaming in when the move starts. Both are
-            # closed by _store_state_lock / _active_uploads below and
-            # move_in_progress, which /process checks before registering
-            # itself as an active upload.
+            #
+            # Every check and claim below happens in ONE _store_state_lock
+            # section, so nothing can start using the store between a check
+            # passing and the move claiming it:
+            # - _active_uploads: /process counts itself in (under this lock)
+            #   before touching the store, and creates its job BEFORE counting
+            #   itself out -- so with the lock held, "no active uploads" means
+            #   every finished upload's job is already visible to
+            #   jobs.is_busy(). Checking is_busy() before taking the lock
+            #   (as this used to) let an upload finish in the gap.
+            # - graph_jobs.try_block_store(): atomically "the graph worker
+            #   isn't using the store, and now can't claim it" (see there).
+            #   A plain is_busy() check let the worker claim the OLD store
+            #   right after the check and write into it after the move.
+            # Lock order is always _store_state_lock -> jobs._JOBS_LOCK /
+            # graph_jobs._INDEXING_LOCK. Neither of those is ever held while
+            # taking another lock, so this can't deadlock.
             with _store_state_lock:
                 if _active_uploads > 0:
                     raise HTTPException(409, "Wait for the current upload to finish before moving the storage folder")
+                if jobs.is_busy():
+                    raise HTTPException(409, "Wait for processing to finish before moving the storage folder")
+                if graph_jobs is not None and not graph_jobs.try_block_store():
+                    raise HTTPException(409, "Wait for processing to finish before moving the storage folder")
                 move_in_progress = True
             old_store_dir = STORE
             try:
-                move_storage_dir(STORE, new_dir)
-            except StorageMoveError as e:
+                try:
+                    move_storage_dir(STORE, new_dir)
+                except StorageMoveError as e:
+                    with _store_state_lock:
+                        move_in_progress = False
+                    raise HTTPException(400, str(e))
+                # Success: flip STORE and clear move_in_progress in ONE locked step --
+                # clearing first (the old finally) let /process register an upload
+                # against the old, emptied dir in the gap before the flip.
+                with _store_state_lock:
+                    STORE = Path(new_dir)
+                    move_in_progress = False
+            except BaseException:
                 with _store_state_lock:
                     move_in_progress = False
-                raise HTTPException(400, str(e))
-            # Success: flip STORE and clear move_in_progress in ONE locked step --
-            # clearing first (the old finally) let /process register an upload
-            # against the old, emptied dir in the gap before the flip.
-            with _store_state_lock:
-                STORE = Path(new_dir)
-                move_in_progress = False
+                raise
+            finally:
+                # After the STORE flip (or failure), so the graph worker's
+                # next claim reads the folder that's actually current.
+                if graph_jobs is not None:
+                    graph_jobs.unblock_store()
             updates["storage_dir"] = str(new_dir)
 
         try:

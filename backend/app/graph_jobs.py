@@ -34,13 +34,18 @@ _worker_lock = threading.Lock()
 # How often the worker re-checks jobs.is_busy() while yielding.
 IDLE_POLL_SECONDS = 5.0
 
-# True while the worker is between picking up a session and finishing
-# index_session() for it (extraction + merge). Same convention as
-# jobs.is_busy(): used to lock out storage-dir moves, since a move mid-
-# extraction can write knowledge_graph.json into a dir that's mid-move or
-# already abandoned by the move.
+# _indexing: True while the worker is using a store dir (reading it,
+# extracting, merging into its knowledge_graph.json). _store_blocked: True
+# while a storage-dir move owns the store. The two are mutually exclusive
+# and both flip only under _INDEXING_LOCK: the worker claims the store
+# (_try_claim_store) only while no move has it blocked, and a move blocks it
+# (try_block_store) only while the worker isn't using it. A plain
+# check-then-act on is_busy() left a gap -- the move could check "not
+# indexing", then the worker set _indexing, read the OLD store, and spent
+# minutes extracting into a folder the move was emptying.
 _INDEXING_LOCK = threading.Lock()
 _indexing = False
+_store_blocked = False
 
 
 def is_busy() -> bool:
@@ -49,6 +54,36 @@ def is_busy() -> bool:
     """
     with _INDEXING_LOCK:
         return _indexing
+
+
+def try_block_store() -> bool:
+    """For a storage-dir move: stop the worker from claiming the store.
+    Returns False (nothing changed) if the worker is using it right now.
+    Every True must be paired with unblock_store(). The worker never waits
+    on anything while holding _INDEXING_LOCK, so callers may hold their own
+    locks around this (server.py calls it under _store_state_lock).
+    """
+    global _store_blocked
+    with _INDEXING_LOCK:
+        if _indexing:
+            return False
+        _store_blocked = True
+        return True
+
+
+def unblock_store() -> None:
+    global _store_blocked
+    with _INDEXING_LOCK:
+        _store_blocked = False
+
+
+def _try_claim_store() -> bool:
+    global _indexing
+    with _INDEXING_LOCK:
+        if _store_blocked:
+            return False
+        _indexing = True
+        return True
 
 
 def enqueue_session(session_id: str) -> None:
@@ -120,10 +155,12 @@ def start_worker(
         while True:
             session_id = work_queue.get()
             try:
-                while jobs.is_busy():
+                # Yield to the recording pipeline, and to a storage move in
+                # progress. get_store() is read only AFTER the claim
+                # succeeds, so a move that finished while this waited is
+                # seen -- the session is indexed in the new folder.
+                while jobs.is_busy() or not _try_claim_store():
                     time.sleep(IDLE_POLL_SECONDS)
-                with _INDEXING_LOCK:
-                    _indexing = True
                 try:
                     index_session(get_store(), session_id, get_model(), client=get_client())
                 finally:
