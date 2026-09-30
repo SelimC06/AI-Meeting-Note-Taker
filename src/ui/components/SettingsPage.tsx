@@ -377,7 +377,12 @@ export default function SettingsPage({
       case "about":
         if (updaterStatus.state === "error") return "err";
         if (updaterStatus.state === "ready") return "ok";
-        if (updaterStatus.state === "available" || updaterStatus.state === "downloading") return "warn";
+        if (
+          updaterStatus.state === "available" ||
+          updaterStatus.state === "downloading" ||
+          updaterStatus.state === "manual"
+        )
+          return "warn";
         if (updaterStatus.state === "idle") return "ok";
         return "none";
       default:
@@ -784,6 +789,19 @@ export default function SettingsPage({
             {updaterStatus.state === "available" && (
               <p className="text-xs text-dim">
                 Update {updaterStatus.version} found — downloading...
+              </p>
+            )}
+            {updaterStatus.state === "manual" && (
+              <p className="text-xs text-phosphor">
+                Version {updaterStatus.version} is available —{" "}
+                <a
+                  href={updaterStatus.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-signal underline focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                >
+                  download it from deskrecap.com
+                </a>
               </p>
             )}
             {updaterStatus.state === "downloading" && (

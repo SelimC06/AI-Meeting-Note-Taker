@@ -29,6 +29,10 @@ declare global {
     | { state: "not-checked" }
     | { state: "checking" }
     | { state: "available"; version: string }
+    // macOS only: a newer version exists but can't be installed in-app
+    // (ad-hoc-signed builds; see src/electron/updater.js) -- the user
+    // downloads it from `url` instead.
+    | { state: "manual"; version: string; url: string }
     | { state: "idle" }
     | { state: "downloading"; percent: number }
     | { state: "ready"; version: string }

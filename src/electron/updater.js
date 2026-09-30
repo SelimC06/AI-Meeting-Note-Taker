@@ -1,10 +1,7 @@
 import electronUpdater from 'electron-updater';
+import { getUpdateFeedUrl, WEBSITE_URL } from './updateFeed.js';
 
-const DEFAULT_FEED_URL = 'https://updates.deskrecap.com';
-
-export function getUpdateFeedUrl(env = process.env) {
-    return env.UPDATE_FEED_URL || DEFAULT_FEED_URL;
-}
+export { getUpdateFeedUrl };
 
 // A single startup-only check meant the app never learned about a new
 // release for the rest of a long-running session.
@@ -36,14 +33,33 @@ function sendStatus(getMainWindow, payload) {
 // the whole app session, while the dashboard window can be recreated
 // (macOS Dock reopen) -- a captured reference would keep sending status to
 // the dead one and the new dashboard would never hear about an update.
-export function armAutoUpdate(getMainWindow, updater = electronUpdater.autoUpdater, checkIntervalMs = UPDATE_CHECK_INTERVAL_MS) {
-    updater.autoDownload = true;
+//
+// macOS is check-only. DeskRecap's Mac builds are ad-hoc signed (no Apple
+// Developer ID -- see the README), and Squirrel.Mac, which electron-updater
+// uses to install on macOS, refuses any update that isn't signed with a
+// real Developer ID: downloading it only wastes ~240 MB and ends in a
+// signature error, and "restart to update" would do nothing. So on macOS
+// nothing is downloaded or installed; a newer version is reported as
+// 'manual' with a link to the website to download it from.
+export function armAutoUpdate(
+    getMainWindow,
+    updater = electronUpdater.autoUpdater,
+    checkIntervalMs = UPDATE_CHECK_INTERVAL_MS,
+    platform = process.platform
+) {
+    const manualOnly = platform === 'darwin';
+    updater.autoDownload = !manualOnly;
+    updater.autoInstallOnAppQuit = !manualOnly;
     updater.setFeedURL({ provider: 'generic', url: getUpdateFeedUrl() });
 
     updater.on('checking-for-update', () => {
         sendStatus(getMainWindow, { state: 'checking' });
     });
     updater.on('update-available', (info) => {
+        if (manualOnly) {
+            sendStatus(getMainWindow, { state: 'manual', version: info.version, url: WEBSITE_URL });
+            return;
+        }
         sendStatus(getMainWindow, { state: 'available', version: info.version });
     });
     updater.on('update-not-available', () => {

@@ -15,12 +15,13 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "npm run build && wrangler dev",
-    "test:main": "node --test src/electron/*.test.js",
+    "test:main": "node --test src/electron/*.test.js scripts/*.test.mjs",
     "test:ui": "vitest run",
     "setup:backend": "node scripts/setup-backend.mjs",
     "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "build:backend": "node scripts/build-backend.mjs",
     "dist": "npm run build && npm run build:backend && npm run fetch:ffmpeg && electron-builder",
+    "release": "node scripts/release.mjs",
     "deploy": "npm run build && wrangler deploy"
   },
   "build": {
@@ -32,6 +33,8 @@
     },
     "files": [
       "dist-react/**/*",
+      "!dist-react/wrangler.json",
+      "!dist-react/.assetsignore",
       "src/electron/**/*",
       "!src/electron/**/*.test.js",
       "package.json"

@@ -719,3 +719,32 @@ it("Empty Trash reports what it did delete even when a later delete fails", asyn
 
   await waitFor(() => expect(onSessionsDeleted).toHaveBeenCalledWith(["t1"]));
 });
+
+it("on macOS, offers a download link for a new version instead of an install button", async () => {
+  let pushStatus: (status: unknown) => void = () => {};
+  Object.defineProperty(window, "updaterAPI", {
+    value: {
+      onStatus: vi.fn((cb) => {
+        pushStatus = cb;
+        return () => {};
+      }),
+      install: vi.fn(),
+    },
+    writable: true,
+    configurable: true,
+  });
+
+  render(<SettingsPage active={true} />);
+  await screen.findByText(/\[base\.en\]/);
+  openSection("About");
+
+  act(() => {
+    pushStatus({ state: "manual", version: "1.1.0", url: "https://deskrecap.com" });
+  });
+
+  expect(screen.getByText(/Version 1\.1\.0 is available/)).toBeInTheDocument();
+  const link = screen.getByRole("link", { name: "download it from deskrecap.com" });
+  expect(link).toHaveAttribute("href", "https://deskrecap.com");
+  expect(link).toHaveAttribute("target", "_blank");
+  expect(screen.queryByRole("button", { name: "restart to update" })).not.toBeInTheDocument();
+});

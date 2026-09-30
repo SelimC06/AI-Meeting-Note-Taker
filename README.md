@@ -130,8 +130,10 @@ npm run setup:backend
 npm run dist
 ```
 
-On Windows this produces an NSIS installer under `release/`; on macOS, a `.dmg`
-and a `.zip`. The package bundles the Python backend (frozen with PyInstaller)
+This builds for the machine you run it on, into `release/`: on Windows an NSIS
+installer (`DeskRecap Setup X.Y.Z.exe`), on macOS a `.dmg` and a `.zip`. It
+never uploads anything -- publishing is `npm run release` (see
+[Publishing a release](#publishing-a-release)). The package bundles the Python backend (frozen with PyInstaller)
 and ffmpeg/ffprobe, so **end users installing the packaged app do not need
 Python or ffmpeg installed separately.**
 
@@ -167,84 +169,139 @@ macOS's own `/usr/bin/python3` is 3.8 and answers to both `python` and
 than building a venv that every `pip install` then fails against. Install a
 newer one (`brew install python@3.12`) if it does.
 
-### macOS: signing and notarization
+### macOS: ad-hoc signing (no Apple Developer ID)
 
-Local builds work with no Apple credentials at all — `scripts/notarize.mjs`
-logs that it's skipping and returns, leaving an unsigned build that runs fine
-on the machine that produced it.
+DeskRecap's Mac builds are **ad-hoc signed**, and that is permanent: there is
+no paid Apple Developer account, so there is no Developer ID certificate and
+no notarization. `build.mac.identity` is `"-"`, which tells electron-builder
+to ad-hoc sign every binary in the bundle (the app, Electron's helpers, the
+PyInstaller backend and ffmpeg). Don't remove it: a completely unsigned
+download shows "DeskRecap is damaged and can't be opened", with no way
+around it for most users; an ad-hoc-signed one shows "Apple could not
+verify…", which the user can get past once.
 
-To ship to *other* Macs you need both halves, because `build.mac.hardenedRuntime`
-is `true` and Gatekeeper rejects a hardened app that isn't notarized:
+`scripts/notarize.mjs` (the `afterSign` hook) skips every ad-hoc build and
+logs why -- Apple can only notarize Developer ID builds, so trying would
+just fail the release -- even if `APPLE_API_*` variables happen to be set.
 
-1. **A Developer ID Application certificate** in the login keychain.
-   electron-builder finds it automatically; without it the app is only
-   ad-hoc signed.
-2. **An App Store Connect API key**, passed to `afterSign` through these
-   environment variables (all three required — if any is missing,
-   notarization is skipped with a message naming which):
+What ad-hoc builds mean for Mac users:
 
-   | Variable | Value |
-   | --- | --- |
-   | `APPLE_API_KEY` | path to the `AuthKey_XXXXXXXXXX.p8` file |
-   | `APPLE_API_KEY_ID` | the key ID (the `XXXXXXXXXX` in the filename) |
-   | `APPLE_API_ISSUER` | the issuer UUID from App Store Connect |
+- **First launch needs "Open Anyway".** Double-clicking the downloaded app
+  shows "Apple could not verify 'DeskRecap' is free of malware…". Click
+  **Done**, then open **System Settings → Privacy & Security**, scroll to the
+  message about DeskRecap and click **Open Anyway**, then confirm with
+  **Open**. (On macOS 14 and earlier, right-click the app → **Open** also
+  works.) This is needed once per installed version.
+- **No in-app auto-update on macOS.** Squirrel.Mac, which installs updates on
+  macOS, only accepts updates signed with a real Developer ID. So on macOS the
+  app only *checks*: Settings → About shows "Version X is available —
+  download it from deskrecap.com", and the user downloads and installs the
+  new version like the first one. Nothing is downloaded in the background.
+  (Windows updates still download and install automatically.)
+- **macOS may ask for microphone (and screen recording) permission again**
+  after a new version is installed: without a stable Developer ID signature,
+  macOS can't always tell the new build is the same app.
 
-   Treat the `.p8` as a secret: never commit it or bake it into
-   `package.json`.
+**Entitlements** (`build/entitlements.mac.plist`, used for both
+`entitlements` and `entitlementsInherit`) are the minimum that was verified
+to launch and run the backend:
 
-Entitlements live in `build/entitlements.mac.plist` and are applied to both the
-app and its inherited helper processes. The microphone usage string end users
-see at the permission prompt is `build.mac.extendInfo.NSMicrophoneUsageDescription`.
+| Entitlement | Why |
+| --- | --- |
+| `cs.disable-library-validation` | With hardened runtime, library validation rejects loading any code whose Team ID differs from the process's -- and ad-hoc signatures have none, so without it the app dies at launch with *"Library not loaded: …Electron Framework… different Team IDs"*. The backend's Python libraries need it for the same reason. |
+| `cs.allow-jit` | V8 in the main process and the renderer helpers; without it hardened-runtime Electron crashes on launch ("Failed to reserve virtual memory for CodeRange"). |
+| `device.audio-input` | Microphone access under hardened runtime, including in Chromium's audio helper process. |
 
-### Publishing updates
+`cs.allow-unsigned-executable-memory` was removed: it's a looser superset of
+`allow-jit` that Electron 39 doesn't need (verified by building and running
+the app). There's no separate, smaller inherit plist, because every
+entitlement above is needed by at least one of Electron's own helpers, and
+electron-builder can't give the backend and ffmpeg a different set without a
+custom signing step. The microphone prompt text is
+`build.mac.extendInfo.NSMicrophoneUsageDescription`.
 
-Release artifacts (the installer + `latest.yml` manifest) are hosted on a
-Cloudflare R2 bucket, `meeting-note-taker-updates`. There are two separate
-pieces of config, serving two different purposes — both must stay correct:
+## Publishing a release
 
-- **`build.publish` in `package.json`** — the R2 bucket's S3-compatible API
-  (`provider: "s3"` with R2's endpoint). This is only used at *publish
-  time*, by `electron-builder --publish always`, to know where to *upload*
-  a new release. It requires write credentials (see below) and is never
-  read by the running app.
-- **The runtime feed URL the app actually checks** — `DEFAULT_FEED_URL` in
-  `src/electron/updater.js`, currently a custom domain in front of the
-  bucket (`https://updates.deskrecap.com`), overridable via
-  the `UPDATE_FEED_URL` environment variable. `armAutoUpdate` calls
-  `updater.setFeedURL({ provider: 'generic', url: getUpdateFeedUrl() })`
-  unconditionally, which overrides whatever `app-update.yml`
-  electron-builder baked in from `build.publish` — so the app always does a
-  plain, unauthenticated HTTPS GET against the public URL, never the S3 API
-  endpoint.
+Release artifacts are hosted on a Cloudflare R2 bucket,
+`meeting-note-taker-updates`, served at `https://updates.deskrecap.com`. Each
+platform has its own manifest there, which both the in-app updater and the
+website's download button read to find the current installer:
 
-If the bucket is ever recreated or its public URL changes, update
-`DEFAULT_FEED_URL` in `updater.js` to match — editing `build.publish` alone
-is not sufficient, since that only controls where uploads go, not what the
-app reads.
+| Platform | Manifest | Installers |
+| --- | --- | --- |
+| Windows | `latest.yml` | `DeskRecap Setup X.Y.Z.exe` |
+| macOS | `latest-mac.yml` | `DeskRecap-X.Y.Z-arm64.dmg` / `-arm64-mac.zip` (Apple Silicon); `DeskRecap-X.Y.Z.dmg` / `-mac.zip` (Intel, no arch in the name) |
 
-Publishing a new version is a manual step, not part of `npm run dist`.
-`electron-builder`'s S3 publisher reads write credentials from the
-standard AWS SDK environment variables (never store these in
-`package.json` or commit them):
+There are two separate pieces of config, serving two different purposes --
+both must stay correct:
 
-```bash
-AWS_ACCESS_KEY_ID=<r2 access key id> AWS_SECRET_ACCESS_KEY=<r2 secret access key> electron-builder --publish always
-```
+- **`build.publish` in `package.json`** -- the R2 bucket's S3-compatible API
+  (`provider: "s3"` with R2's endpoint). Only used at publish time to know
+  where to *upload*. It needs write credentials and is never read by the
+  running app.
+- **The feed URL the app reads** -- `DEFAULT_FEED_URL` in
+  `src/electron/updateFeed.js` (`https://updates.deskrecap.com`, overridable
+  with `UPDATE_FEED_URL`). `armAutoUpdate` sets it explicitly, overriding
+  whatever electron-builder baked in from `build.publish`, so the app only
+  ever does plain HTTPS GETs against the public URL. `npm run release` reads
+  the same value to check what's already published. If the bucket's public
+  URL ever changes, change it there.
 
-This uploads the installer and a `latest.yml` manifest to the R2 bucket.
-Bump `"version"` in `package.json` first — electron-updater compares
-semver against `latest.yml` to decide whether an update exists.
+### Steps
 
-Also tag the release in git, matching `package.json`'s version:
+1. **Bump `"version"` in `package.json`** (e.g. `1.0.0` → `1.0.1`).
+   Installed apps only update to a strictly newer version, so re-publishing
+   the same version reaches nobody -- which is why the script refuses it.
+2. **Run the release** on the machine for the platform (and, on macOS, the
+   architecture) you're shipping, with the R2 write credentials in the
+   environment -- never in `package.json` or a committed file:
 
-```bash
-git tag vX.Y.Z
-git push origin vX.Y.Z
-```
+   ```bash
+   npm run release -- --check      # optional: just the checks, nothing built or uploaded
+   AWS_ACCESS_KEY_ID=<r2 access key id> AWS_SECRET_ACCESS_KEY=<r2 secret access key> npm run release
+   ```
 
-The R2 manifest is what the app updates against, not the tag — but the tag
-is what turns a bug report's "which version are you on" into something you
-can actually check out and debug against later.
+   `npm run release` (`scripts/release.mjs`):
+   - fetches the published manifest for this platform and **refuses** if
+     `package.json`'s version is already published or older (`--force`
+     overrides, only to repair a broken upload of the same version);
+   - on macOS, **refuses** if the published `latest-mac.yml` lists another
+     architecture's files (see below; `--force-arch` overrides);
+   - refuses if the R2 credentials aren't set;
+   - then runs `npm run build`, `npm run build:backend`,
+     `npm run fetch:ffmpeg` and `electron-builder --publish always`;
+   - finally re-reads the published manifest and checks every file it
+     lists is really there at full size.
+3. **Tag it** (the script prints the command):
+
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+
+   The R2 manifest is what apps update against, not the tag -- but the tag
+   is what turns a bug report's "which version are you on" into something you
+   can check out and debug.
+
+For a release on both platforms, run it once on Windows and once on the Mac,
+with the same version.
+
+**Big uploads on a flaky network.** The installers are ~240 MB. If an upload
+fails midway, electron-builder can still have uploaded (or later upload) the
+manifest, and a manifest pointing at a missing or truncated installer breaks
+both the updater and the website's download button. The installers must be
+completely uploaded *before* the manifest. The script's final check catches
+this: if it reports a missing or short file, fix the network and run
+`npm run release -- --force` to upload that same version again.
+
+**One Mac architecture per manifest.** `latest-mac.yml` only lists the files
+of the architecture that published it, so publishing from an Apple Silicon
+Mac replaces any Intel entries (and vice versa) -- Intel users would stop
+seeing updates and the website would lose their download. Today only arm64
+is published. The release script refuses a Mac publish that would drop
+another architecture. To ship both, the two `latest-mac.yml` files have to
+be merged by hand (both `files:` lists in one manifest) and uploaded after
+both sets of installers; the script doesn't do that.
 
 ## Scripts
 
@@ -259,4 +316,5 @@ can actually check out and debug against later.
 | `npm run setup:backend` | Create/refresh the Python `.venv` from `requirements.txt`. |
 | `npm run fetch:ffmpeg` | Download the ffmpeg/ffprobe binaries used by the backend. |
 | `npm run build:backend` | Freeze the Python backend with PyInstaller for packaging. |
-| `npm run dist` | Full build + package into a Windows installer (`build`, `build:backend`, `fetch:ffmpeg`, `electron-builder`). |
+| `npm run dist` | Full build + package for this platform into `release/` (`build`, `build:backend`, `fetch:ffmpeg`, `electron-builder`). Never uploads. |
+| `npm run release` | Check, build and publish a release to the update bucket (see [Publishing a release](#publishing-a-release)). `-- --check` only runs the checks. |
