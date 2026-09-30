@@ -526,7 +526,11 @@ def test_move_storage_dir_refuses_a_symlinked_alias_inside_itself(tmp_path):
     old = tmp_path / "old"
     (old / "sess1").mkdir(parents=True)
     alias = tmp_path / "alias"
-    alias.symlink_to(old, target_is_directory=True)
+    try:
+        alias.symlink_to(old, target_is_directory=True)
+    except OSError as e:
+        # Windows without Developer Mode / the symlink privilege.
+        pytest.skip(f"can't create symlinks here: {e}")
 
     with pytest.raises(StorageMoveError, match="inside"):
         move_storage_dir(old, alias / "nested")

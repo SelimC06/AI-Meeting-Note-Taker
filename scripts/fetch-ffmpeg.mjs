@@ -12,15 +12,25 @@ const exeSuffix = isWin ? '.exe' : '';
 const ffmpegExe = path.join(vendorDir, `ffmpeg${exeSuffix}`);
 const ffprobeExe = path.join(vendorDir, `ffprobe${exeSuffix}`);
 
-// Pinned to a specific, versioned gyan.dev "packages" URL rather than the rolling
+// Pinned to a specific, versioned gyan.dev build rather than the rolling
 // "ffmpeg-release-essentials.zip" link, which silently tracks whatever the latest
 // release is (it already drifted to ffmpeg 9.0 mid-project, which changed CLI flag
 // behavior -vsync/-fps_mode). Pinned to 9.0 to match the ffmpeg build already
 // vendored in this repo and already verified in Task 8.
-const FFMPEG_ZIP_URL = 'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0-essentials_build.zip';
+//
+// Served from gyan.dev's official GitHub mirror (GyanD/codexffmpeg), not
+// gyan.dev's own packages/ URL: gyan.dev only keeps the latest release there,
+// and .../packages/ffmpeg-9.0-essentials_build.zip started returning 404 as soon
+// as 9.0.2 came out -- breaking every Windows build. A GitHub release asset is a
+// durable, versioned copy (assets stay on their release when newer releases are
+// published), and it's byte-for-byte the same file: its SHA-256 is exactly
+// FFMPEG_ZIP_SHA256 below. GitHub answers with a redirect to its CDN, which
+// fetch() follows by default (downloadAndVerify doesn't change `redirect`).
+const FFMPEG_ZIP_URL = 'https://github.com/GyanD/codexffmpeg/releases/download/9.0/ffmpeg-9.0-essentials_build.zip';
 
 // SHA-256 of the file at FFMPEG_ZIP_URL above, computed on 2026-08-05 by downloading
-// the URL and running `sha256sum` (cross-checked with node:crypto). If the URL is
+// the URL and running `sha256sum` (cross-checked with node:crypto); re-verified
+// against the GitHub mirror URL on 2026-09-30 (identical). If the URL is
 // ever repinned to a new ffmpeg version, download the new zip, recompute its hash
 // the same way, and update this constant to match.
 const FFMPEG_ZIP_SHA256 = 'e6b54767a6065919048f1a098eb27211ca4e12b4348a05d88777a5855d0b6e71';
