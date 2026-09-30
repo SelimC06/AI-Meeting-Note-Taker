@@ -1,0 +1,5 @@
+# Tools for freezing the backend (`npm run build:backend`). Pinned like
+# requirements.txt: a new PyInstaller or hooks release can change what gets
+# bundled (or break the frozen app) with no change on our side.
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.7

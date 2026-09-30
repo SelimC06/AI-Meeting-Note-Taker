@@ -1,0 +1,5 @@
+# Development / CI: the runtime dependencies plus test and lint tools.
+# Installed by `npm run setup:backend` and by CI; never frozen into the app.
+-r requirements.txt
+pytest==9.1.1
+ruff==0.16.9

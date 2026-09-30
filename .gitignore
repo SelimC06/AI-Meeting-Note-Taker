@@ -50,3 +50,14 @@ release
 # clips and transcripts) - large and reproducible via the benchmarks/*.py
 # scripts; only the scripts and results/ summaries are checked in.
 benchmarks/data/
+
+# Secrets: R2/AWS release keys, App Store / other private keys, local env
+# files (see README "Publishing a release" -- load keys from one of these,
+# never type them inline). !.env.example keeps a template committable.
+.env*
+!.env.example
+.dev.vars
+*.p8
+
+# Wrangler (Cloudflare) local state
+.wrangler/

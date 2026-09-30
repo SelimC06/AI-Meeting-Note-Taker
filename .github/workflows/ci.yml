@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [master]
 
+# Read-only: CI only checks out and tests code, it never needs to write to
+# the repo (or anything else) with the workflow token.
+permissions:
+  contents: read
+
 jobs:
   frontend:
     name: Lint, build, and test (Node)
@@ -25,27 +30,32 @@ jobs:
       - run: npm run test:ui
 
   backend:
-    name: Backend tests (Python)
+    name: Backend lint and tests (Python)
     runs-on: windows-latest
+    env:
+      # The tests run against the exact ffmpeg build the app ships
+      # (npm run fetch:ffmpeg -- pinned version, checksum-verified), not
+      # whatever choco/brew currently provides. bin_paths.py reads these;
+      # without them it falls back to PATH, where this runner has none.
+      FFMPEG_BIN: ${{ github.workspace }}\vendor\ffmpeg\ffmpeg.exe
+      FFPROBE_BIN: ${{ github.workspace }}\vendor\ffmpeg\ffprobe.exe
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          # The version the release build is made with (.venv / PyInstaller).
+          python-version-file: .python-version
           cache: pip
 
-      # bin_paths.py resolves ffmpeg/ffprobe via PATH when FFMPEG_BIN/
-      # FFPROBE_BIN aren't set (the dev-mode default) -- the vendored
-      # binaries under vendor/ffmpeg are gitignored, so this runner has
-      # neither on PATH without an explicit install. Without this,
-      # ffprobe_ok() crashes with FileNotFoundError instead of the
-      # graceful "invalid file" handling it has for every other failure
-      # mode, failing test_process_rejects_invalid_screen_upload and
-      # test_process_leaves_no_orphan_session_dir_on_rejected_upload.
-      - run: choco install ffmpeg -y
+      # fetch-ffmpeg.mjs only uses Node built-ins -- no npm ci needed.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm run fetch:ffmpeg
 
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
       - run: python -m pytest -q
         working-directory: backend
 
@@ -67,22 +77,82 @@ jobs:
       - run: npm run test:ui
 
   backend-mac:
-    name: Backend tests (Python, macOS)
+    name: Backend lint and tests (Python, macOS)
     runs-on: macos-14
+    env:
+      # See the Windows backend job.
+      FFMPEG_BIN: ${{ github.workspace }}/vendor/ffmpeg/ffmpeg
+      FFPROBE_BIN: ${{ github.workspace }}/vendor/ffmpeg/ffprobe
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version-file: .python-version
           cache: pip
 
-      # See the equivalent choco install step in the `backend` (Windows) job
-      # above: ffmpeg/ffprobe aren't on PATH by default on this runner either,
-      # and vendor/ffmpeg is gitignored, so ffprobe_ok() would otherwise crash
-      # with FileNotFoundError instead of its graceful "invalid file" handling.
-      - run: brew install ffmpeg
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm run fetch:ffmpeg
 
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
       - run: python -m pytest -q
         working-directory: backend
+
+  package-mac:
+    name: Packaging smoke test (macOS)
+    runs-on: macos-14
+    # Catches what the unit tests can't: a dependency that PyInstaller fails
+    # to freeze, a missing file in the package, a frozen backend that dies
+    # on startup. Builds the real (ad-hoc signed, never published) app, then
+    # starts its bundled backend and waits for /health.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run setup:backend
+      - run: npm run build
+      - run: npm run build:backend
+      - run: npm run fetch:ffmpeg
+      - run: npx electron-builder --publish never
+
+      - name: Start the frozen backend and check /health
+        env:
+          # The backend refuses requests without the per-launch token main.js
+          # normally generates; any value works as long as the request echoes it.
+          DESKRECAP_API_TOKEN: ci-smoke-token
+          PORT: "8765"
+          GRAPH_INDEXING_DISABLED: "1"
+        run: |
+          RES="release/mac-arm64/DeskRecap.app/Contents/Resources"
+          export APP_DATA_DIR="$RUNNER_TEMP/deskrecap-appdata"
+          export FFMPEG_BIN="$RES/ffmpeg/ffmpeg" FFPROBE_BIN="$RES/ffmpeg/ffprobe"
+          mkdir -p "$APP_DATA_DIR"
+          "$RES/backend/app-backend" > backend.log 2>&1 &
+          PID=$!
+          for i in $(seq 1 90); do
+            if curl -fsS -m 2 -H "X-DeskRecap-Token: $DESKRECAP_API_TOKEN" "http://127.0.0.1:$PORT/health"; then
+              echo
+              echo "frozen backend healthy after ~${i}s"
+              STATUS=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health")
+              kill $PID
+              if [ "$STATUS" != "401" ]; then echo "expected 401 without the token, got $STATUS"; exit 1; fi
+              exit 0
+            fi
+            if ! kill -0 $PID 2>/dev/null; then echo "frozen backend exited:"; cat backend.log; exit 1; fi
+            sleep 1
+          done
+          echo "frozen backend never became healthy:"; cat backend.log
+          kill $PID
+          exit 1

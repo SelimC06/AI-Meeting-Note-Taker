@@ -78,6 +78,9 @@ if (fs.existsSync(venvDir)) {
     run(systemPython, ['-m', 'venv', venvDir]);
 }
 
-run(venvPython, ['-m', 'pip', 'install', '-r', path.join(projectRoot, 'requirements.txt')]);
+// requirements-dev.txt = the pinned runtime requirements.txt plus pytest and
+// ruff, so the same venv runs the app, the tests and the lint. Only what the
+// backend actually imports ends up in the frozen app (build:backend).
+run(venvPython, ['-m', 'pip', 'install', '-r', path.join(projectRoot, 'requirements-dev.txt')]);
 
 console.log('Backend venv ready.');

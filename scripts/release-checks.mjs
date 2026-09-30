@@ -84,3 +84,40 @@ export function macArchProblem(remoteUrls, hostArch) {
         `${hostArch} machine would replace it with ${hostArch}-only entries -- users on ${otherArchs.join(', ')} ` +
         'would stop getting updates and the website download would lose their installer.';
 }
+
+// --check / --force / --force-arch, from argv or -- when a maintainer
+// forgets the `--` in `npm run release -- --check` -- from npm's env: npm 7+
+// turns `npm run release --check` into npm_config_check=true instead of
+// passing the flag on, so "just checking" silently ran a full build and
+// publish.
+export function resolveFlags(argv, env) {
+    const args = new Set(argv);
+    const fromNpm = (name) => env[`npm_config_${name}`] === 'true' || env[`npm_config_${name}`] === '';
+    return {
+        checkOnly: args.has('--check') || fromNpm('check'),
+        force: args.has('--force') || fromNpm('force'),
+        forceArch: args.has('--force-arch') || fromNpm('force_arch'),
+    };
+}
+
+// electron-builder publishes prerelease versions (1.1.0-beta.1) to
+// beta*.yml / alpha*.yml, not latest*.yml, so none of the checks here (nor
+// the website, nor installed apps on the default channel) would see them.
+export function prereleaseProblem(version) {
+    if (/^\d+\.\d+\.\d+-/.test(version ?? '')) {
+        return `version ${version} is a prerelease. Prereleases publish to beta/alpha manifests that ` +
+            'nothing here reads; release a plain X.Y.Z version instead.';
+    }
+    return null;
+}
+
+// A 200 that isn't really a manifest (an HTML error page, an empty body)
+// parses to no version and no files -- which the version and architecture
+// checks would both read as "nothing to worry about".
+export function manifestProblem(manifest, url) {
+    if (!manifest?.version || manifest.files.length === 0) {
+        return `${url} answered, but not with a readable update manifest. Refusing to publish ` +
+            "without knowing what's already out there.";
+    }
+    return null;
+}

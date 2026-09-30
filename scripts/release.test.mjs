@@ -59,3 +59,28 @@ test('macArchProblem refuses to drop another architecture from latest-mac.yml', 
     assert.match(macArchProblem([...armOnly, 'DeskRecap-1.0.0-mac.zip'], 'arm64'), /x64/);
     assert.equal(macArchProblem([], 'arm64'), null);
 });
+
+test('resolveFlags honours both `-- --check` and npm\'s npm_config_check (a forgotten `--`)', async () => {
+    const { resolveFlags } = await import('./release-checks.mjs');
+    assert.deepEqual(resolveFlags(['--check'], {}), { checkOnly: true, force: false, forceArch: false });
+    assert.deepEqual(resolveFlags([], { npm_config_check: 'true' }), { checkOnly: true, force: false, forceArch: false });
+    assert.deepEqual(
+        resolveFlags([], { npm_config_force: 'true', npm_config_force_arch: 'true' }),
+        { checkOnly: false, force: true, forceArch: true }
+    );
+    assert.deepEqual(resolveFlags([], {}), { checkOnly: false, force: false, forceArch: false });
+});
+
+test('prerelease versions are refused', async () => {
+    const { prereleaseProblem } = await import('./release-checks.mjs');
+    assert.match(prereleaseProblem('1.1.0-beta.1'), /prerelease/);
+    assert.equal(prereleaseProblem('1.1.0'), null);
+});
+
+test('an unreadable manifest is a problem, not "nothing published"', async () => {
+    const { manifestProblem } = await import('./release-checks.mjs');
+    assert.match(manifestProblem(parseManifest('<html>Not found</html>'), 'u'), /readable/);
+    assert.match(manifestProblem(parseManifest(''), 'u'), /readable/);
+    assert.match(manifestProblem(parseManifest('version: 1.0.0\n'), 'u'), /readable/); // no files
+    assert.equal(manifestProblem(parseManifest(MAC_MANIFEST), 'u'), null);
+});

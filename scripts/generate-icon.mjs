@@ -9,74 +9,107 @@ const projectRoot = path.join(__dirname, '..');
 const buildDir = path.join(projectRoot, 'build');
 fs.mkdirSync(buildDir, { recursive: true });
 
-const SIZE = 256;
-// .icns needs a much larger source than the Windows .ico does -- macOS
-// renders this at up to 512x512@2x (1024px) in Finder/the dock, and
-// upscaling the 256px source left visible blur/aliasing on the glyph.
+const BACKGROUND = '#1A1A19';
+const FOREGROUND = '#EDE6D6';
 
-// Same '>' glyph as Website/scripts/generate-favicon.mjs (and
-// Website/index.html's inline SVG favicon), scaled up -- keeps the desktop
-// app icon and the site favicon as the same mark.
-const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='#1A1A19'/><text x='16' y='22' font-family='monospace' font-size='20' fill='#EDE6D6' text-anchor='middle'>&gt;</text></svg>`;
-const html = `<!doctype html><html><body style="margin:0">${svg}</body></html>`;
+// The '>' mark, on a 32-unit grid: the same glyph as
+// Website/scripts/generate-favicon.mjs (and Website/index.html's inline SVG
+// favicon), so the app icon and the site favicon stay one mark. A path
+// traced from the original rendering rather than <text font-family=
+// 'monospace'>: which font 'monospace' resolves to depends on the machine
+// (a different Chromium drew it rounded), so the old <text> icons changed
+// with whoever regenerated them. Thin, square-ended stroke, mitred point.
+const GRID = 32;
+const GLYPH = `<polyline points='13.04,11.63 18.81,16.63 13.04,21.63' fill='none' stroke='${FOREGROUND}' stroke-width='1.56' stroke-linecap='butt' stroke-linejoin='miter'/>`;
 
-// macOS 26+ draws any app icon that isn't the standard rounded-square shape
-// shrunk onto a grey placeholder tile, so the full-bleed square above can't be
-// reused for the .icns. This follows Apple's icon grid instead: an 824px
-// rounded square centred on a transparent 1024px canvas, with the glyph at
-// the same proportions as the square version. The '>' is a path traced from
-// the shipped build/icon.png rather than <text>, since which font 'monospace'
-// resolves to depends on the machine (a different Chromium drew it rounded).
-const macSvg = `<svg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024' viewBox='0 0 1024 1024'><rect x='100' y='100' width='824' height='824' rx='185' fill='#1A1A19'/><g transform='translate(100 100) scale(25.75)'><polyline points='13.04,11.63 18.81,16.63 13.04,21.63' fill='none' stroke='#EDE6D6' stroke-width='1.56' stroke-linecap='butt' stroke-linejoin='miter'/></g></svg>`;
-const macHtml = `<!doctype html><html><body style="margin:0;background:transparent">${macSvg}</body></html>`;
+// Windows/Linux icon: the full-bleed square. build/icon.png is the 256px
+// render; build/icon.ico holds one PNG per size Windows asks for (taskbar,
+// Explorer's views, the installer), so it never has to scale the 256px image
+// down to 16px itself.
+const PNG_SIZE = 256;
+const ICO_SIZES = [16, 24, 32, 48, 64, 128, 256];
 
-function encodeIco(pngBuffer, size) {
+function squareSvg(size) {
+    return `<svg xmlns='http://www.w3.org/2000/svg' width='${size}' height='${size}' viewBox='0 0 ${GRID} ${GRID}'><rect width='${GRID}' height='${GRID}' fill='${BACKGROUND}'/>${GLYPH}</svg>`;
+}
+
+// macOS icon: macOS renders it at up to 512x512@2x, so the .icns source is
+// 1024px. And macOS 26+ draws any icon that isn't the standard rounded
+// square shrunk onto a grey placeholder tile, so the square above can't be
+// reused: this follows Apple's icon grid -- an 824/1024 rounded square
+// (corner radius 185/1024) centred on a transparent canvas, with the glyph
+// at the same proportions as in the square version.
+const ICNS_SOURCE_SIZE = 1024;
+const MAC_TILE = ICNS_SOURCE_SIZE * (824 / 1024);
+const MAC_INSET = (ICNS_SOURCE_SIZE - MAC_TILE) / 2;
+const MAC_RADIUS = ICNS_SOURCE_SIZE * (185 / 1024);
+
+function macSvg(size) {
+    return `<svg xmlns='http://www.w3.org/2000/svg' width='${size}' height='${size}' viewBox='0 0 ${ICNS_SOURCE_SIZE} ${ICNS_SOURCE_SIZE}'><rect x='${MAC_INSET}' y='${MAC_INSET}' width='${MAC_TILE}' height='${MAC_TILE}' rx='${MAC_RADIUS}' fill='${BACKGROUND}'/><g transform='translate(${MAC_INSET} ${MAC_INSET}) scale(${MAC_TILE / GRID})'>${GLYPH}</g></svg>`;
+}
+
+// An .ico with one PNG-compressed image per size (supported since Windows
+// Vista). Directory entries first, then the images, each entry pointing at
+// its image's offset.
+export function encodeIco(images) {
     const header = Buffer.alloc(6);
     header.writeUInt16LE(0, 0); // reserved
     header.writeUInt16LE(1, 2); // type: icon
-    header.writeUInt16LE(1, 4); // 1 image
+    header.writeUInt16LE(images.length, 4);
 
-    const entry = Buffer.alloc(16);
-    entry[0] = size >= 256 ? 0 : size; // width (0 means 256)
-    entry[1] = size >= 256 ? 0 : size; // height
-    entry[2] = 0; // color palette
-    entry[3] = 0; // reserved
-    entry.writeUInt16LE(1, 4);  // color planes
-    entry.writeUInt16LE(32, 6); // bits per pixel
-    entry.writeUInt32LE(pngBuffer.length, 8); // image data size
-    entry.writeUInt32LE(header.length + entry.length, 12); // offset to image data
-
-    return Buffer.concat([header, entry, pngBuffer]);
+    let offset = header.length + 16 * images.length;
+    const entries = images.map(({ size, png }) => {
+        const entry = Buffer.alloc(16);
+        entry[0] = size >= 256 ? 0 : size; // width (0 means 256)
+        entry[1] = size >= 256 ? 0 : size; // height
+        entry[2] = 0; // color palette
+        entry[3] = 0; // reserved
+        entry.writeUInt16LE(1, 4); // color planes
+        entry.writeUInt16LE(32, 6); // bits per pixel
+        entry.writeUInt32LE(png.length, 8); // image data size
+        entry.writeUInt32LE(offset, 12); // offset to image data
+        offset += png.length;
+        return entry;
+    });
+    return Buffer.concat([header, ...entries, ...images.map(({ png }) => png)]);
 }
 
-const ICNS_SOURCE_SIZE = 1024;
-
-async function renderPng(page, size) {
+// Renders an SVG that already carries its own width/height at exactly that
+// many pixels.
+async function renderSvg(page, svg, size, { transparent = false } = {}) {
     await page.setViewportSize({ width: size, height: size });
-    await page.evaluate((s) => {
-        const el = document.querySelector('svg');
-        el.setAttribute('width', String(s));
-        el.setAttribute('height', String(s));
-    }, size);
-    return page.screenshot({ omitBackground: false });
+    const background = transparent ? 'transparent' : BACKGROUND;
+    await page.setContent(`<!doctype html><html><body style="margin:0;background:${background}">${svg}</body></html>`);
+    return page.screenshot({ omitBackground: transparent, clip: { x: 0, y: 0, width: size, height: size } });
 }
 
-const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: SIZE, height: SIZE } });
-await page.setContent(html);
-const png = await renderPng(page, SIZE);
-await page.setViewportSize({ width: ICNS_SOURCE_SIZE, height: ICNS_SOURCE_SIZE });
-await page.setContent(macHtml);
-const icnsSourcePng = await page.screenshot({ omitBackground: true });
-await browser.close();
+async function main() {
+    const browser = await chromium.launch();
+    const page = await browser.newPage();
+    const icoImages = [];
+    for (const size of ICO_SIZES) {
+        icoImages.push({ size, png: await renderSvg(page, squareSvg(size), size) });
+    }
+    const png = icoImages.find((image) => image.size === PNG_SIZE).png;
+    const icnsSourcePng = await renderSvg(page, macSvg(ICNS_SOURCE_SIZE), ICNS_SOURCE_SIZE, { transparent: true });
+    await browser.close();
 
-const icns = png2icons.createICNS(icnsSourcePng, png2icons.BICUBIC2, 0);
-if (!icns) {
-    throw new Error('png2icons failed to produce an .icns file');
+    const icns = png2icons.createICNS(icnsSourcePng, png2icons.BICUBIC2, 0);
+    if (!icns) {
+        throw new Error('png2icons failed to produce an .icns file');
+    }
+
+    fs.writeFileSync(path.join(buildDir, 'icon.png'), png);
+    fs.writeFileSync(path.join(buildDir, 'icon.ico'), encodeIco(icoImages));
+    fs.writeFileSync(path.join(buildDir, 'icon.icns'), icns);
+
+    console.log(
+        `Wrote ${path.join(buildDir, 'icon.png')}, ${path.join(buildDir, 'icon.ico')} ` +
+        `(${ICO_SIZES.join(', ')} px), and ${path.join(buildDir, 'icon.icns')}`
+    );
 }
 
-fs.writeFileSync(path.join(buildDir, 'icon.png'), png);
-fs.writeFileSync(path.join(buildDir, 'icon.ico'), encodeIco(png, SIZE));
-fs.writeFileSync(path.join(buildDir, 'icon.icns'), icns);
-
-console.log(`Wrote ${path.join(buildDir, 'icon.png')}, ${path.join(buildDir, 'icon.ico')}, and ${path.join(buildDir, 'icon.icns')}`);
+// Only when run as a script, so encodeIco can be imported by its test.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+    await main();
+}

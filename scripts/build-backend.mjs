@@ -27,11 +27,10 @@ if (!fs.existsSync(venvPython)) {
     process.exit(1);
 }
 
-const check = spawnSync(venvPython, ['-m', 'PyInstaller', '--version']);
-if (check.status !== 0) {
-    console.log('PyInstaller not found in .venv, installing...');
-    run(venvPython, ['-m', 'pip', 'install', 'pyinstaller', 'pyinstaller-hooks-contrib']);
-}
+// Always (not only when PyInstaller is missing): installing the pinned
+// requirements-build.txt is a quick no-op when they're already there, and
+// brings an older/newer PyInstaller already in the venv to the pinned one.
+run(venvPython, ['-m', 'pip', 'install', '-r', path.join(projectRoot, 'requirements-build.txt')]);
 
 if (fs.existsSync(distDir)) {
     fs.rmSync(distDir, { recursive: true, force: true });

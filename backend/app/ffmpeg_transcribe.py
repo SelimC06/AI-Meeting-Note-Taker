@@ -113,5 +113,5 @@ def stop_recording_and_transcribe(
             scale_width=scale_width, image_ext=image_ext, quality=quality, max_frames=max_frames
         )
 
-    print(f"Transcript and frames saved")
+    print("Transcript and frames saved")
     return str(out_txt), frame_paths

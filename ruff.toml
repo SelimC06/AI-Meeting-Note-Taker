@@ -1,0 +1,11 @@
+# Python lint for the backend (CI: `ruff check`). Deliberately minimal:
+# pyflakes (F) catches real bugs -- undefined names, unused imports and
+# variables, redefinitions -- and E9 catches syntax errors. Style rules are
+# left out on purpose: the codebase has its own consistent style and
+# reformatting it wholesale would bury real changes.
+target-version = "py312"
+include = ["backend/**/*.py", "benchmarks/**/*.py"]
+extend-exclude = ["backend/app/uploads", "build", "backend-dist", "vendor", ".venv"]
+
+[lint]
+select = ["E9", "F"]

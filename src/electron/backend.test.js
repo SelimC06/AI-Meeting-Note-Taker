@@ -227,7 +227,7 @@ test('waitForHealth rejects within the deadline when the server accepts connecti
     // A server that accepts the TCP connection but never writes a response
     // reproduces the hang: without a per-attempt fetch timeout, the overall
     // deadline check (only reached after a fetch settles) would never fire.
-    const server = net.createServer((socket) => {
+    const server = net.createServer((_socket) => {
         // deliberately never write/end -- simulate a deadlocked backend
     });
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));

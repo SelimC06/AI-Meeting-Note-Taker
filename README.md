@@ -82,7 +82,24 @@ npm run setup:backend
 ```
 
 `npm run setup:backend` creates a `.venv` at the project root and installs
-`requirements.txt` into it. Re-run it any time `requirements.txt` changes.
+`requirements-dev.txt` into it: the pinned runtime dependencies from
+`requirements.txt` plus the test and lint tools (pytest, ruff). Re-run it any
+time a requirements file changes. Python dependencies are pinned to exact
+versions -- bump them deliberately, then run the tests and a packaging build.
+
+| File | What it's for |
+| --- | --- |
+| `requirements.txt` | What the backend needs at runtime (and what PyInstaller freezes). |
+| `requirements-dev.txt` | `requirements.txt` + pytest and ruff. Used by setup and CI. |
+| `requirements-build.txt` | PyInstaller (+ hooks), installed by `npm run build:backend`. |
+| `requirements-diarization.txt` | Optional torch + pyannote.audio 4.x for advanced diarization. |
+
+Backend tests and lint:
+
+```
+cd backend && ../.venv/bin/python -m pytest -q
+.venv/bin/ruff check .
+```
 
 Then:
 
@@ -163,7 +180,8 @@ its default: the host architecture. Don't pin one back in — hardcoding `arm64`
 previously meant an Intel machine produced an arm64 bundle wrapping an x86_64
 backend and arm64 ffmpeg, which could not run anywhere.
 
-The Python used for the build must be 3.9+ (`requirements.txt` needs it).
+The release build uses Python 3.12 (`.python-version`; CI uses the same).
+Anything older than 3.9 can't work at all (`requirements.txt` needs 3.9+).
 macOS's own `/usr/bin/python3` is 3.8 and answers to both `python` and
 `python3`; `npm run setup:backend` checks the version and refuses it rather
 than building a venv that every `pip install` then fails against. Install a
@@ -254,24 +272,62 @@ both must stay correct:
    the same version reaches nobody -- which is why the script refuses it.
 2. **Run the release** on the machine for the platform (and, on macOS, the
    architecture) you're shipping, with the R2 write credentials in the
-   environment -- never in `package.json` or a committed file:
+   environment -- never in `package.json` or a committed file.
+
+   Keep the keys in a file rather than typing them into the command line
+   (where they end up in your shell history). `.env*` files are gitignored;
+   create `.env.release` in the repo root with:
+
+   ```bash
+   AWS_ACCESS_KEY_ID=<r2 access key id>
+   AWS_SECRET_ACCESS_KEY=<r2 secret access key>
+   ```
+
+   **macOS / Linux** (bash or zsh):
 
    ```bash
    npm run release -- --check      # optional: just the checks, nothing built or uploaded
-   AWS_ACCESS_KEY_ID=<r2 access key id> AWS_SECRET_ACCESS_KEY=<r2 secret access key> npm run release
+   set -a; source .env.release; set +a
+   npm run release
    ```
 
+   **Windows** (PowerShell):
+
+   ```powershell
+   npm run release -- --check
+   Get-Content .env.release | ForEach-Object {
+     if ($_ -match '^\s*([^#=]+)=(.*)$') { Set-Item -Path "Env:$($matches[1].Trim())" -Value $matches[2].Trim() }
+   }
+   npm run release
+   ```
+
+   (Or, for a one-off: `$env:AWS_ACCESS_KEY_ID = "..."; $env:AWS_SECRET_ACCESS_KEY = "..."` -- note
+   PowerShell also keeps a history, in `(Get-PSReadLineOption).HistorySavePath`.)
+
    `npm run release` (`scripts/release.mjs`):
+   - **refuses** prerelease versions (`1.1.0-beta.1`): electron-builder would
+     publish them to `beta*.yml`, which nothing reads;
    - fetches the published manifest for this platform and **refuses** if
      `package.json`'s version is already published or older (`--force`
-     overrides, only to repair a broken upload of the same version);
+     overrides, only to repair a broken upload of the same version), or if
+     the manifest can't be read at all;
    - on macOS, **refuses** if the published `latest-mac.yml` lists another
      architecture's files (see below; `--force-arch` overrides);
-   - refuses if the R2 credentials aren't set;
+   - refuses if the R2 credentials aren't set, or if `UPDATE_FEED_URL` is
+     set (it only redirects the app -- releases always go to production);
    - then runs `npm run build`, `npm run build:backend`,
-     `npm run fetch:ffmpeg` and `electron-builder --publish always`;
+     `npm run fetch:ffmpeg` and `electron-builder --publish never` (build
+     only, no upload);
+   - uploads the installers and their `.blockmap`s with
+     `scripts/upload-r2.mjs`, in 10 MB parts that are each retried on their
+     own, and the manifest (`latest-mac.yml` / `latest.yml`) **last**, only
+     after every other file succeeded;
    - finally re-reads the published manifest and checks every file it
      lists is really there at full size.
+
+   Flags work with or without the `--`: `npm run release --check` (which
+   npm turns into an environment variable rather than passing on) is
+   honoured the same as `npm run release -- --check`.
 3. **Tag it** (the script prints the command):
 
    ```bash
@@ -286,13 +342,18 @@ both must stay correct:
 For a release on both platforms, run it once on Windows and once on the Mac,
 with the same version.
 
-**Big uploads on a flaky network.** The installers are ~240 MB. If an upload
-fails midway, electron-builder can still have uploaded (or later upload) the
-manifest, and a manifest pointing at a missing or truncated installer breaks
-both the updater and the website's download button. The installers must be
-completely uploaded *before* the manifest. The script's final check catches
-this: if it reports a missing or short file, fix the network and run
-`npm run release -- --force` to upload that same version again.
+**Big uploads on a flaky network.** The installers are ~240 MB, and
+electron-builder's own publisher sends each in a single request, which
+repeatedly failed on an unreliable connection ("SSL alert bad record mac",
+EPIPE). That's why the release script builds with `--publish never` and
+uploads itself, in 10 MB parts with per-part retries. The installers must be
+completely uploaded *before* the manifest: a manifest pointing at a missing
+or truncated installer breaks both the updater and the website's download
+button. The script guarantees that order and stops before the manifest if
+any file fails, so users keep getting the previous version. Fix the network
+and run `npm run release -- --force` to upload that same version again. A
+single file can also be re-uploaded by hand:
+`node scripts/upload-r2.mjs release/<file>` (same credentials).
 
 **One Mac architecture per manifest.** `latest-mac.yml` only lists the files
 of the architecture that published it, so publishing from an Apple Silicon
@@ -310,10 +371,10 @@ both sets of installers; the script doesn't do that.
 | `npm run dev:react` | Run the Vite dev server for the React frontend alone. |
 | `npm run dev:electron` | Launch the Electron app (auto-starts the backend). |
 | `npm run build` | Type-check and build the frontend. |
-| `npm run lint` | Run ESLint. |
-| `npm run test:main` | Run Electron main-process tests (`src/electron/*.test.js`). |
+| `npm run lint` | Run ESLint (TypeScript/React, and the Node `.js`/`.mjs` in `src/electron` and `scripts`). |
+| `npm run test:main` | Run Electron main-process and build/release-script tests (`src/electron/*.test.js`, `scripts/*.test.mjs`). |
 | `npm run test:ui` | Run frontend tests (Vitest). |
-| `npm run setup:backend` | Create/refresh the Python `.venv` from `requirements.txt`. |
+| `npm run setup:backend` | Create/refresh the Python `.venv` from `requirements-dev.txt` (runtime + test/lint tools). |
 | `npm run fetch:ffmpeg` | Download the ffmpeg/ffprobe binaries used by the backend. |
 | `npm run build:backend` | Freeze the Python backend with PyInstaller for packaging. |
 | `npm run dist` | Full build + package for this platform into `release/` (`build`, `build:backend`, `fetch:ffmpeg`, `electron-builder`). Never uploads. |

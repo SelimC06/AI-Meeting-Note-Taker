@@ -836,8 +836,6 @@ def test_process_survives_ollama_read_timeout_during_summarization(client, monke
     finish (falling back to the raw transcript) rather than the session
     being lost or the worker getting stuck.
     """
-    import sys
-    import types
 
     def fake_save_upload(dst_dir, uf, name):
         out = dst_dir / name
@@ -2934,7 +2932,7 @@ def test_delete_session_works_on_a_trashed_session(client: TestClient):
 
 
 def test_purge_expired_trash_wired_to_live_store(client: TestClient):
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     from app.sessions_store import append_session
 
     old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()

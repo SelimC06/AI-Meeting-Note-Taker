@@ -1,3 +1,18 @@
+// Cloudflare Workers config for `npm run deploy` / `npm run preview`, used via
+// the @cloudflare/vite-plugin in vite.config.ts.
+//
+// What this deploys: the Electron app's RENDERER -- the dashboard and rail
+// pages built into dist-react/ -- as a public static site on Cloudflare
+// (Worker "meeting-note-taker", single-page-app fallback). It is not the
+// marketing website and not the update bucket (updates.deskrecap.com), and
+// it can't actually work in a browser: the pages only talk to a backend on
+// 127.0.0.1 with a per-launch token the Electron main process supplies. What
+// it does do is make the app's full UI code publicly downloadable.
+//
+// Nothing in the release process depends on it. If it isn't wanted, remove
+// the "deploy"/"preview" scripts from package.json, cloudflare() from
+// vite.config.ts, and this file -- and delete the Worker in the Cloudflare
+// dashboard (removing these files doesn't take down what's already deployed).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "meeting-note-taker",

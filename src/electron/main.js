@@ -23,7 +23,7 @@ import {
 import { computeResizedBounds, isValidResizeDirection } from './resizeGeometry.js';
 import { sanitizeCaptureSourceTypes } from './captureSources.js';
 import { distReactPath } from './paths.js';
-import { shouldPromptBeforeClose, needsCloseGuard, hasActiveJob, runInstallShutdownSequence, beforeQuitStep, pendingUploadFromAck, runGuardedClose } from './closeGuard.js';
+import { needsCloseGuard, hasActiveJob, runInstallShutdownSequence, beforeQuitStep, pendingUploadFromAck, runGuardedClose } from './closeGuard.js';
 import { sanitizeRailStatus, isValidSlotRect, isValidRailCommand } from './railValidation.js';
 import { armProcessCrashLogging, logRendererCrash, logRendererError, safeAppendCrashLog, MAIN_CRASHES_LOG_MAX_BYTES } from './crashLog.js';
 import { hasSeenRecordingConsentNotice, markRecordingConsentNoticeSeen } from './consentStore.js';

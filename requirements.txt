@@ -1,8 +1,13 @@
-fastapi
-uvicorn[standard]
-python-multipart
-faster-whisper
-pillow
-ollama
-httpx
-pytest
+# Runtime dependencies of the backend (what PyInstaller freezes into the app).
+# Pinned to the versions the release build is made and tested with -- an
+# unpinned `pip install` let a new upstream release change what shipped
+# without any code change. Bump deliberately, then re-run the tests and a
+# packaging build. Test/lint tools are in requirements-dev.txt, build tools
+# in requirements-build.txt.
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+faster-whisper==1.2.1
+pillow==12.3.0
+ollama==0.6.3
+httpx==0.28.1
