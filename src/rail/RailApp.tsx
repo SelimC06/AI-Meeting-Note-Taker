@@ -25,6 +25,11 @@ const STAGE_LABELS: Record<string, string> = {
 // enough to read as live, a third of the raw ~60ms level cadence.
 export const RAIL_LEVEL_PUSH_INTERVAL_MS = 200;
 
+// The docked meter's own stream (rail:level): about the rate useMicLevel
+// produces samples at, so the dashboard meter moves as smoothly as the
+// rail's own. Only while a capture is live -- levels don't change otherwise.
+export const RAIL_LEVEL_STREAM_INTERVAL_MS = 60;
+
 export default function RailApp() {
     const { status, record, pause, resume, stop, error: recordError, micStream, systemStream } = useThreeTrackSegments();
     const { jobs, addJob, removeJob } = useProcessingJobs();
@@ -54,6 +59,12 @@ export default function RailApp() {
     // in the other window, and at the raw rate that was ~16 a second for as
     // long as a recording ran -- even while the dashboard was hidden.
     const pushedLevels = useThrottledValue(levels, RAIL_LEVEL_PUSH_INTERVAL_MS);
+    const streamedLevels = useThrottledValue(levels, RAIL_LEVEL_STREAM_INTERVAL_MS);
+    const captureLive = status === "recording" || status === "paused";
+    useEffect(() => {
+        if (!captureLive) return;
+        window.windowControls?.pushRailLevel?.(streamedLevels);
+    }, [streamedLevels, captureLive]);
 
     useEffect(() => {
         if (resultFlash === null) return;

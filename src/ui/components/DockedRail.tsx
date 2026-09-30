@@ -59,6 +59,39 @@ interface Props {
     collapsed?: boolean;
 }
 
+// How long a rail:level sample stays authoritative. The throttled status
+// push also carries (older) samples; while the live stream is flowing those
+// are ignored, or the meter would jump back to a 200ms-old reading five
+// times a second.
+export const LIVE_LEVEL_FRESH_MS = 500;
+
+// The docked meter, subscribed to the rail's live level stream itself
+// (rail:level, ~every 60ms while recording). Its own component so each
+// sample re-renders just these bars -- not the whole DockedRail, which is
+// what made driving it from the status push (throttled to 5/s for that
+// reason) look laggy.
+export function DockedLevelMeter({ statusLevel, active }: { statusLevel: number[]; active: boolean }) {
+    // null = no live sample in the last LIVE_LEVEL_FRESH_MS (stream stopped:
+    // not recording, rail floating, or the rail went away) -> fall back to
+    // the status push's samples.
+    const [liveLevel, setLiveLevel] = useState<number[] | null>(null);
+    useEffect(() => {
+        let staleTimer: ReturnType<typeof setTimeout> | null = null;
+        const unsubscribe = window.windowControls?.onRailLevel?.((level) => {
+            if (!Array.isArray(level)) return;
+            setLiveLevel(level);
+            if (staleTimer !== null) clearTimeout(staleTimer);
+            staleTimer = setTimeout(() => setLiveLevel(null), LIVE_LEVEL_FRESH_MS);
+        });
+        return () => {
+            if (staleTimer !== null) clearTimeout(staleTimer);
+            unsubscribe?.();
+        };
+    }, []);
+    const level = liveLevel ?? statusLevel;
+    return <LevelMeter levels={level.slice(-DOCKED_METER_SAMPLES)} active={active} />;
+}
+
 export default function DockedRail({ collapsed = false }: Props) {
     const [railStatus, setRailStatus] = useState<RailStatus | null>(null);
     const [isFloating, setIsFloating] = useState(false);
@@ -375,7 +408,7 @@ export default function DockedRail({ collapsed = false }: Props) {
                         className="font-mono text-[11px] tabular-nums text-phosphor"
                     >{elapsedLabel}</span>
 
-                    <LevelMeter levels={level.slice(-DOCKED_METER_SAMPLES)} active={isRecording} />
+                    <DockedLevelMeter statusLevel={level} active={isRecording} />
 
                     <div className="h-4 w-px flex-none bg-line" />
 

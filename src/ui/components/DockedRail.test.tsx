@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import DockedRail, { RAIL_SETTLE_TIMEOUT_MS } from "./DockedRail";
+import DockedRail, { DockedLevelMeter, LIVE_LEVEL_FRESH_MS, RAIL_SETTLE_TIMEOUT_MS } from "./DockedRail";
 
 afterEach(() => {
   cleanup();
@@ -463,4 +463,61 @@ it("keeps Stop enabled while an upload is in flight during a recording", () => {
   expect(screen.getByLabelText("Stop recording")).toBeEnabled();
   emitStatus({ ...IDLE_STATUS, status: "idle", isProcessing: true });
   expect(screen.getByLabelText("Start recording")).toBeDisabled();
+});
+
+// ---------- live level stream ----------
+
+function stubLevelStream() {
+  let levelCallback: ((level: number[]) => void) | undefined;
+  const onRailLevel = vi.fn((cb: (level: number[]) => void) => {
+    levelCallback = cb;
+    return () => {};
+  });
+  return { onRailLevel, emitLevel: (level: number[]) => act(() => levelCallback?.(level)) };
+}
+
+const barHeights = (container: HTMLElement) =>
+  Array.from(container.querySelectorAll('[aria-hidden="true"] > span')).map((el) => (el as HTMLElement).style.height);
+
+it("the docked meter follows the live level stream, not just the throttled status", () => {
+  const stream = stubLevelStream();
+  stubWindowControls({ onRailLevel: stream.onRailLevel });
+  const { container } = render(<DockedLevelMeter statusLevel={[0, 0, 0]} active />);
+  expect(barHeights(container)).toEqual(["15%", "15%", "15%"]);
+
+  stream.emitLevel([0.5, 0.8, 1]);
+
+  expect(barHeights(container)).toEqual(["50%", "80%", "100%"]);
+});
+
+it("falls back to the status push's samples once the stream stops", () => {
+  vi.useFakeTimers();
+  try {
+    const stream = stubLevelStream();
+    stubWindowControls({ onRailLevel: stream.onRailLevel });
+    const { container, rerender } = render(<DockedLevelMeter statusLevel={[0.2]} active />);
+    stream.emitLevel([0.9]);
+    // A (throttled, older) status push while the stream is live is ignored.
+    rerender(<DockedLevelMeter statusLevel={[0.3]} active />);
+    expect(barHeights(container)).toEqual(["90%"]);
+
+    act(() => {
+      vi.advanceTimersByTime(LIVE_LEVEL_FRESH_MS);
+    });
+
+    expect(barHeights(container)).toEqual(["30%"]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("DockedRail renders its meter from the live stream", () => {
+  const stream = stubLevelStream();
+  const { emitStatus } = stubWindowControls({ onRailLevel: stream.onRailLevel });
+  const { container } = render(<DockedRail />);
+  emitStatus({ ...IDLE_STATUS, status: "recording", level: [0, 0] });
+
+  stream.emitLevel([0.4, 0.6]);
+
+  expect(barHeights(container)).toEqual(["40%", "60%"]);
 });

@@ -99,3 +99,20 @@ test('isValidRailCommand allows only what the dashboard may send', () => {
         assert.equal(isValidRailCommand(action), false, String(action));
     }
 });
+
+test('sanitizeRailLevel keeps finite samples, clamps them to 0..1 and caps their number', async () => {
+    const { sanitizeRailLevel, RAIL_LEVEL_MAX_SAMPLES } = await import('./railValidation.js');
+    assert.deepEqual(sanitizeRailLevel([0.2, -1, 3, NaN, 'x', 0.5]), [0.2, 0, 1, 0.5]);
+    assert.equal(sanitizeRailLevel(Array(500).fill(0.1)).length, RAIL_LEVEL_MAX_SAMPLES);
+    assert.equal(sanitizeRailLevel('nope'), null);
+    assert.equal(sanitizeRailLevel(null), null);
+});
+
+test('rail levels are forwarded only while the rail is docked and the dashboard is on screen', async () => {
+    const { shouldForwardRailLevel } = await import('./railValidation.js');
+    assert.equal(shouldForwardRailLevel({ railVisible: false, dashboardVisible: true, dashboardMinimized: false }), true);
+    // Floating rail draws its own meter; hidden/minimized dashboard shows none.
+    assert.equal(shouldForwardRailLevel({ railVisible: true, dashboardVisible: true, dashboardMinimized: false }), false);
+    assert.equal(shouldForwardRailLevel({ railVisible: false, dashboardVisible: false, dashboardMinimized: false }), false);
+    assert.equal(shouldForwardRailLevel({ railVisible: false, dashboardVisible: true, dashboardMinimized: true }), false);
+});

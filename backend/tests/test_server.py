@@ -167,9 +167,9 @@ def test_max_upload_mb_is_configurable_via_env(tmp_path, monkeypatch):
         importlib.reload(server_module)
 
 
-def test_health_survives_a_purge_expired_trash_failure_at_import_time(tmp_path, monkeypatch):
+def test_health_survives_a_purge_expired_trash_failure_at_startup(tmp_path, monkeypatch):
     """Regression test for Fix 3D: purge_expired_trash(STORE) used to run
-    bare at module import -- one unexpected failure (e.g. a legacy naive
+    bare at startup -- one unexpected failure (e.g. a legacy naive
     trashed_at slipping past the guard) crashed the whole backend on every
     startup until the index was repaired by hand. It must be caught and
     logged instead of preventing boot.
@@ -189,6 +189,7 @@ def test_health_survives_a_purge_expired_trash_failure_at_import_time(tmp_path, 
 
     try:
         reloaded = importlib.reload(server_module)
+        reloaded.run_startup_maintenance()  # must not raise
         client = TestClient(
             reloaded.app,
             base_url="http://127.0.0.1",
@@ -214,10 +215,45 @@ def test_main_binds_to_localhost_only(monkeypatch):
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr(server_module.uvicorn, "run", fake_run)
+    # main() runs the startup maintenance first -- not against this dev
+    # machine's real store.
+    monkeypatch.setattr(server_module, "run_startup_maintenance", lambda: None)
     server_module.main()
 
     assert captured["app"] is server_module.app
     assert captured["kwargs"]["host"] == "127.0.0.1"
+
+
+def test_main_runs_startup_maintenance_once_before_serving(monkeypatch):
+    order = []
+    monkeypatch.setattr(server_module, "run_startup_maintenance", lambda: order.append("maintenance"))
+    monkeypatch.setattr(server_module.uvicorn, "run", lambda *a, **k: order.append("serve"))
+
+    server_module.main()
+
+    assert order == ["maintenance", "serve"]
+
+
+def test_importing_the_server_runs_no_startup_maintenance(tmp_path, monkeypatch):
+    """Every Python helper process of the frozen backend can end up importing
+    app.server; importing it must never sweep, purge or delete anything."""
+    import importlib
+    import app.sessions_store as sessions_store_module
+
+    app_data = tmp_path / "app-data"
+    app_data.mkdir()
+    monkeypatch.setenv("APP_DATA_DIR", str(app_data))
+    calls = []
+    for name in ("purge_expired_trash", "sweep_orphaned_sessions", "sweep_stale_staging_dirs", "sweep_stale_partial_mux_files"):
+        monkeypatch.setattr(sessions_store_module, name, lambda store, _n=name: calls.append(_n))
+    try:
+        reloaded = importlib.reload(server_module)
+        assert calls == []
+        reloaded.run_startup_maintenance()
+        assert calls == ["purge_expired_trash", "sweep_orphaned_sessions", "sweep_stale_staging_dirs", "sweep_stale_partial_mux_files"]
+    finally:
+        monkeypatch.undo()
+        importlib.reload(server_module)
 
 
 def test_run_decodes_subprocess_output_as_utf8(monkeypatch):
@@ -2953,7 +2989,9 @@ def test_sweep_orphaned_sessions_wired_to_live_store(client: TestClient):
     orphan_dir.mkdir()
     (orphan_dir / "final.webm").write_bytes(b"video bytes")
 
-    result = server_module.sweep_orphaned_sessions(server_module.STORE)
+    # min_age_seconds=0: the folder was created a moment ago, which the real
+    # sweep deliberately leaves alone (a recording could be in progress).
+    result = server_module.sweep_orphaned_sessions(server_module.STORE, min_age_seconds=0)
 
     assert result == {"adopted": [orphan_id], "deleted": []}
     matching = [s for s in server_module.load_sessions(server_module.STORE) if s["id"] == orphan_id]
@@ -4262,6 +4300,8 @@ def test_startup_with_corrupt_settings_reports_it_and_guards_the_sweeps(tmp_path
         # Damaged file kept in place (and copied aside), not overwritten.
         assert (app_data / "settings.json").read_text(encoding="utf-8") == damaged
         assert len(list(app_data.glob("settings.corrupt-*.json"))) == 1
+        assert swept == []  # nothing runs at import
+        reloaded.run_startup_maintenance()
         if salvageable:
             assert reloaded.STORE == custom
             assert swept == [("purge", custom), ("sweep", custom)]

@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -15,6 +16,14 @@ from app.sessions_store import (
     sweep_stale_partial_mux_files,
     SessionsIndexCorruptError,
 )
+
+
+@pytest.fixture(autouse=True)
+def _orphans_count_immediately(monkeypatch):
+    # The sweep leaves folders touched in the last ORPHAN_MIN_AGE_SECONDS
+    # alone (a recording in progress); these tests' folders are seconds old.
+    # The tests of that guard itself set it back explicitly.
+    monkeypatch.setattr(sessions_store, "ORPHAN_MIN_AGE_SECONDS", 0)
 
 
 def test_extract_title_plain_heading():
@@ -1479,3 +1488,134 @@ def test_recover_repairs_an_index_with_a_malformed_record(tmp_path: Path):
 
     assert result["source"] == "backup"
     assert [r["title"] for r in load_sessions(tmp_path)] == ["Kept"]
+
+
+# ---------- a folder being written right now is not an orphan ----------
+
+def _age(path: Path, seconds: float) -> None:
+    then = time.time() - seconds
+    for p in [path, *path.rglob("*")]:
+        os.utime(p, (then, then))
+
+
+def test_sweep_never_adopts_a_folder_that_was_just_written(tmp_path: Path, monkeypatch):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    monkeypatch.setattr(sessions_store, "ORPHAN_MIN_AGE_SECONDS", 600)
+    live = tmp_path / ORPHAN_ID
+    live.mkdir()
+    (live / "screen.webm").write_bytes(b"still being uploaded")
+
+    assert sweep_orphaned_sessions(tmp_path) == {"adopted": [], "deleted": []}
+    assert load_sessions(tmp_path) == []
+    assert (live / "screen.webm").exists()
+
+
+def test_sweep_never_deletes_a_fresh_folder_without_recording_data_yet(tmp_path: Path, monkeypatch):
+    """/process makes the folder before any file lands in it."""
+    from app.sessions_store import sweep_orphaned_sessions
+
+    monkeypatch.setattr(sessions_store, "ORPHAN_MIN_AGE_SECONDS", 600)
+    fresh = tmp_path / ORPHAN_ID
+    fresh.mkdir()
+
+    assert sweep_orphaned_sessions(tmp_path) == {"adopted": [], "deleted": []}
+    assert fresh.is_dir()
+
+
+def test_a_recently_modified_file_inside_an_old_folder_counts_as_in_use(tmp_path: Path, monkeypatch):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    monkeypatch.setattr(sessions_store, "ORPHAN_MIN_AGE_SECONDS", 600)
+    folder = tmp_path / ORPHAN_ID
+    folder.mkdir()
+    (folder / "screen.webm").write_bytes(b"x")
+    _age(folder, 3600)
+    (folder / "mic.webm").write_bytes(b"y")  # being written now
+    os.utime(folder, (time.time() - 3600, time.time() - 3600))
+
+    assert sweep_orphaned_sessions(tmp_path)["adopted"] == []
+
+
+def test_sweep_adopts_and_deletes_folders_once_they_are_old_enough(tmp_path: Path, monkeypatch):
+    from app.sessions_store import sweep_orphaned_sessions
+
+    monkeypatch.setattr(sessions_store, "ORPHAN_MIN_AGE_SECONDS", 600)
+    with_data = tmp_path / ORPHAN_ID
+    with_data.mkdir()
+    (with_data / "final.webm").write_bytes(b"v")
+    empty = tmp_path / ("f" * 32)
+    empty.mkdir()
+    _age(with_data, 3600)
+    _age(empty, 3600)
+
+    result = sweep_orphaned_sessions(tmp_path)
+
+    assert result == {"adopted": [ORPHAN_ID], "deleted": ["f" * 32]}
+
+
+# ---------- never two records with one id ----------
+
+def _placeholder(sid, **fields):
+    return _rec(sid, title="Recovered recording (2026-09-30)", status="recovered", **fields)
+
+
+def test_the_real_record_replaces_a_recovered_placeholder(tmp_path: Path):
+    append_session(tmp_path, _placeholder(A_ID))
+    append_session(tmp_path, _rec(A_ID, title="Weekly sync", status="done"))
+
+    records = load_sessions(tmp_path)
+    assert len(records) == 1
+    assert records[0]["title"] == "Weekly sync" and records[0]["status"] == "done"
+
+
+def test_replacing_a_trashed_placeholder_keeps_it_in_the_trash(tmp_path: Path):
+    append_session(tmp_path, _placeholder(A_ID, trashed_at="2026-09-30T10:00:00+00:00"))
+    append_session(tmp_path, _rec(A_ID, status="done"))
+    assert load_sessions(tmp_path)[0]["trashed_at"] == "2026-09-30T10:00:00+00:00"
+
+
+def test_a_second_record_for_an_indexed_id_is_ignored(tmp_path: Path):
+    append_session(tmp_path, _rec(A_ID, title="Real", status="done"))
+    append_session(tmp_path, _placeholder(A_ID))
+    append_session(tmp_path, _rec(A_ID, title="Again", status="failed"))
+
+    records = load_sessions(tmp_path)
+    assert [(r["title"], r["status"]) for r in records] == [("Real", "done")]
+
+
+def test_an_index_that_already_has_a_duplicate_heals_on_load(tmp_path: Path):
+    (tmp_path / "sessions_index.json").write_text(json.dumps([
+        _placeholder(A_ID),
+        _rec(B_ID),
+        _rec(A_ID, title="Board review", status="done"),
+    ]), encoding="utf-8")
+
+    records = load_sessions(tmp_path)
+
+    assert [r["id"] for r in records] == [A_ID, B_ID]
+    assert records[0]["title"] == "Board review"
+    on_disk = json.loads((tmp_path / "sessions_index.json").read_text(encoding="utf-8"))
+    assert [r["id"] for r in on_disk] == [A_ID, B_ID]
+
+
+def test_delete_trash_and_restore_act_on_the_single_healed_record(tmp_path: Path):
+    (tmp_path / "sessions_index.json").write_text(json.dumps([
+        _rec(A_ID, status="done"), _placeholder(A_ID),
+    ]), encoding="utf-8")
+
+    assert update_session_fields(tmp_path, A_ID, trashed_at="2026-09-30T00:00:00+00:00") is True
+    assert [r["trashed_at"] for r in load_sessions(tmp_path)] == ["2026-09-30T00:00:00+00:00"]
+    assert sessions_store.remove_session_permanently(tmp_path, A_ID) is True
+    assert load_sessions(tmp_path) == []
+
+
+def test_recover_collapses_duplicates_in_the_backup(tmp_path: Path):
+    (tmp_path / sessions_store.SESSIONS_BACKUP_FILENAME).write_text(json.dumps([
+        _placeholder(A_ID), _rec(A_ID, title="Real", status="done"),
+    ]), encoding="utf-8")
+    (tmp_path / "sessions_index.json").write_text("garbage", encoding="utf-8")
+
+    sessions_store.recover_sessions_index(tmp_path)
+
+    assert [(r["id"], r["title"]) for r in load_sessions(tmp_path)] == [(A_ID, "Real")]

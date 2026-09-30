@@ -39,6 +39,14 @@ contextBridge.exposeInMainWorld('windowControls', {
   },
 
   pushRailStatus: (status) => ipcRenderer.invoke('rail:pushStatus', status),
+  // Live level-meter samples, separate from (and much more frequent than)
+  // the throttled status push -- fire-and-forget, see main.js rail:level.
+  pushRailLevel: (level) => ipcRenderer.send('rail:level', level),
+  onRailLevel: (callback) => {
+    const listener = (_event, level) => callback(level);
+    ipcRenderer.on('rail:level', listener);
+    return () => ipcRenderer.removeListener('rail:level', listener);
+  },
   // { hasPendingUpload } rides along with the ack -- main.js trusts it over
   // its cached rail:pushStatus copy, which lags a re-render behind.
   notifyStopAndSaveComplete: (payload) => ipcRenderer.send('rail:stopAndSaveComplete', payload),

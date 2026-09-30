@@ -414,26 +414,43 @@ if SETTINGS_ERROR:
     print(f"[server] {SETTINGS_ERROR}", flush=True)
 STORE = Path(_settings["storage_dir"])
 STORE.mkdir(parents=True, exist_ok=True)
-if not STORE_UNTRUSTED:
+
+
+def run_startup_maintenance() -> None:
+    """The once-per-server-start cleanup: expired trash, orphaned session
+    folders, and leftover staging dirs / partial muxes / export zips.
+
+    Called from main(), NOT at import. Importing this module used to run all
+    of it -- and every Python helper process of the frozen backend imported
+    it (see run_server.py), so the orphan sweep ran again mid-recording and
+    adopted (or deleted) the session folder a live /process was writing.
+    Importing app.server now only sets things up; nothing destructive runs
+    until a real server actually starts.
+    """
+    if not STORE_UNTRUSTED:
+        try:
+            purge_expired_trash(STORE)
+        except Exception as e:
+            print(f"[server] startup trash purge failed (continuing): {e}", flush=True)
+        try:
+            sweep_orphaned_sessions(STORE)
+        except Exception as e:
+            print(f"[server] startup orphan sweep failed (continuing): {e}", flush=True)
+    # Independent of the sessions index entirely -- runs regardless of whether
+    # the sweep above skipped due to a corrupt index.
     try:
-        purge_expired_trash(STORE)
+        sweep_stale_staging_dirs(STORE)
     except Exception as e:
-        print(f"[server] startup trash purge failed (continuing): {e}", flush=True)
+        print(f"[server] startup staging sweep failed (continuing): {e}", flush=True)
     try:
-        sweep_orphaned_sessions(STORE)
+        sweep_stale_partial_mux_files(STORE)
     except Exception as e:
-        print(f"[server] startup orphan sweep failed (continuing): {e}", flush=True)
-# Independent of the sessions index entirely -- runs regardless of whether
-# the sweep above skipped due to a corrupt index.
-try:
-    sweep_stale_staging_dirs(STORE)
-except Exception as e:
-    print(f"[server] startup staging sweep failed (continuing): {e}", flush=True)
-try:
-    sweep_stale_partial_mux_files(STORE)
-except Exception as e:
-    print(f"[server] startup partial-mux sweep failed (continuing): {e}", flush=True)
-_sweep_stale_export_zips(store_dir=STORE)
+        print(f"[server] startup partial-mux sweep failed (continuing): {e}", flush=True)
+    try:
+        _sweep_stale_export_zips(store_dir=STORE)
+    except Exception as e:
+        print(f"[server] startup export-zip sweep failed (continuing): {e}", flush=True)
+
 WHISPER_MODEL = _settings["whisper_model"]
 OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
 CUSTOM_VOCABULARY = _settings["custom_vocabulary"]
@@ -2097,6 +2114,7 @@ def export_session_zip(session_id: str):
 
 
 def main() -> None:
+    run_startup_maintenance()
     uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("PORT", "8000")))
 
 

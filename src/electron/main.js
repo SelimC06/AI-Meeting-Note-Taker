@@ -24,7 +24,7 @@ import { computeResizedBounds, isValidResizeDirection } from './resizeGeometry.j
 import { sanitizeCaptureSourceTypes } from './captureSources.js';
 import { distReactPath } from './paths.js';
 import { needsCloseGuard, hasActiveJob, runInstallShutdownSequence, beforeQuitStep, pendingUploadFromAck, runGuardedClose } from './closeGuard.js';
-import { sanitizeRailStatus, isValidSlotRect, isValidRailCommand } from './railValidation.js';
+import { sanitizeRailStatus, isValidSlotRect, isValidRailCommand, sanitizeRailLevel, shouldForwardRailLevel } from './railValidation.js';
 import { armProcessCrashLogging, logRendererCrash, logRendererError, safeAppendCrashLog, MAIN_CRASHES_LOG_MAX_BYTES } from './crashLog.js';
 import { hasSeenRecordingConsentNotice, markRecordingConsentNoticeSeen } from './consentStore.js';
 import { buildAppMenuTemplate, isZoomShortcut } from './appMenu.js';
@@ -611,6 +611,22 @@ ipcHandle('rail:pushStatus', (_event, status) => {
     lastRailHasPendingUpload = sanitized.hasPendingUpload;
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('rail:status', sanitized);
+});
+
+// Live level-meter samples from the rail (~every 60ms while recording),
+// forwarded to the dashboard's docked meter only while it's on screen -- see
+// sanitizeRailLevel/shouldForwardRailLevel. Fire-and-forget both ways (no
+// invoke round trip), and only accepted from the rail's own page.
+ipcOn('rail:level', (event, level) => {
+    if (!railWindow || railWindow.isDestroyed() || event.sender !== railWindow.webContents) return;
+    const sanitized = sanitizeRailLevel(level);
+    if (!sanitized || !mainWindow || mainWindow.isDestroyed()) return;
+    const forward = shouldForwardRailLevel({
+        railVisible: railWindow.isVisible(),
+        dashboardVisible: mainWindow.isVisible(),
+        dashboardMinimized: mainWindow.isMinimized(),
+    });
+    if (forward) mainWindow.webContents.send('rail:level', sanitized);
 });
 
 // Pull side of the same pull+push handshake used for backend:status (see

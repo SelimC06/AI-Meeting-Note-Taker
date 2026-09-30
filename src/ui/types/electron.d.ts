@@ -98,6 +98,11 @@ declare global {
       sendRailCommand: (action: RailCommandAction) => Promise<void>;
       onRailCommand: (callback: (action: RailCommandAction) => void) => () => void;
       pushRailStatus: (status: RailStatus) => Promise<void>;
+      // Live level-meter samples (~every 60ms while recording), apart from
+      // the throttled status push; the dashboard only receives them while
+      // the rail is docked and the dashboard is visible.
+      pushRailLevel: (level: number[]) => void;
+      onRailLevel: (callback: (level: number[]) => void) => () => void;
       // Acks a stop the main process itself triggered (the close/quit
       // "Stop && Save" dialog) once the upload handoff (or the
       // empty-recording no-op) has finished — see main.js's

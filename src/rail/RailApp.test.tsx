@@ -1383,3 +1383,18 @@ it("pushes the error kind along with the message, so the docked pill can offer a
     )
   );
 });
+
+it("streams level samples on their own channel while recording, and not while idle", async () => {
+  const pushRailLevel = vi.fn();
+  vi.stubGlobal("windowControls", { pushRailStatus: vi.fn(), pushRailLevel, onRailCommand: vi.fn(() => () => {}) });
+
+  mockHook({ status: "idle" });
+  const { rerender } = render(<RailApp />);
+  await act(() => Promise.resolve());
+  expect(pushRailLevel).not.toHaveBeenCalled();
+
+  mockHook({ status: "recording" });
+  rerender(<RailApp />);
+  await waitFor(() => expect(pushRailLevel).toHaveBeenCalled());
+  expect(Array.isArray(pushRailLevel.mock.calls[0][0])).toBe(true);
+});

@@ -92,6 +92,33 @@ def _index_exists_but_is_corrupt(store_dir: Path) -> bool:
     return False
 
 
+def _record_rank(record: dict) -> int:
+    """Which of two records with the same id to keep: anything real beats a
+    "recovered" placeholder the orphan sweep made for the same folder."""
+    return 0 if record.get("status") == "recovered" else 1
+
+
+def _collapse_duplicate_ids(records: List[dict]) -> List[dict]:
+    """One record per id, in the original order. Keeps the best-ranked
+    record (see _record_rank; the first one on a tie). Libraries that already
+    picked up a duplicate -- a "Recovered recording" twin of a real meeting,
+    from the sweep running mid-recording -- heal on the next load."""
+    best: Dict[str, dict] = {}
+    for record in records:
+        current = best.get(record["id"])
+        if current is None or _record_rank(record) > _record_rank(current):
+            best[record["id"]] = record
+    seen = set()
+    collapsed = []
+    for record in records:
+        rid = record["id"]
+        if rid in seen:
+            continue
+        seen.add(rid)
+        collapsed.append(best[rid])
+    return collapsed
+
+
 def _is_valid_record(record) -> bool:
     return isinstance(record, dict) and isinstance(record.get("id"), str) and bool(record["id"])
 
@@ -134,6 +161,14 @@ def load_sessions(store_dir: Path) -> List[dict]:
         if not isinstance(data, list) or not all(_is_valid_record(r) for r in data):
             _index_cache.pop(key, None)
             raise SessionsIndexCorruptError(path, preserve_corrupt_copy(path))
+
+        collapsed = _collapse_duplicate_ids(data)
+        if len(collapsed) != len(data):
+            # Heal it on disk once (this also refreshes the cache), so every
+            # endpoint sees -- and delete/rename act on -- a single record.
+            print(f"[sessions_store] collapsed {len(data) - len(collapsed)} duplicate session record(s) in {path}", flush=True)
+            _write_sessions_atomic(store_dir, collapsed)
+            return [dict(r) for r in collapsed]
 
         _index_cache[key] = (mtime_ns, data)
         return [dict(r) for r in data]
@@ -194,10 +229,30 @@ def append_session(store_dir: Path, record: dict) -> None:
     callers within this process can't both read the same list before either
     writes, which would otherwise silently drop one of the two appended
     records.
+
+    Never creates a second record with an id already in the index (a
+    duplicate made delete/rename act on only one of the two):
+    - if the existing one is a "recovered" placeholder the orphan sweep made
+      for this same folder, the new (real) record replaces it -- keeping the
+      placeholder's trashed_at, in case the user already trashed it;
+    - otherwise the existing record is kept and this call is a logged no-op.
+      Not an exception: the caller (a finished /process job) would treat it
+      as a failure and try to append yet another, "failed" record, while the
+      record already there points at the very same folder.
     """
     with _APPEND_LOCK:
         sessions = load_sessions(store_dir)
-        sessions.append(record)
+        existing = next((r for r in sessions if r.get("id") == record.get("id")), None)
+        if existing is not None:
+            if _record_rank(existing) >= _record_rank(record):
+                print(f"[sessions_store] session {record.get('id')} is already indexed; keeping the existing record", flush=True)
+                return
+            replacement = dict(record)
+            if existing.get("trashed_at"):
+                replacement["trashed_at"] = existing["trashed_at"]
+            sessions = [replacement if r.get("id") == record.get("id") else r for r in sessions]
+        else:
+            sessions.append(record)
         _write_sessions_atomic(store_dir, sessions)
 
 
@@ -210,11 +265,12 @@ def update_session_fields(store_dir: Path, session_id: str, **fields) -> bool:
     with _APPEND_LOCK:
         sessions = load_sessions(store_dir)
         found = False
+        # Every record with this id (load_sessions collapses duplicates, but
+        # an update must never leave a second copy stale either).
         for record in sessions:
             if record.get("id") == session_id:
                 record.update(fields)
                 found = True
-                break
         if not found:
             return False
         _write_sessions_atomic(store_dir, sessions)
@@ -456,7 +512,28 @@ def _adopt_orphan_session(store_dir: Path, session_dir: Path) -> dict:
     return record
 
 
-def sweep_orphaned_sessions(store_dir: Path) -> dict:
+# A session folder with anything modified this recently is treated as in
+# use, not orphaned: /process creates the folder and then spends minutes
+# writing into it before the job indexes it. The sweep must never adopt or
+# delete a folder mid-recording -- that's exactly what produced "Recovered
+# recording" duplicates (and could delete a recording being uploaded) when a
+# second process ran the sweep during a job.
+ORPHAN_MIN_AGE_SECONDS = 10 * 60
+
+
+def _newest_mtime(folder: Path) -> float:
+    """Latest mtime of the folder or anything inside it (a folder's own mtime
+    doesn't change when an existing file inside it is being appended to)."""
+    newest = folder.stat().st_mtime
+    for path in folder.rglob("*"):
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
+def sweep_orphaned_sessions(store_dir: Path, min_age_seconds: Optional[float] = None) -> dict:
     """Reconciles session-shaped directories on disk with the index, meant
     to run once at backend startup (alongside purge_expired_trash).
 
@@ -491,6 +568,8 @@ def sweep_orphaned_sessions(store_dir: Path) -> dict:
     until recover_sessions_index resolves it.
     """
     result: dict = {"adopted": [], "deleted": []}
+    if min_age_seconds is None:
+        min_age_seconds = ORPHAN_MIN_AGE_SECONDS
     if not store_dir.exists():
         return result
     if _index_exists_but_is_corrupt(store_dir):
@@ -518,6 +597,11 @@ def sweep_orphaned_sessions(store_dir: Path) -> dict:
                     _write_tombstone(entry)
                 else:
                     result["deleted"].append(entry.name)
+                continue
+            # Tombstoned folders (above) are exempt: nothing writes to a
+            # folder the user already deleted, so retrying its removal is
+            # always safe.
+            if time.time() - _newest_mtime(entry) < min_age_seconds:
                 continue
             if _has_recording_data(entry):
                 record = _adopt_orphan_session(store_dir, entry)
@@ -568,11 +652,15 @@ def recover_sessions_index(store_dir: Path) -> dict:
         if isinstance(backup, list) and all(isinstance(r, dict) and r.get("id") for r in backup):
             # Skip anything tombstoned since the backup was written (a
             # permanent delete whose index write is exactly what got lost).
-            records = [r for r in backup if not _is_tombstoned(store_dir / r["id"])]
+            records = _collapse_duplicate_ids([r for r in backup if not _is_tombstoned(store_dir / r["id"])])
             source = "backup"
         _write_sessions_atomic(store_dir, records)
 
-    swept = sweep_orphaned_sessions(store_dir)
+    # No recency guard here: recovery holds server.py's _store_state_lock and
+    # is refused while an upload or job is active, so nothing can be writing
+    # a session folder -- and a meeting recorded minutes ago whose index
+    # record was lost must still come back.
+    swept = sweep_orphaned_sessions(store_dir, min_age_seconds=0)
     return {
         "source": source,
         "restored": len(records),

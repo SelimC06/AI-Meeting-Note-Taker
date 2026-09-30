@@ -63,3 +63,25 @@ export function isValidSlotRect(rect) {
         height > 0
     );
 }
+
+// rail:level -- the live level-meter samples, streamed separately from
+// rail:pushStatus so the status push can stay throttled (see RailApp.tsx):
+// the dashboard's docked meter drawing from the throttled status updated
+// only ~5 times a second and looked laggy. More samples than any meter
+// draws are dropped; each sample is clamped to 0..1.
+export const RAIL_LEVEL_MAX_SAMPLES = 64;
+
+export function sanitizeRailLevel(payload) {
+    if (!Array.isArray(payload)) return null;
+    return payload
+        .slice(-RAIL_LEVEL_MAX_SAMPLES)
+        .filter((n) => typeof n === 'number' && Number.isFinite(n))
+        .map((n) => Math.min(1, Math.max(0, n)));
+}
+
+// Only worth an IPC hop to the dashboard while someone can see the docked
+// meter: the rail docked (its own window hidden -- when it floats it draws
+// its own meter) and the dashboard visible and not minimized.
+export function shouldForwardRailLevel({ railVisible, dashboardVisible, dashboardMinimized }) {
+    return !railVisible && dashboardVisible && !dashboardMinimized;
+}
