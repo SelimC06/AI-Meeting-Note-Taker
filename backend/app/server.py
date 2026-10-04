@@ -73,6 +73,7 @@ from .whisper_cache import get_whisper_model, transcribe_audio
 from . import jobs
 from . import llm_provider
 from . import builtin_llm
+from . import speaker_id
 
 try:
     from .ffmpeg_transcribe import stop_recording_and_transcribe, transcribe_wav  # type: ignore
@@ -363,6 +364,9 @@ SETTINGS_PATH = ROOT / "settings.json"
 # download or process start happens at import (same rule as
 # run_startup_maintenance above: helper processes import this module too).
 builtin_llm.configure(ROOT / "models")
+# Voice profiles live next to settings.json too (device-level, not inside
+# the recordings folder): a storage move must never relocate or lose them.
+speaker_id.configure(ROOT)
 
 # export_session_zip below builds its temp zip with this prefix,
 # distinguishing it from anything else that might live alongside it so
@@ -1499,6 +1503,33 @@ def _raw_transcript_notes_body(transcript: str) -> str:
     )
 
 
+def _identify_and_name_speakers(session: Path, wav_path: Optional[Path], segments: List[dict]) -> None:
+    """Tier 2.1 finishing pass, best-effort by contract: persist one
+    centroid embedding per diarized speaker (speaker_embeddings.json --
+    the material PATCH /speaker-names turns into a voice profile), then
+    pre-name any speaker whose voice matches a saved profile, so someone
+    named once is named automatically in every later meeting. Never
+    raises, and never overwrites a name the user already set."""
+    if wav_path is None or not speaker_id.available():
+        return
+    try:
+        centroids = speaker_id.centroids_for_labeled_segments(wav_path, segments)
+        if not centroids:
+            return
+        speaker_id.write_session_embeddings(session, centroids)
+        existing = load_speaker_names(session)
+        matches = {
+            label: name
+            for label, name in speaker_id.match_profiles(centroids).items()
+            if label not in existing
+        }
+        if matches:
+            write_speaker_names(session, matches)
+            log(f"voice profiles recognized: {matches}")
+    except Exception as e:
+        log(f"speaker identity pass failed (continuing): {e}")
+
+
 def _run_process_job(job_id: str) -> None:
     inputs = jobs.get_job_inputs(job_id)
     if inputs is None:
@@ -1691,6 +1722,24 @@ def _run_process_job(job_id: str) -> None:
                         )
                     except Exception as e:
                         log(f"pyannote diarization failed, keeping You/Others split: {e}")
+                elif speaker_id.available():
+                    # Default, zero-setup refinement (Tier 2.1): cluster the
+                    # "Others" segments by voice (ONNX embeddings over the
+                    # spans Whisper already found on the system track) into
+                    # SPEAKER_00/01/... -- no torch, no token. Same
+                    # best-effort contract as the pyannote branch above.
+                    try:
+                        others = [s for s in transcript_segments if s["speaker"] == "Others"]
+                        labels, _ = speaker_id.diarize_segments(system_wav, others)
+                        for seg, label in zip(others, labels):
+                            if label is not None:
+                                seg["speaker"] = label
+                    except Exception as e:
+                        log(f"speaker identification failed, keeping You/Others split: {e}")
+
+                # Store voice centroids + auto-name speakers that match a
+                # saved profile (whichever refinement above labeled them).
+                _identify_and_name_speakers(session, system_wav, transcript_segments)
 
                 merged_txt = session / "transcript_.txt"
                 merged_txt.write_text(
@@ -1728,6 +1777,7 @@ def _run_process_job(job_id: str) -> None:
                     diarized = align_speaker_turns(solo_segments, turns)
                     if diarized:
                         write_transcript_segments(session, diarized)
+                        _identify_and_name_speakers(session, single_wav, diarized)
                 except Exception as e:
                     log(f"single-track pyannote diarization failed, skipping: {e}")
 
@@ -1762,9 +1812,24 @@ def _run_process_job(job_id: str) -> None:
                     initial_prompt=custom_vocabulary.strip() or None,
                     language=whisper_language,
                 )
-                single_segments = [{**seg, "speaker": single_speaker} for seg in single_segments]
+                if single_speaker is None and speaker_id.available():
+                    # No track provenance to lean on (an import, or a mix of
+                    # both tracks): cluster by voice instead of leaving every
+                    # segment unattributed. Best-effort -- on any failure the
+                    # segments keep speaker=None exactly as before.
+                    try:
+                        labels, _ = speaker_id.diarize_segments(mixed_wav, single_segments)
+                        single_segments = [
+                            {**seg, "speaker": label} for seg, label in zip(single_segments, labels)
+                        ]
+                    except Exception as e:
+                        log(f"speaker identification failed, keeping unattributed segments: {e}")
+                        single_segments = [{**seg, "speaker": None} for seg in single_segments]
+                else:
+                    single_segments = [{**seg, "speaker": single_speaker} for seg in single_segments]
                 if single_segments:
                     write_transcript_segments(session, single_segments)
+                    _identify_and_name_speakers(session, mixed_wav, single_segments)
                 single_txt = session / "transcript_.txt"
                 single_txt.write_text(
                     "\n".join(seg["text"] for seg in single_segments), encoding="utf-8"
@@ -2328,7 +2393,35 @@ def update_speaker_names(session_id: str, body: SpeakerNamesUpdate):
     _get_session_or_404(store, session_id)
     session_dir = store / session_id
     write_speaker_names(session_dir, body.names)
+    # Tier 2.1: naming a speaker teaches their voice. The session stored a
+    # centroid embedding per diarized speaker (speaker_embeddings.json);
+    # folding it into the named profile is what makes the same voice get
+    # this name automatically in future meetings. Best-effort: a rename
+    # must never fail over profile bookkeeping.
+    try:
+        embeddings = speaker_id.load_session_embeddings(session_dir)
+        for label, name in body.names.items():
+            emb = embeddings.get(label)
+            if emb and isinstance(name, str) and name.strip():
+                speaker_id.learn_profile(name, emb)
+    except Exception as e:
+        log(f"voice profile update failed (continuing): {e}")
     return {"speaker_names": load_speaker_names(session_dir)}
+
+
+@app.get("/speaker-profiles")
+def speaker_profiles():
+    """Saved voice profiles (name + how many meetings contributed). The
+    `available` flag tells the UI whether speaker recognition can run at
+    all on this install (model present + onnx runtime importable)."""
+    return {"available": speaker_id.available(), "profiles": speaker_id.list_profiles()}
+
+
+@app.delete("/speaker-profiles/{name}")
+def delete_speaker_profile(name: str):
+    if not speaker_id.forget_profile(name):
+        raise HTTPException(404, "No such voice profile")
+    return {"ok": True}
 
 
 @app.get("/sessions/{session_id}/action-items")

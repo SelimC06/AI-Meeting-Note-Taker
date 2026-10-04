@@ -61,6 +61,14 @@ export function resolveLlamaServerPath(resourcesPath, platform = process.platfor
     return path.join(resourcesPath, 'llama', exe);
 }
 
+// The bundled speaker-embedding ONNX model (vendored by
+// scripts/fetch-speaker-model.mjs), read by the backend via
+// SPEAKER_MODEL_PATH -- same scheme as ffmpeg/llama above. Architecture
+// independent, so one path for every platform.
+export function resolveSpeakerModelPath(resourcesPath) {
+    return path.join(resourcesPath, 'speaker', 'speaker-embedding.onnx');
+}
+
 let backendProcess = null;
 let backendLogTail = [];
 const BACKEND_LOG_TAIL_MAX_LINES = 20;

@@ -53,6 +53,7 @@ run(venvPython, [
     '--hidden-import', 'ollama',
     '--hidden-import', 'PIL',
     '--collect-all', 'faster_whisper',
+    '--collect-all', 'sherpa_onnx',
     '--collect-all', 'ctranslate2',
     '--collect-binaries', 'ctranslate2',
     '--copy-metadata', 'faster_whisper',

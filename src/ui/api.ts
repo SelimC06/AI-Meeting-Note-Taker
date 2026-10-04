@@ -429,6 +429,36 @@ export async function importRecording(file: File): Promise<{ job_id: string; ses
   return (await resp.json()) as { job_id: string; session_id: string };
 }
 
+// Persistent voice profiles (Tier 2.1): name a speaker once in any
+// meeting's transcript and their voice is recognized -- and pre-named --
+// in later meetings.
+export type SpeakerProfile = {
+  name: string;
+  meetings: number;
+  updated_at: string | null;
+};
+
+export type SpeakerProfilesResult = {
+  // False when this install can't run speaker recognition (embedding
+  // model or onnx runtime missing) -- the list is then always empty.
+  available: boolean;
+  profiles: SpeakerProfile[];
+};
+
+export async function getSpeakerProfiles(): Promise<SpeakerProfilesResult> {
+  const resp = await backendFetch(`${BACKEND_URL}/speaker-profiles`);
+  if (!resp.ok) throw new Error(`Failed to load voice profiles: ${resp.status}`);
+  return (await resp.json()) as SpeakerProfilesResult;
+}
+
+export async function deleteSpeakerProfile(name: string): Promise<void> {
+  const resp = await backendFetch(
+    `${BACKEND_URL}/speaker-profiles/${encodeURIComponent(name)}`,
+    { method: "DELETE" }
+  );
+  if (!resp.ok) throw new Error(`Failed to delete voice profile: ${resp.status}`);
+}
+
 export type OllamaModelsResult = {
   ok: boolean;
   models: string[];

@@ -5250,3 +5250,134 @@ def test_import_rejects_a_corrupt_file(client, monkeypatch):
     resp = client.post("/import", files={"file": ("broken.mp3", io.BytesIO(b""), "audio/mpeg")})
     assert resp.status_code == 400
     assert "couldn't be read" in resp.json()["detail"]
+
+
+# ---- Tier 2.1: speaker identification + persistent voice profiles ----------
+
+def test_dual_track_refines_others_by_voice_and_prenames_matched_profiles(client, monkeypatch):
+    """With the ONNX speaker model available (mocked here), the generic
+    "Others" bucket becomes SPEAKER_NN, and a cluster whose voice matches a
+    saved profile is pre-named without any user action."""
+    monkeypatch.setattr(server_module.speaker_id, "available", lambda: True)
+
+    def fake_diarize(wav_path, segments, label_prefix="SPEAKER_"):
+        assert Path(wav_path).name == "system.wav"
+        labels = ["SPEAKER_00", "SPEAKER_01"][: len(segments)]
+        return labels, {}
+
+    monkeypatch.setattr(server_module.speaker_id, "diarize_segments", fake_diarize)
+    monkeypatch.setattr(
+        server_module.speaker_id,
+        "centroids_for_labeled_segments",
+        lambda wav_path, segments, skip_labels=("You", "Others"): {
+            "SPEAKER_00": [1.0, 0.0],
+            "SPEAKER_01": [0.0, 1.0],
+        },
+    )
+    written = {}
+    monkeypatch.setattr(
+        server_module.speaker_id,
+        "write_session_embeddings",
+        lambda session, centroids: written.update(centroids),
+    )
+    monkeypatch.setattr(
+        server_module.speaker_id,
+        "match_profiles",
+        lambda centroids: {"SPEAKER_00": "Maya"},
+    )
+
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    assert job["status"] == "done"
+
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    speakers = {s["speaker"] for s in segments}
+    # mic -> You; the two system segments -> one matched profile name and
+    # one still-raw cluster label.
+    assert speakers == {"You", "Maya", "SPEAKER_01"}
+    maya = next(s for s in segments if s["speaker"] == "Maya")
+    assert maya["raw_speaker"] == "SPEAKER_00"
+    assert set(written) == {"SPEAKER_00", "SPEAKER_01"}
+
+
+def test_dual_track_keeps_others_when_speaker_model_is_unavailable(client, monkeypatch):
+    monkeypatch.setattr(server_module.speaker_id, "available", lambda: False)
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    assert job["status"] == "done"
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    assert {s["speaker"] for s in segments} == {"You", "Others"}
+
+
+def test_patch_speaker_names_learns_a_voice_profile(client, monkeypatch):
+    monkeypatch.setattr(server_module.speaker_id, "available", lambda: False)
+    job = _post_dual_track(client, monkeypatch, _two_speaker_system_transcribe_wav)
+    session_id = job["session_id"]
+
+    monkeypatch.setattr(
+        server_module.speaker_id,
+        "load_session_embeddings",
+        lambda session_dir: {"Others": [0.6, 0.8]},
+    )
+    learned = []
+    monkeypatch.setattr(
+        server_module.speaker_id,
+        "learn_profile",
+        lambda name, emb: learned.append((name, list(emb))),
+    )
+
+    resp = client.patch(
+        f"/sessions/{session_id}/speaker-names", json={"names": {"Others": "Maya", "You": "  "}}
+    )
+    assert resp.status_code == 200
+    # Only the real name learns a profile; the blank rename doesn't.
+    assert learned == [("Maya", [0.6, 0.8])]
+
+
+def test_speaker_profiles_endpoints(client, monkeypatch):
+    monkeypatch.setattr(server_module.speaker_id, "available", lambda: True)
+    monkeypatch.setattr(
+        server_module.speaker_id,
+        "list_profiles",
+        lambda: [{"name": "Maya", "meetings": 3, "updated_at": "2026-10-03T00:00:00+00:00"}],
+    )
+    resp = client.get("/speaker-profiles")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "available": True,
+        "profiles": [{"name": "Maya", "meetings": 3, "updated_at": "2026-10-03T00:00:00+00:00"}],
+    }
+
+    monkeypatch.setattr(server_module.speaker_id, "forget_profile", lambda name: name == "Maya")
+    assert client.delete("/speaker-profiles/Maya").status_code == 200
+    assert client.delete("/speaker-profiles/Nobody").status_code == 404
+
+
+def test_import_diarizes_unattributed_segments_when_model_available(client, monkeypatch):
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "probe_stream_types", lambda p: ["audio"])
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
+    monkeypatch.setattr(server_module, "transcribe_wav", _two_speaker_system_transcribe_wav)
+
+    monkeypatch.setattr(server_module.speaker_id, "available", lambda: True)
+    monkeypatch.setattr(
+        server_module.speaker_id,
+        "diarize_segments",
+        lambda wav_path, segments, label_prefix="SPEAKER_": (
+            ["SPEAKER_00", "SPEAKER_01"][: len(segments)],
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        server_module.speaker_id,
+        "centroids_for_labeled_segments",
+        lambda wav_path, segments, skip_labels=("You", "Others"): {},
+    )
+
+    resp = client.post(
+        "/import",
+        files={"file": ("panel.m4a", io.BytesIO(b"audio"), "audio/mp4")},
+    )
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    assert {s["speaker"] for s in segments} == {"SPEAKER_00", "SPEAKER_01"}

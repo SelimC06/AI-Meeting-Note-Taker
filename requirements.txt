@@ -11,3 +11,6 @@ faster-whisper==1.2.1
 pillow==12.3.0
 ollama==0.6.3
 httpx==0.28.1
+# Speaker embeddings for diarization + voice profiles (app/speaker_id.py):
+# ONNX runtime under the hood, no torch, prebuilt wheels for mac/win.
+sherpa-onnx==1.13.8

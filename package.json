@@ -20,8 +20,9 @@
     "setup:backend": "node scripts/setup-backend.mjs",
     "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "fetch:llama": "node scripts/fetch-llama.mjs",
+    "fetch:speaker-model": "node scripts/fetch-speaker-model.mjs",
     "build:backend": "node scripts/build-backend.mjs",
-    "dist": "npm run build && npm run build:backend && npm run fetch:ffmpeg && npm run fetch:llama && electron-builder",
+    "dist": "npm run build && npm run build:backend && npm run fetch:ffmpeg && npm run fetch:llama && npm run fetch:speaker-model && electron-builder",
     "release": "node scripts/release.mjs",
     "deploy": "npm run build && wrangler deploy"
   },
@@ -52,6 +53,10 @@
       {
         "from": "vendor/llama",
         "to": "llama"
+      },
+      {
+        "from": "vendor/speaker",
+        "to": "speaker"
       }
     ],
     "win": {

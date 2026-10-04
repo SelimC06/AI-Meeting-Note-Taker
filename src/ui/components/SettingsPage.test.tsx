@@ -3,9 +3,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import SettingsPage from "./SettingsPage";
 import {
   deleteSessionForever,
+  deleteSpeakerProfile,
   getOllamaModels,
   getSessions,
   getSettings,
+  getSpeakerProfiles,
   getStorageUsage,
   updateSettings,
   type Settings,
@@ -47,6 +49,7 @@ const openSection = (name: string) => {
 
 beforeEach(() => {
   vi.mocked(getSettings).mockResolvedValue(baseSettings);
+  vi.mocked(getSpeakerProfiles).mockResolvedValue({ available: true, profiles: [] });
   vi.mocked(getStorageUsage).mockResolvedValue({
     used_bytes: 0,
     free_bytes: 100,
@@ -796,4 +799,40 @@ it("tells the app the library changed after the storage folder moves (and not wh
 
   fireEvent.click(browse);
   await waitFor(() => expect(onLibraryChanged).toHaveBeenCalledTimes(1));
+});
+
+it("lists saved voice profiles and forgets one on click", async () => {
+  vi.mocked(getSpeakerProfiles).mockResolvedValue({
+    available: true,
+    profiles: [
+      { name: "Maya", meetings: 3, updated_at: "2026-10-03T00:00:00+00:00" },
+      { name: "Deniz", meetings: 1, updated_at: "2026-10-01T00:00:00+00:00" },
+    ],
+  });
+  vi.mocked(deleteSpeakerProfile).mockResolvedValue(undefined);
+
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\]/);
+  openSection("Diarization");
+
+  expect(await screen.findByText(/Maya/)).toBeInTheDocument();
+  expect(screen.getByText(/3 meetings/)).toBeInTheDocument();
+  expect(screen.getByText(/1 meeting\b/)).toBeInTheDocument();
+
+  const forgetButtons = screen.getAllByRole("button", { name: /forget/i });
+  fireEvent.click(forgetButtons[0]);
+
+  await waitFor(() => expect(deleteSpeakerProfile).toHaveBeenCalledWith("Maya"));
+  await waitFor(() => expect(screen.queryByText(/Maya/)).not.toBeInTheDocument());
+  expect(screen.getByText(/Deniz/)).toBeInTheDocument();
+});
+
+it("explains when speaker recognition is unavailable on this install", async () => {
+  vi.mocked(getSpeakerProfiles).mockResolvedValue({ available: false, profiles: [] });
+
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\]/);
+  openSection("Diarization");
+
+  expect(await screen.findByText(/speaker recognition is unavailable/i)).toBeInTheDocument();
 });

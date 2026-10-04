@@ -96,7 +96,7 @@ versions -- bump them deliberately, then run the tests and a packaging build.
 | `requirements.txt` | What the backend needs at runtime (and what PyInstaller freezes). |
 | `requirements-dev.txt` | `requirements.txt` + pytest and ruff. Used by setup and CI. |
 | `requirements-build.txt` | PyInstaller (+ hooks), installed by `npm run build:backend`. |
-| `requirements-diarization.txt` | Optional torch + pyannote.audio 4.x for advanced diarization. |
+| `requirements-diarization.txt` | Optional torch + pyannote.audio 4.x for advanced diarization. The default speaker identification needs none of this: it runs on the bundled ONNX embedding model (`npm run fetch:speaker-model`, `backend/app/speaker_id.py`) with persistent voice profiles — name a speaker once and their voice is recognized in later meetings. |
 
 Backend tests and lint:
 

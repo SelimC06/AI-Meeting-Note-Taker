@@ -7,8 +7,11 @@ import {
   getStorageUsage,
   getSessions,
   deleteSessionForever,
+  getSpeakerProfiles,
+  deleteSpeakerProfile,
   type Settings,
   type StorageUsage,
+  type SpeakerProfilesResult,
 } from "../api";
 import { useUpdaterStatus } from "../hooks/useUpdaterStatus";
 
@@ -117,6 +120,8 @@ export default function SettingsPage({
   const [vocabularySaveError, setVocabularySaveError] = useState<string | null>(null);
 
   const [diarizationError, setDiarizationError] = useState<string | null>(null);
+  const [voiceProfiles, setVoiceProfiles] = useState<SpeakerProfilesResult | null>(null);
+  const [profilesError, setProfilesError] = useState<string | null>(null);
   const [tokenDraft, setTokenDraft] = useState("");
   const [tokenSaveError, setTokenSaveError] = useState<string | null>(null);
 
@@ -325,6 +330,40 @@ export default function SettingsPage({
 
   const handleDiarizationToggle = (value: boolean) =>
     saveOptimistic("advanced_diarization_enabled", value, setDiarizationError);
+
+  // Voice profiles are loaded when the Diarization section is opened --
+  // they only change through renames and this section's own Forget button.
+  useEffect(() => {
+    if (activeSection !== "diarization") return;
+    let cancelled = false;
+    getSpeakerProfiles()
+      .then((result) => {
+        if (cancelled) return;
+        setVoiceProfiles(result);
+        setProfilesError(null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setProfilesError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection]);
+
+  const handleForgetProfile = async (name: string) => {
+    try {
+      await deleteSpeakerProfile(name);
+      setVoiceProfiles((current) =>
+        current
+          ? { ...current, profiles: current.profiles.filter((p) => p.name !== name) }
+          : current
+      );
+      setProfilesError(null);
+    } catch (e) {
+      setProfilesError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   // "" clears the saved token; any other value replaces it.
   const saveToken = async (value: string) => {
@@ -730,6 +769,49 @@ export default function SettingsPage({
         {activeSection === "diarization" && (
           <section className="flex flex-col gap-2">
             <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+              voice profiles
+            </h2>
+            <p className="text-xs text-dim">
+              Meeting speakers are told apart by voice automatically. Name a speaker once in a
+              transcript and that voice is recognized — and pre-named — in future meetings.
+            </p>
+            {voiceProfiles !== null && !voiceProfiles.available && (
+              <p className="text-xs text-dim">
+                Speaker recognition is unavailable on this install (embedding model missing).
+              </p>
+            )}
+            {voiceProfiles !== null && voiceProfiles.available && voiceProfiles.profiles.length === 0 && (
+              <p className="text-xs text-dim">
+                No saved voices yet — open a meeting's transcript and rename a speaker to create
+                one.
+              </p>
+            )}
+            {voiceProfiles !== null && voiceProfiles.profiles.length > 0 && (
+              <ul className="flex flex-col gap-1">
+                {voiceProfiles.profiles.map((p) => (
+                  <li
+                    key={p.name}
+                    className="flex items-center justify-between gap-2 border border-line rounded-sm px-2 py-1"
+                  >
+                    <span className="text-xs text-phosphor truncate">
+                      {p.name}{" "}
+                      <span className="text-dim">
+                        · {p.meetings} {p.meetings === 1 ? "meeting" : "meetings"}
+                      </span>
+                    </span>
+                    <button
+                      onClick={() => handleForgetProfile(p.name)}
+                      className="shrink-0 px-2 py-0.5 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                    >
+                      Forget
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {profilesError && <p className="text-xs text-red-400">{profilesError}</p>}
+
+            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide mt-4 pt-4 border-t border-line/60">
               advanced diarization
             </h2>
             <p className="text-xs text-dim">

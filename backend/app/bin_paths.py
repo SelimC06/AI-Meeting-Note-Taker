@@ -19,3 +19,18 @@ def _default_llama_server() -> str:
 
 
 LLAMA_SERVER_BIN = os.getenv("LLAMA_SERVER_BIN") or _default_llama_server()
+
+
+def _default_speaker_model() -> str:
+    """The pinned speaker-embedding ONNX model (speaker_id.py). Same
+    resolution as LLAMA_SERVER_BIN: env var in packaged builds (set by
+    Electron), a dev checkout's vendor/speaker (populated by `npm run
+    fetch:speaker-model`), else "" -- speaker_id.available() then reports
+    the feature as off instead of anything failing."""
+    vendored = Path(__file__).resolve().parents[2] / "vendor" / "speaker" / "speaker-embedding.onnx"
+    if vendored.exists():
+        return str(vendored)
+    return ""
+
+
+SPEAKER_MODEL_PATH = os.getenv("SPEAKER_MODEL_PATH") or _default_speaker_model()
