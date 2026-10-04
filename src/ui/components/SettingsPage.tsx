@@ -269,7 +269,7 @@ export default function SettingsPage({
 
   const handleOllamaChange = (value: string) => saveOptimistic("ollama_chat_model", value, setOllamaSaveError);
 
-  const handleProviderChange = (value: "ollama" | "custom") =>
+  const handleProviderChange = (value: "builtin" | "ollama" | "custom") =>
     saveOptimistic("ai_provider", value, setProviderSaveError);
 
   const handleSaveConnection = async () => {
@@ -567,14 +567,25 @@ export default function SettingsPage({
               <select
                 id="ai-provider"
                 value={settings.ai_provider}
-                onChange={(e) => handleProviderChange(e.target.value as "ollama" | "custom")}
+                onChange={(e) => handleProviderChange(e.target.value as "builtin" | "ollama" | "custom")}
                 className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
               >
+                <option value="builtin">Built-in (recommended)</option>
                 <option value="ollama">Ollama (local)</option>
                 <option value="custom">Custom (OpenAI-compatible)</option>
               </select>
             </div>
             {providerSaveError && <p className="text-xs text-red-400">{providerSaveError}</p>}
+
+            {settings.ai_provider === "builtin" && (
+              <div className="mt-2 pl-3 border-l-2 border-line flex flex-col gap-2">
+                <p className="text-xs text-dim">
+                  Runs the bundled model (Gemma 3 4B) on this machine via llama.cpp — no
+                  Ollama or account needed, and nothing leaves your computer. The model is
+                  downloaded once (~2.5 GB) the first time it's used.
+                </p>
+              </div>
+            )}
 
             {settings.ai_provider === "ollama" && (
               <div className="mt-2 pl-3 border-l-2 border-line flex flex-col gap-2">

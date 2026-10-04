@@ -68,6 +68,7 @@ from .bin_paths import FFMPEG_BIN, FFPROBE_BIN
 from .whisper_cache import get_whisper_model, transcribe_audio
 from . import jobs
 from . import llm_provider
+from . import builtin_llm
 
 try:
     from .ffmpeg_transcribe import stop_recording_and_transcribe, transcribe_wav  # type: ignore
@@ -142,12 +143,20 @@ def _purge_trash_unless_moving() -> None:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     task = asyncio.create_task(_daily_trash_purge_loop())
+    # Boot the built-in model server if its model is already on disk (a
+    # no-op otherwise -- first-run download only ever starts from the
+    # explicit POST /builtin/setup). Runs on builtin_llm's own worker
+    # thread, so startup isn't blocked on the model load.
+    if AI_PROVIDER == "builtin":
+        builtin_llm.start_if_downloaded()
     try:
         yield
     finally:
         task.cancel()
         # Cached custom-provider clients hold open connection pools.
         llm_provider.close_all_clients()
+        # The bundled llama-server child must never outlive the backend.
+        builtin_llm.shutdown()
 
 
 app = FastAPI(lifespan=_lifespan)
@@ -342,6 +351,14 @@ app.add_middleware(AuditMiddleware)
 _app_data_dir_env = os.getenv("APP_DATA_DIR")
 ROOT = Path(_app_data_dir_env) if _app_data_dir_env else Path(__file__).resolve().parent
 SETTINGS_PATH = ROOT / "settings.json"
+
+# The built-in model lives next to settings.json (the Electron userData dir
+# in packaged builds), NOT in the recordings storage dir: a storage move
+# must never copy 2.5 GB of weights, and emptying/relocating the library
+# must never delete the model. configure() only records the path -- no
+# download or process start happens at import (same rule as
+# run_startup_maintenance above: helper processes import this module too).
+builtin_llm.configure(ROOT / "models")
 
 # export_session_zip below builds its temp zip with this prefix,
 # distinguishing it from anything else that might live alongside it so
@@ -857,7 +874,7 @@ def delete_session(session_id: str):
     return {"ok": True}
 
 
-AI_PROVIDER_VALUES = {"ollama", "custom"}
+AI_PROVIDER_VALUES = {"builtin", "ollama", "custom"}
 
 
 def _is_http_url(value: str) -> bool:
@@ -1101,6 +1118,18 @@ def patch_settings(body: SettingsUpdate):
         SETTINGS_ERROR = None
         STORE_UNTRUSTED = False
 
+    # Outside SAVE_LOCK -- neither call blocks (work happens on
+    # builtin_llm's own threads), but there's no reason to hold the
+    # settings lock across them either. Switching TO builtin boots the
+    # already-downloaded model with no further interaction (a fresh
+    # install's download still goes through the gate's explicit button);
+    # switching AWAY releases the ~3 GB the loaded model holds.
+    if body.ai_provider is not None:
+        if AI_PROVIDER == "builtin":
+            builtin_llm.start_if_downloaded()
+        else:
+            builtin_llm.shutdown()
+
     return _public_settings(settings)
 
 
@@ -1125,6 +1154,23 @@ def _extract_ollama_model_names(list_response) -> List[str]:
         if name:
             names.append(name)
     return names
+
+
+@app.get("/builtin/status")
+def builtin_status():
+    """Polled by the onboarding gate (and usable by Settings) to render
+    download progress / boot state for the built-in model."""
+    return builtin_llm.status()
+
+
+@app.post("/builtin/setup")
+def builtin_setup():
+    """Kick off the built-in model's one-time download (resumable) and
+    server start. Idempotent: safe to call while setup is already running
+    or complete. The gate calls this from its explicit 'Download model'
+    button -- a ~2.5 GB download is never started silently."""
+    builtin_llm.start_setup()
+    return builtin_llm.status()
 
 
 @app.get("/ollama/models")
@@ -1153,7 +1199,13 @@ def chat(session_id: str, body: ChatRequest):
         "custom_api_key": CUSTOM_API_KEY,
         "custom_model_name": CUSTOM_MODEL_NAME,
     }
-    active_client, chat_model = llm_provider.resolve_active_client(settings_snapshot)
+    try:
+        active_client, chat_model = llm_provider.resolve_active_client(settings_snapshot)
+    except builtin_llm.NotReadyError as e:
+        # The message says what's actually happening (downloading at N%,
+        # starting, needs the one-time download) -- the UI shows it as the
+        # chat error line.
+        raise HTTPException(503, str(e))
 
     if stream_chat_reply is None or assert_ollama_up is None:
         raise HTTPException(503, "Chat is unavailable on this server")
@@ -1203,7 +1255,10 @@ def graph_chat(body: ChatRequest):
         "custom_api_key": CUSTOM_API_KEY,
         "custom_model_name": CUSTOM_MODEL_NAME,
     }
-    active_client, chat_model = llm_provider.resolve_active_client(settings_snapshot)
+    try:
+        active_client, chat_model = llm_provider.resolve_active_client(settings_snapshot)
+    except builtin_llm.NotReadyError as e:
+        raise HTTPException(503, str(e))
 
     if stream_graph_chat_reply is None or find_relevant_sessions is None or assert_ollama_up is None:
         raise HTTPException(503, "Chat is unavailable on this server")
@@ -1395,7 +1450,21 @@ def _run_process_job(job_id: str) -> None:
         "custom_api_key": inputs.get("custom_api_key", ""),
         "custom_model_name": inputs.get("custom_model_name", ""),
     }
-    active_client, ollama_chat_model = llm_provider.resolve_active_client(job_settings_snapshot)
+    active_client = None
+
+    def _resolve_job_llm():
+        """resolve_active_client for this job, called at summarize time
+        (inside the summarization try below) rather than at job start: the
+        built-in model server is often still booting when a recording lands
+        right after launch, and the mux+transcription minutes in between
+        usually cover it. wait_ready adds a last grace window for the fast
+        states only (verifying/starting) -- never a mid-download wait,
+        which could stall the single-worker job queue for however long
+        2.5 GB takes. A builtin_llm.NotReadyError from here is caught by
+        that try's fallback and worded for the user below."""
+        if job_settings_snapshot["ai_provider"] == "builtin":
+            builtin_llm.wait_ready(180.0)
+        return llm_provider.resolve_active_client(job_settings_snapshot)
 
     # Set once this session's record is in the index (see the catch-all
     # below: a failure after that point must update that record, not append
@@ -1600,6 +1669,8 @@ def _run_process_job(job_id: str) -> None:
                 if llava_complete is None:
                     raise RuntimeError("llava_complete import is None (summarizer missing)")
 
+                active_client, ollama_chat_model = _resolve_job_llm()
+
                 notes = llava_complete(
                     raw_txt_path=txt_path,
                     # Summarization here is text-only (no frame_paths, see the
@@ -1660,6 +1731,14 @@ def _run_process_job(job_id: str) -> None:
                         explanation = (
                             "_AI summarization timed out (the local model didn't "
                             "respond in time) -- showing the raw transcript instead._\n\n"
+                        )
+                    elif isinstance(e, builtin_llm.NotReadyError):
+                        # The message already says what's happening (model
+                        # still downloading / not set up / failed) and what
+                        # to do about it.
+                        explanation = (
+                            f"_AI summarization skipped: {str(e)[:300]} "
+                            "Showing the raw transcript instead._\n\n"
                         )
                     elif job_settings_snapshot["ai_provider"] == "custom":
                         # Quote the provider's own error (llm_provider puts

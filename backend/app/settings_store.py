@@ -32,10 +32,14 @@ def default_settings(default_storage_dir: Path) -> Dict[str, Any]:
         # must never turn on without the user explicitly opting in.
         "advanced_diarization_enabled": False,
         "huggingface_token": "",
-        # Custom (3rd-party, OpenAI-compatible) LLM provider. Off by
-        # default -- Ollama stays the default provider for chat,
-        # summarization, and knowledge-graph extraction.
-        "ai_provider": "ollama",
+        # Which LLM backend powers chat, summarization, and knowledge-graph
+        # extraction. "builtin" (the bundled llama.cpp server + one-time
+        # model download, see builtin_llm.py) is the default so a fresh
+        # install works with zero setup; "ollama" and "custom" (any
+        # OpenAI-compatible endpoint) remain as advanced options. Existing
+        # installs keep whatever their settings.json already says -- an
+        # on-disk value always wins over this default (see load_checked).
+        "ai_provider": "builtin",
         "custom_api_base_url": "",
         "custom_api_key": "",
         "custom_model_name": "",
@@ -118,7 +122,15 @@ def load_checked(path: Path, default_storage_dir: Path) -> Tuple[Dict[str, Any],
     defaults = default_settings(default_storage_dir)
     existing = _read_json_dict(path)
     if existing is not None:
-        return {**defaults, **existing}, None
+        merged = {**defaults, **existing}
+        if "ai_provider" not in existing:
+            # A settings.json from before the provider setting existed
+            # belongs to an Ollama-era install: filling the gap with the
+            # current default ("builtin") would silently flip a working
+            # Ollama setup to the bundled model on upgrade. Only a brand
+            # new install (no settings file at all) gets "builtin".
+            merged["ai_provider"] = "ollama"
+        return merged, None
     if not path.exists():
         _write_json_dict(path, defaults)
         return defaults, None

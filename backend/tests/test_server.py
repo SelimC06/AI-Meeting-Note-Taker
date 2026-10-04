@@ -54,6 +54,13 @@ def client(tmp_path, monkeypatch):
     # Pin the per-launch API token so every request below can send it --
     # ApiAuthMiddleware 401s anything without it, /health included.
     monkeypatch.setattr(server_module, "API_TOKEN", TEST_API_TOKEN)
+    # Pin the provider to the Ollama path these tests were written against:
+    # the import-time value depends on whatever settings.json exists (or
+    # doesn't) in the checkout, and the new-install default is "builtin",
+    # whose not-ready preflight would otherwise 503 every chat test on a
+    # machine without a dev settings file. Tests exercising the builtin or
+    # custom providers set ai_provider themselves.
+    monkeypatch.setattr(server_module, "AI_PROVIDER", "ollama")
     # base_url must be an allowed TrustedHostMiddleware host -- the default
     # "http://testserver" would otherwise get rejected with 400 before
     # reaching any route, since only localhost/127.0.0.1 are allowed.

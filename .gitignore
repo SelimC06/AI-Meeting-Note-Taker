@@ -26,6 +26,7 @@ dist-react
 # Backend runtime data
 backend/app/uploads/
 backend/app/settings.json
+backend/app/models/
 backend/.pytest_cache/
 
 # Python bytecode

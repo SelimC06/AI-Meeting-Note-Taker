@@ -29,6 +29,10 @@ const baseSettings: Settings = {
   storage_dir: "C:\\recordings",
   ollama_chat_model: "llama3",
   custom_vocabulary: "",
+  // Explicit: these tests simulate an Ollama-provider install (the Ollama
+  // gate tests below depend on it). The builtin provider's gate has its
+  // own tests in BuiltinModelGate.test.tsx.
+  ai_provider: "ollama",
   whisper_model_choices: [],
 };
 

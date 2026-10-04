@@ -10,8 +10,9 @@ The core flow is **record → transcribe → summarize → chat**:
 
 1. Record a meeting (mic and/or screen audio) from the app.
 2. The recording is transcribed locally with Whisper.
-3. The transcript is summarized (and can be chatted about) using a local
-   Ollama model.
+3. The transcript is summarized (and can be chatted about) using the
+   built-in local model (a bundled llama.cpp server with a one-time model
+   download) — or, optionally, Ollama or any OpenAI-compatible endpoint.
 4. Sessions, transcripts, and summaries are kept in a local session store you
    can browse, rename, export, or trash later.
 
@@ -21,10 +22,13 @@ The core flow is **record → transcribe → summarize → chat**:
   `src/electron`.
 - **Backend:** a Python/FastAPI server in `backend/app`, responsible for
   recording/session storage, transcription (Whisper via `ffmpeg`/`ffprobe`),
-  and summarize/chat requests to Ollama.
-- **External dependency:** [Ollama](https://ollama.com) — must be installed
-  locally with a chat model pulled for the summarize/chat features to work.
-  Everything else (recording, transcription, storage) works without it.
+  and summarize/chat requests to the selected AI provider.
+- **AI provider:** the default is the **built-in** local model — a bundled
+  llama.cpp `llama-server` (vendored by `npm run fetch:llama`, managed by
+  `backend/app/builtin_llm.py`) serving Gemma 3 4B, downloaded once (~2.5 GB)
+  on the user's explicit click in the first-run gate. No Ollama install is
+  needed. [Ollama](https://ollama.com) and any OpenAI-compatible endpoint
+  remain available as advanced options in Settings → AI model.
 
 In the packaged app, Electron starts the Python backend automatically on
 launch (waiting for it to become healthy before showing the window) and stops
@@ -154,9 +158,10 @@ never uploads anything -- publishing is `npm run release` (see
 and ffmpeg/ffprobe, so **end users installing the packaged app do not need
 Python or ffmpeg installed separately.**
 
-The one remaining external dependency for end users is
-[Ollama](https://ollama.com) — install it and pull a chat model before using
-the chat/summarize features.
+End users need no external installs at all: the AI chat/summarize features
+use the bundled llama.cpp server by default, downloading its model once on
+first use. Installing [Ollama](https://ollama.com) is only needed if the
+user switches the provider to Ollama in Settings.
 
 `npm run setup:backend` and the `.venv` it creates are only needed for
 *building* the installer (or running the backend directly in dev mode) — they
@@ -173,7 +178,9 @@ Two of the three bundled pieces are host-native and cannot cross-compile:
 - ffmpeg/ffprobe, vendored as native static builds (`npm run fetch:ffmpeg`,
   which picks its download by `process.arch` and stamps `vendor/ffmpeg/.arch`
   so a `vendor/` directory copied from another machine is re-fetched rather
-  than silently packaged).
+  than silently packaged), and likewise the llama.cpp server binary
+  (`npm run fetch:llama`, same pinned-checksum + `.arch` stamp scheme into
+  `vendor/llama`).
 
 `build.mac` therefore sets no explicit `arch`, which leaves electron-builder on
 its default: the host architecture. Don't pin one back in — hardcoding `arm64`
@@ -376,6 +383,7 @@ both sets of installers; the script doesn't do that.
 | `npm run test:ui` | Run frontend tests (Vitest). |
 | `npm run setup:backend` | Create/refresh the Python `.venv` from `requirements-dev.txt` (runtime + test/lint tools). |
 | `npm run fetch:ffmpeg` | Download the ffmpeg/ffprobe binaries used by the backend. |
+| `npm run fetch:llama` | Download the llama.cpp `llama-server` binary used by the built-in AI provider. |
 | `npm run build:backend` | Freeze the Python backend with PyInstaller for packaging. |
-| `npm run dist` | Full build + package for this platform into `release/` (`build`, `build:backend`, `fetch:ffmpeg`, `electron-builder`). Never uploads. |
+| `npm run dist` | Full build + package for this platform into `release/` (`build`, `build:backend`, `fetch:ffmpeg`, `fetch:llama`, `electron-builder`). Never uploads. |
 | `npm run release` | Check, build and publish a release to the update bucket (see [Publishing a release](#publishing-a-release)). `-- --check` only runs the checks. |

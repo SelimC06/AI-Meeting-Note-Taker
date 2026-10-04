@@ -26,12 +26,17 @@ class MissingBaseURLError(RuntimeError):
     pass
 
 
-def _raise_for_status(resp) -> None:
+def _raise_for_status(resp, label: str = "Custom AI provider") -> None:
     """raise_for_status(), but with the provider's own error text in the
     message. httpx's default ("Client error '404 Not Found' for url ...")
     hides the useful part -- OpenAI-style APIs put the real reason ("The
     model `x` does not exist", "Invalid API key") in the JSON body, and that
     message is what ends up in the chat error line and the job log.
+    `label` names the backend in that message: "Custom AI provider" for the
+    user-configured endpoint, "Built-in AI model" when the same client
+    drives the local llama-server (builtin_llm) -- telling a user their
+    bundled model hit a "custom provider" error would send them hunting
+    through settings they never touched.
     """
     try:
         resp.raise_for_status()
@@ -52,7 +57,7 @@ def _raise_for_status(resp) -> None:
                 detail = (resp.text or "")[:300]
             except Exception:
                 detail = ""
-        message = f"Custom AI provider returned HTTP {resp.status_code}"
+        message = f"{label} returned HTTP {resp.status_code}"
         if detail:
             message += f": {detail}"
         try:
@@ -63,12 +68,21 @@ def _raise_for_status(resp) -> None:
 
 
 class OpenAICompatClient:
-    def __init__(self, base_url: str, api_key: str, timeout: httpx.Timeout):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout: httpx.Timeout,
+        label: str = "Custom AI provider",
+    ):
         self._base_url = (base_url or "").rstrip("/")
-        self._headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        self._label = label
+        self._headers = {"Content-Type": "application/json"}
+        # Only send Authorization when there's actually a key: the built-in
+        # llama-server needs none, and an empty "Bearer " value is an
+        # illegal header httpx refuses to send at all (LocalProtocolError).
+        if api_key:
+            self._headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.Client(timeout=timeout)
 
     def close(self) -> None:
@@ -94,7 +108,7 @@ class OpenAICompatClient:
         /chat/completions works fine.
         """
         resp = self._client.get(self._url("/models"), headers=self._headers)
-        _raise_for_status(resp)
+        _raise_for_status(resp, self._label)
         return resp.json()
 
     def chat(
@@ -135,7 +149,7 @@ class OpenAICompatClient:
             resp = self._client.post(
                 self._url("/chat/completions"), headers=self._headers, json=retry_payload
             )
-        _raise_for_status(resp)
+        _raise_for_status(resp, self._label)
         data = resp.json()
         content = data["choices"][0]["message"]["content"] or ""
         return {"message": {"content": content}}
@@ -144,7 +158,7 @@ class OpenAICompatClient:
         with self._client.stream(
             "POST", self._url("/chat/completions"), headers=self._headers, json=payload
         ) as resp:
-            _raise_for_status(resp)
+            _raise_for_status(resp, self._label)
             for line in resp.iter_lines():
                 if not line or not line.startswith("data: "):
                     continue
@@ -195,12 +209,19 @@ _clients: Dict[Tuple[str, str, float], OpenAICompatClient] = {}
 _clients_lock = threading.Lock()
 
 
-def _get_client(base: str, key: str, read_seconds: float) -> OpenAICompatClient:
+def _get_client(
+    base: str, key: str, read_seconds: float, label: str = "Custom AI provider"
+) -> OpenAICompatClient:
+    # label isn't part of the cache key: it's derived from the provider, and
+    # the builtin provider's base URL (its own loopback port) never collides
+    # with a user-entered custom base URL.
     cache_key = (base, key, read_seconds)
     with _clients_lock:
         client = _clients.get(cache_key)
         if client is None:
-            client = OpenAICompatClient(base, key, ollama_client.generation_timeout(read_seconds))
+            client = OpenAICompatClient(
+                base, key, ollama_client.generation_timeout(read_seconds), label=label
+            )
             _clients[cache_key] = client
         return client
 
@@ -223,12 +244,30 @@ def resolve_active_client(settings: Dict[str, Any]):
     settings-shaped dict (the live settings globals in server.py, or a
     job's snapshotted `inputs` dict -- both carry the same keys).
 
-    Returns (client, model). `client` is None for the default Ollama
-    path -- a deliberate sentinel meaning "the caller should use its own
-    module-level Ollama client", preserving today's connection reuse and
-    the separate short-timeout health client, rather than constructing a
-    fresh one here.
+    Returns (client, model). `client` is None for the Ollama path -- a
+    deliberate sentinel meaning "the caller should use its own module-level
+    Ollama client", preserving today's connection reuse and the separate
+    short-timeout health client, rather than constructing a fresh one here.
+
+    For ai_provider == "builtin" (the default), raises
+    builtin_llm.NotReadyError when the bundled model server isn't serving
+    yet (model not downloaded / downloading / starting / failed) -- callers
+    turn that into a 503 (chat endpoints) or the raw-transcript fallback
+    note (the processing job).
     """
+    if settings.get("ai_provider") == "builtin":
+        # Imported here, not at module top: builtin_llm imports bin_paths
+        # and httpx-streams downloads; keeping it lazy means importing
+        # llm_provider alone (tests, helper processes) never touches it.
+        from . import builtin_llm
+
+        base = builtin_llm.require_base_url()  # raises NotReadyError when not up
+        read_seconds = ollama_client.resolve_timeout_seconds("llm_provider")
+        return (
+            _get_client(base, "", read_seconds, label="Built-in AI model"),
+            builtin_llm.MODEL_ALIAS,
+        )
+
     if settings.get("ai_provider") == "custom":
         base = settings.get("custom_api_base_url") or ""
         key = settings.get("custom_api_key") or ""

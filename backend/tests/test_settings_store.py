@@ -35,7 +35,7 @@ def test_default_settings_uses_env_vars(monkeypatch, tmp_path):
         "custom_vocabulary": "",
         "advanced_diarization_enabled": False,
         "huggingface_token": "",
-        "ai_provider": "ollama",
+        "ai_provider": "builtin",
         "custom_api_base_url": "",
         "custom_api_key": "",
         "custom_model_name": "",
@@ -45,7 +45,7 @@ def test_default_settings_uses_env_vars(monkeypatch, tmp_path):
 def test_default_settings_includes_custom_provider_fields(tmp_path):
     storage = tmp_path / "uploads"
     result = default_settings(storage)
-    assert result["ai_provider"] == "ollama"
+    assert result["ai_provider"] == "builtin"
     assert result["custom_api_base_url"] == ""
     assert result["custom_api_key"] == ""
     assert result["custom_model_name"] == ""

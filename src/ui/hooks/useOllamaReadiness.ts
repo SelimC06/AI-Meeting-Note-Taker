@@ -29,13 +29,14 @@ export function useOllamaReadiness(
     Promise.all([getOllamaModels(), getSettings()])
       .then(([modelsResult, settings]) => {
         if (generation !== generationRef.current) return;
-        // Ollama is irrelevant with a custom (OpenAI-compatible) provider
-        // selected -- chat, summaries and extraction all go there instead --
-        // so there's nothing to set up. Checked before the Ollama result,
-        // which is "unreachable" for exactly these users (no Ollama
-        // installed), and used to put the full-screen setup gate in front
-        // of them on every launch.
-        if (settings.ai_provider === "custom") {
+        // Ollama is irrelevant unless it's the selected provider: with
+        // "custom" everything goes to the OpenAI-compatible endpoint, and
+        // with "builtin" (the default) to the bundled llama.cpp server
+        // (whose own setup is BuiltinModelGate's job). Checked before the
+        // Ollama result, which is "unreachable" for exactly these users
+        // (no Ollama installed), and used to put the full-screen Ollama
+        // setup gate in front of them on every launch.
+        if (settings.ai_provider !== "ollama") {
           setState({ status: "ready" });
           return;
         }

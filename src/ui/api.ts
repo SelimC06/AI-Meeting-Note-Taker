@@ -305,10 +305,11 @@ export type Settings = {
   // whether one is saved. Send the value via updateSettings to replace it,
   // or "" to clear it.
   huggingface_token_set: boolean;
-  // Custom (3rd-party, OpenAI-compatible) LLM provider. Off by default --
-  // Ollama stays the default provider for chat, summarization, and
-  // knowledge-graph extraction.
-  ai_provider: "ollama" | "custom";
+  // Which LLM backend powers chat, summarization, and knowledge-graph
+  // extraction. "builtin" (the default): the bundled llama.cpp server with
+  // a one-time local model download -- no Ollama install needed. "ollama"
+  // and "custom" (any OpenAI-compatible endpoint) are the advanced options.
+  ai_provider: "builtin" | "ollama" | "custom";
   custom_api_base_url: string;
   custom_api_key_set: boolean;
   custom_model_name: string;
@@ -354,6 +355,42 @@ export async function updateSettings(
     throw new Error(text || `Failed to update settings: ${resp.status}`);
   }
   return (await resp.json()) as Settings;
+}
+
+// GET /builtin/status, polled by BuiltinModelGate while the built-in
+// provider is selected. `progress` is only non-null while downloading.
+export type BuiltinStatus = {
+  state: "idle" | "downloading" | "verifying" | "starting" | "ready" | "error";
+  error: string | null;
+  progress: { downloaded_bytes: number; total_bytes: number } | null;
+  model: { name: string; label: string; size_bytes: number };
+  model_downloaded: boolean;
+};
+
+// null rather than throwing on any failure (backend still booting,
+// connection refused) -- same tolerance as getOllamaModels: the gate polls
+// this and a transient fetch error must read as "unknown", never as a
+// setup problem to put a full-screen gate in front of.
+export async function getBuiltinStatus(): Promise<BuiltinStatus | null> {
+  try {
+    const resp = await backendFetch(`${BACKEND_URL}/builtin/status`);
+    if (!resp.ok) return null;
+    return (await resp.json()) as BuiltinStatus;
+  } catch {
+    return null;
+  }
+}
+
+// Starts (or resumes) the one-time model download + server boot. Idempotent
+// on the backend; returns the status right after kicking it off.
+export async function startBuiltinSetup(): Promise<BuiltinStatus | null> {
+  try {
+    const resp = await backendFetch(`${BACKEND_URL}/builtin/setup`, { method: "POST" });
+    if (!resp.ok) return null;
+    return (await resp.json()) as BuiltinStatus;
+  } catch {
+    return null;
+  }
 }
 
 export type OllamaModelsResult = {

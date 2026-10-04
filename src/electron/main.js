@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { resolveBackendCommand, resolveFfmpegPaths, startBackend, stopBackend, killAllBackendsSync, waitForHealth, getBackendLogTail, armCrashMonitor, ensurePortFree, generateBackendToken, backendAuthHeaders, BACKEND_TOKEN_ENV } from './backend.js';
+import { resolveBackendCommand, resolveFfmpegPaths, resolveLlamaServerPath, startBackend, stopBackend, killAllBackendsSync, waitForHealth, getBackendLogTail, armCrashMonitor, ensurePortFree, generateBackendToken, backendAuthHeaders, BACKEND_TOKEN_ENV } from './backend.js';
 import { attemptRecovery, isRecovering, statusForHealthyRetry } from './backendRecovery.js';
 import { nextWatchdogState, probeHealthOnce, fetchBackendBusy, watchdogThreshold, watchdogBusy, knownBusyAfterRailStatus, WATCHDOG_INTERVAL_MS } from './backendWatchdog.js';
 import { isTrustedIpcSender } from './ipcGuard.js';
@@ -1494,6 +1494,7 @@ app.whenReady().then(async () => {
                 const { ffmpegBin, ffprobeBin } = resolveFfmpegPaths(process.resourcesPath);
                 return { FFMPEG_BIN: ffmpegBin, FFPROBE_BIN: ffprobeBin };
             })(),
+            LLAMA_SERVER_BIN: resolveLlamaServerPath(process.resourcesPath),
         } : {}),
     };
     const backendProcess = startBackend(backend.command, backend.args, backend.cwd, backendEnv);

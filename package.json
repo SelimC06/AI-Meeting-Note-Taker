@@ -19,8 +19,9 @@
     "test:ui": "vitest run",
     "setup:backend": "node scripts/setup-backend.mjs",
     "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
+    "fetch:llama": "node scripts/fetch-llama.mjs",
     "build:backend": "node scripts/build-backend.mjs",
-    "dist": "npm run build && npm run build:backend && npm run fetch:ffmpeg && electron-builder",
+    "dist": "npm run build && npm run build:backend && npm run fetch:ffmpeg && npm run fetch:llama && electron-builder",
     "release": "node scripts/release.mjs",
     "deploy": "npm run build && wrangler deploy"
   },
@@ -47,6 +48,10 @@
       {
         "from": "vendor/ffmpeg",
         "to": "ffmpeg"
+      },
+      {
+        "from": "vendor/llama",
+        "to": "llama"
       }
     ],
     "win": {

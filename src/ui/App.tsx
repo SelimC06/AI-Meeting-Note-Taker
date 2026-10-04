@@ -10,6 +10,7 @@ import RecordingConsentModal from "./components/RecordingConsentModal";
 import ErrorBoundary from "./components/ErrorBoundary";
 import BackendStatusBanner from "./components/BackendStatusBanner";
 import OllamaOnboardingGate from "./components/OllamaOnboardingGate";
+import BuiltinModelGate from "./components/BuiltinModelGate";
 import { useSessions } from "./hooks/useSessions";
 import { useBackendHealth } from "./hooks/useBackendHealth";
 import { useBackendLifecycle } from "./hooks/useBackendLifecycle";
@@ -220,6 +221,7 @@ function App() {
             onViewChange={setSidebarView}
           />
           <OllamaOnboardingGate active={backendUp} suppressed={settingsOpen || showRecordingConsent} />
+          <BuiltinModelGate active={backendUp} suppressed={settingsOpen || showRecordingConsent} />
 
           {showRecordingConsent && (
             <RecordingConsentModal

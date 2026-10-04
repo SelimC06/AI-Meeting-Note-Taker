@@ -52,6 +52,15 @@ export function resolveFfmpegPaths(resourcesPath, platform = process.platform) {
     };
 }
 
+// The bundled llama.cpp server binary (vendored by scripts/fetch-llama.mjs,
+// shipped via extraResources exactly like ffmpeg above). The backend reads
+// it from the LLAMA_SERVER_BIN env var (see backend/app/bin_paths.py, which
+// also knows the dev-checkout vendor/llama fallback for unpackaged runs).
+export function resolveLlamaServerPath(resourcesPath, platform = process.platform) {
+    const exe = platform === 'win32' ? 'llama-server.exe' : 'llama-server';
+    return path.join(resourcesPath, 'llama', exe);
+}
+
 let backendProcess = null;
 let backendLogTail = [];
 const BACKEND_LOG_TAIL_MAX_LINES = 20;
