@@ -1,13 +1,22 @@
 export const RAIL_WIDTH = 280;
 export const RAIL_HEIGHT = 40;
 export const RAIL_ERROR_PANEL_HEIGHT = 72;
+export const RAIL_CAPTIONS_PANEL_HEIGHT = 64;
 export const RAIL_GAP = 8;
 export const RAIL_INSET_TOP = 10;
 
-export function computeRailBounds(workArea, { errorVisible = false } = {}) {
-    const height = errorVisible
-        ? RAIL_HEIGHT + RAIL_GAP + RAIL_ERROR_PANEL_HEIGHT
-        : RAIL_HEIGHT;
+// One place for "how tall is the rail window right now": the base pill
+// plus whichever panels (error toast, live captions) are currently shown
+// below it, each with its gap.
+export function computeRailHeight({ errorVisible = false, captionsVisible = false } = {}) {
+    let height = RAIL_HEIGHT;
+    if (captionsVisible) height += RAIL_GAP + RAIL_CAPTIONS_PANEL_HEIGHT;
+    if (errorVisible) height += RAIL_GAP + RAIL_ERROR_PANEL_HEIGHT;
+    return height;
+}
+
+export function computeRailBounds(workArea, { errorVisible = false, captionsVisible = false } = {}) {
+    const height = computeRailHeight({ errorVisible, captionsVisible });
 
     return {
         x: workArea.x + Math.round((workArea.width - RAIL_WIDTH) / 2),

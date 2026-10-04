@@ -135,6 +135,7 @@ declare global {
       platform: NodeJS.Platform;
       pickPrimaryScreenId: () => Promise<string | null>;
       setRailErrorVisible: (visible: boolean) => Promise<void>;
+      setRailCaptionsVisible?: (visible: boolean) => Promise<void>;
     };
     systemAPI?: {
       getStats: () => Promise<SystemStats | null>;

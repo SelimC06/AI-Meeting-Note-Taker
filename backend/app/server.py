@@ -2303,6 +2303,75 @@ def import_recording(file: UploadFile | None = File(None)):
             _active_uploads -= 1
 
 
+# Live captions (Tier 2.2). Always the fast tiny model regardless of the
+# configured (final-transcript) model: captions must keep up with speech on
+# CPU, and the real transcript is still produced by the full pipeline after
+# stop. Resolved per request against the language setting, so a pinned
+# English uses tiny.en and "auto" detects per window -- which also means a
+# meeting that switches language mid-way (English -> Turkish -> English)
+# captions each window in its own language.
+LIVE_WHISPER_MODEL = os.getenv("LIVE_WHISPER_MODEL", "tiny")
+
+# At most two windows transcribing at once (the rail sends one mic and one
+# system window per cycle). Anything beyond that answers 429 immediately
+# and the rail just skips that window -- captions may drop, the UI never
+# queues up a backlog that lags further and further behind live speech.
+_live_transcribe_slots = threading.BoundedSemaphore(2)
+
+
+@app.post("/live/transcribe")
+def live_transcribe(chunk: UploadFile | None = File(None)):
+    """One standalone audio window (a few seconds of webm/opus from the
+    rail's caption recorders) in, plain caption text out. Stateless: no
+    session, nothing stored -- the definitive transcript still comes from
+    the processing pipeline when the recording stops."""
+    if chunk is None:
+        raise HTTPException(400, "audio chunk is required")
+    if not _live_transcribe_slots.acquire(blocking=False):
+        raise HTTPException(429, "live transcription is busy")
+    try:
+        # Snapshot settings once per request, same as the other endpoints.
+        language = TRANSCRIPTION_LANGUAGE
+        model_name = resolve_whisper_model(LIVE_WHISPER_MODEL, language)
+        vocabulary = CUSTOM_VOCABULARY
+
+        # System temp, NOT the store: these windows are ephemeral and must
+        # never be adopted/swept as session data.
+        with tempfile.TemporaryDirectory(prefix="deskrecap-live-") as td:
+            src = Path(td) / "chunk"
+            with src.open("wb") as f:
+                shutil.copyfileobj(chunk.file, f)
+            wav = Path(td) / "chunk.wav"
+            p = run([FFMPEG_BIN, "-y", "-i", str(src), "-ac", "1", "-ar", "16000", str(wav)])
+            if p.returncode != 0 or not wav.exists():
+                raise HTTPException(400, "unreadable audio chunk")
+
+            from faster_whisper import WhisperModel
+
+            # device="cpu" matches every other call site exactly (see the
+            # fallback path's comment -- whisper_cache keys on literal
+            # kwargs).
+            model = get_whisper_model(WhisperModel, model_name, device="cpu", compute_type="int8")
+            segments, _info = transcribe_audio(
+                model,
+                str(wav),
+                initial_prompt=vocabulary.strip() or None,
+                language=resolve_transcribe_language(language),
+                # vad_filter on, unlike the batch pipeline: a silent window
+                # must come back empty, and without VAD small models
+                # confidently hallucinate text onto silence every few
+                # windows.
+                vad_filter=True,
+                # Windows are independent -- carrying context across them
+                # is what makes small models repeat themselves live.
+                condition_on_previous_text=False,
+            )
+            text = " ".join(s.text.strip() for s in segments if s.text and s.text.strip())
+        return {"text": text}
+    finally:
+        _live_transcribe_slots.release()
+
+
 @app.get("/jobs/{job_id}")
 def job_status(job_id: str):
     job = jobs.get_job(job_id)

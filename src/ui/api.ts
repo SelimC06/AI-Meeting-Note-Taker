@@ -406,6 +406,27 @@ export async function startBuiltinSetup(): Promise<BuiltinStatus | null> {
   }
 }
 
+// POST /live/transcribe: one standalone audio window from the rail's
+// caption recorders in, caption text out. Returns null for every failure
+// mode (backend busy with other windows -> 429, transient network error,
+// unreadable chunk): live captions simply skip that window -- a dropped
+// caption must never surface as an error.
+export async function liveTranscribe(chunk: Blob, filename: string): Promise<string | null> {
+  const formData = new FormData();
+  formData.append("chunk", chunk, filename);
+  try {
+    const resp = await backendFetch(`${BACKEND_URL}/live/transcribe`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as { text?: unknown };
+    return typeof data.text === "string" ? data.text : null;
+  } catch {
+    return null;
+  }
+}
+
 // Mirrors the backend's /import whitelist (IMPORT_SUFFIXES in server.py)
 // so the file picker only offers what will actually be accepted.
 export const IMPORT_FILE_EXTENSIONS = [

@@ -5,6 +5,8 @@ import PauseResume from "./components/PauseResume";
 import LevelMeter from "./components/LevelMeter";
 import ErrorToast from "./components/ErrorToast";
 import { useThreeTrackSegments, type ClassifiedError } from './hooks/useThreeTrackSegments';
+import { useLiveCaptions } from './hooks/useLiveCaptions';
+import LiveCaptions from './components/LiveCaptions';
 import { extensionForMimeType } from './capture/recorder';
 import { useElapsedTime } from './hooks/useElapsedTime';
 import { useMicLevel } from './hooks/useMicLevel';
@@ -89,6 +91,32 @@ export default function RailApp() {
     const isRecording = status === "recording";
     const isPaused = status === "paused";
     const isStarting = status === "starting";
+
+    // Live captions (Tier 2.2). Preference is per-viewer convenience only
+    // (default on -- the feature is the point), so localStorage with full
+    // try/catch tolerance is the right store for it.
+    const [captionsEnabled, setCaptionsEnabled] = useState<boolean>(() => {
+        try {
+            return window.localStorage.getItem("deskrecap.rail.captions") !== "0";
+        } catch {
+            return true;
+        }
+    });
+    const toggleCaptions = () => {
+        setCaptionsEnabled((current) => {
+            const next = !current;
+            try {
+                window.localStorage.setItem("deskrecap.rail.captions", next ? "1" : "0");
+            } catch {
+                /* private mode etc. -- the toggle still works for this run */
+            }
+            return next;
+        });
+    };
+    const captions = useLiveCaptions(captionsEnabled, status, micStream, systemStream);
+    // Keep the pane up through a pause (the conversation on screen is
+    // exactly what you pause to read back).
+    const captionsVisible = captionsEnabled && (isRecording || isPaused);
     const uploadErrorMessage =
         pendingUploadCount === 0
             ? null
@@ -537,6 +565,21 @@ export default function RailApp() {
                     />
                 </div>
 
+                <button
+                    aria-label="Live captions"
+                    aria-pressed={captionsEnabled}
+                    title={captionsEnabled ? "Live captions on" : "Live captions off"}
+                    onClick={toggleCaptions}
+                    className={
+                        "[-webkit-app-region:no-drag] flex-none font-mono text-[10px] px-1 rounded-sm border focus:outline-none focus-visible:ring-2 focus-visible:ring-signal transition-colors " +
+                        (captionsEnabled
+                            ? "border-signal/60 text-signal"
+                            : "border-line text-dim hover:text-phosphor")
+                    }
+                >
+                    cc
+                </button>
+
                 <span
                     title={isProcessing ? "Uploading recording…" : displayError?.message ?? jobStatusTitle}
                     className={
@@ -551,6 +594,7 @@ export default function RailApp() {
                     }
                 />
             </div>
+            <LiveCaptions visible={captionsVisible} captions={captions} />
             <ErrorToast
                 message={toastDismissed ? null : displayError?.message ?? null}
                 onDismiss={handleDismissError}

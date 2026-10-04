@@ -5381,3 +5381,89 @@ def test_import_diarizes_unattributed_segments_when_model_available(client, monk
     assert job["status"] == "done"
     segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
     assert {s["speaker"] for s in segments} == {"SPEAKER_00", "SPEAKER_01"}
+
+
+# ---- Tier 2.2: live captions ------------------------------------------------
+
+def test_live_transcribe_requires_a_chunk(client):
+    assert client.post("/live/transcribe").status_code == 400
+
+
+def test_live_transcribe_returns_caption_text_with_live_flags(client, monkeypatch):
+    """The live path must use the fast model resolved against the language
+    setting, VAD on (silence must come back empty, not hallucinated), and
+    no cross-window conditioning."""
+    captured = {}
+
+    def fake_run(cmd):
+        # The ffmpeg convert: create the wav it was asked to produce.
+        Path(cmd[-1]).write_bytes(b"fake wav")
+
+        class _P:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        return _P()
+
+    class _FakeSegment:
+        text = " live caption text "
+
+    def fake_get_whisper_model(model_cls, model_name, **kwargs):
+        captured["model_name"] = model_name
+        return object()
+
+    def fake_transcribe_audio(model, path, **kwargs):
+        captured.update(kwargs)
+        return [_FakeSegment()], object()
+
+    monkeypatch.setattr(server_module, "run", fake_run)
+    monkeypatch.setattr(server_module, "get_whisper_model", fake_get_whisper_model)
+    monkeypatch.setattr(server_module, "transcribe_audio", fake_transcribe_audio)
+    monkeypatch.setattr(server_module, "TRANSCRIPTION_LANGUAGE", "en")
+
+    resp = client.post(
+        "/live/transcribe",
+        files={"chunk": ("live.webm", io.BytesIO(b"opus bytes"), "audio/webm")},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"text": "live caption text"}
+    # tiny resolved against the pinned language -> the English-only variant.
+    assert captured["model_name"] == "tiny.en"
+    assert captured["language"] == "en"
+    assert captured["vad_filter"] is True
+    assert captured["condition_on_previous_text"] is False
+
+
+def test_live_transcribe_answers_429_when_both_slots_are_busy(client):
+    server_module._live_transcribe_slots.acquire()
+    server_module._live_transcribe_slots.acquire()
+    try:
+        resp = client.post(
+            "/live/transcribe",
+            files={"chunk": ("live.webm", io.BytesIO(b"x"), "audio/webm")},
+        )
+        assert resp.status_code == 429
+    finally:
+        server_module._live_transcribe_slots.release()
+        server_module._live_transcribe_slots.release()
+
+
+def test_live_transcribe_rejects_an_unreadable_chunk(client, monkeypatch):
+    def failing_run(cmd):
+        class _P:
+            returncode = 1
+            stderr = "invalid data"
+            stdout = ""
+
+        return _P()
+
+    monkeypatch.setattr(server_module, "run", failing_run)
+    resp = client.post(
+        "/live/transcribe",
+        files={"chunk": ("live.webm", io.BytesIO(b"not audio"), "audio/webm")},
+    )
+    assert resp.status_code == 400
+    # The slot must have been released despite the failure.
+    assert server_module._live_transcribe_slots.acquire(blocking=False)
+    server_module._live_transcribe_slots.release()

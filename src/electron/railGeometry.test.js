@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     computeRailBounds,
+    computeRailHeight,
     computeCenteredBounds,
     computeDockSlotScreenRect,
     isPointInRect,
@@ -9,6 +10,7 @@ import {
     RAIL_WIDTH,
     RAIL_HEIGHT,
     RAIL_ERROR_PANEL_HEIGHT,
+    RAIL_CAPTIONS_PANEL_HEIGHT,
     RAIL_GAP,
     RAIL_INSET_TOP,
 } from './railGeometry.js';
@@ -146,4 +148,26 @@ test('computeCornerSnap with allowOffScreen still pulls flush from just barely p
     const bounds = { x: -10, y: 500, width: 800, height: 450 };
     const snapped = computeCornerSnap(workArea, bounds, 24, { allowOffScreen: true });
     assert.equal(snapped.x, 0);
+});
+
+test('computeRailBounds grows height for the captions panel, and stacks it with the error panel', () => {
+    const captionsOnly = computeRailBounds(WORK_AREA, { captionsVisible: true });
+    assert.equal(captionsOnly.height, RAIL_HEIGHT + RAIL_GAP + RAIL_CAPTIONS_PANEL_HEIGHT);
+
+    const both = computeRailBounds(WORK_AREA, { errorVisible: true, captionsVisible: true });
+    assert.equal(
+        both.height,
+        RAIL_HEIGHT + RAIL_GAP + RAIL_CAPTIONS_PANEL_HEIGHT + RAIL_GAP + RAIL_ERROR_PANEL_HEIGHT
+    );
+});
+
+test('computeRailHeight matches computeRailBounds for every panel combination', () => {
+    for (const errorVisible of [false, true]) {
+        for (const captionsVisible of [false, true]) {
+            assert.equal(
+                computeRailHeight({ errorVisible, captionsVisible }),
+                computeRailBounds(WORK_AREA, { errorVisible, captionsVisible }).height
+            );
+        }
+    }
 });

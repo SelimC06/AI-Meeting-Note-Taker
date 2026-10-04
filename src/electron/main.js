@@ -11,14 +11,12 @@ import { isAllowedPermission } from './permissions.js';
 import { armAutoUpdate, getLastStatus, installUpdateOrQuit } from './updater.js';
 import {
     computeRailBounds,
+    computeRailHeight,
     computeCenteredBounds,
     computeDockSlotScreenRect,
     isPointInRect,
     computeCornerSnap,
     RAIL_WIDTH,
-    RAIL_HEIGHT,
-    RAIL_GAP,
-    RAIL_ERROR_PANEL_HEIGHT,
 } from './railGeometry.js';
 import { computeResizedBounds, isValidResizeDirection } from './resizeGeometry.js';
 import { sanitizeCaptureSourceTypes } from './captureSources.js';
@@ -31,6 +29,7 @@ import { buildAppMenuTemplate, isZoomShortcut } from './appMenu.js';
 import { railStatusAfterRendererGone, withCrashNotice, shouldReloadCrashedRenderer, RAIL_CRASH_NOTICE } from './rendererCrash.js';
 
 let railErrorVisible = false;
+let railCaptionsVisible = false;
 let isRailFloatDragging = false;
 let lastDockSlotClientRect = null;
 let railMoveSettleTimer = null;
@@ -177,11 +176,12 @@ let resolvedBackendPort = null;
 // preload.js instead.
 const backendAuthToken = generateBackendToken();
 
-// Mirrors the height calculation in the rail:setErrorVisible handler below,
+// Mirrors the height calculation in the rail:set*Visible handlers below,
 // so the floating window sized during a drag (beginFloatDrag/dragMove)
-// accounts for the error panel exactly the same way a stationary resize does.
+// accounts for the error/captions panels exactly the same way a stationary
+// resize does.
 function currentRailHeight() {
-    return railErrorVisible ? RAIL_HEIGHT + RAIL_GAP + RAIL_ERROR_PANEL_HEIGHT : RAIL_HEIGHT;
+    return computeRailHeight({ errorVisible: railErrorVisible, captionsVisible: railCaptionsVisible });
 }
 
 // How long the floating rail's CSS pop-out animation runs for (see
@@ -414,7 +414,10 @@ function computeAndCacheRailBounds(relativeTo) {
   const b = target.getBounds();
   const display = screen.getDisplayNearestPoint({ x: b.x, y: b.y });
 
-  return computeRailBounds(display.workArea, { errorVisible: railErrorVisible });
+  return computeRailBounds(display.workArea, {
+    errorVisible: railErrorVisible,
+    captionsVisible: railCaptionsVisible,
+  });
 }
 
 // The rail window is the app's single persistent capture engine: it owns the
@@ -548,20 +551,31 @@ function createRailWindow() {
     });
 }
 
-ipcHandle('rail:setErrorVisible', (_event, visible) => {
-    railErrorVisible = !!visible;
+// Shared by the error-toast and live-captions panel toggles: resize the
+// rail window in place (preserve x/y) to whatever the current panel set
+// needs.
+function resizeRailForPanels() {
     if (!railWindow || railWindow.isDestroyed()) return;
     // A snap slide still in flight would keep resetting the old height on
     // every tick -- stop it and resize at the spot it was heading to.
     const snapTarget = cancelSnapAnimation(railWindow);
     const current = railWindow.getBounds();
-    // Resize in place (preserve x/y) rather than recentering.
     railWindow.setBounds({
         x: snapTarget?.x ?? current.x,
         y: snapTarget?.y ?? current.y,
         width: current.width,
         height: currentRailHeight(),
     });
+}
+
+ipcHandle('rail:setErrorVisible', (_event, visible) => {
+    railErrorVisible = !!visible;
+    resizeRailForPanels();
+});
+
+ipcHandle('rail:setCaptionsVisible', (_event, visible) => {
+    railCaptionsVisible = !!visible;
+    resizeRailForPanels();
 });
 
 ipcHandle('rail:command', (_event, action) => {

@@ -107,6 +107,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
       console.warn("[preload] setRailErrorVisible failed:", e);
     }
   },
+
+  setRailCaptionsVisible: async (visible) => {
+    try {
+      await ipcRenderer.invoke("rail:setCaptionsVisible", visible);
+    } catch (e) {
+      console.warn("[preload] setRailCaptionsVisible failed:", e);
+    }
+  },
 });
 
 contextBridge.exposeInMainWorld("systemAPI", {
