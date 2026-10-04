@@ -20,7 +20,9 @@ from app.settings_store import (
 
 def test_whisper_model_choices_values_match_set():
     assert WHISPER_MODEL_VALUES == {c["value"] for c in WHISPER_MODEL_CHOICES}
-    assert WHISPER_MODEL_VALUES == {"tiny.en", "base.en", "small.en", "medium.en"}
+    # Multilingual sizes -- the English-only ".en" variant is picked at
+    # transcription time by resolve_whisper_model when the language is "en".
+    assert WHISPER_MODEL_VALUES == {"tiny", "base", "small", "medium"}
 
 
 def test_default_settings_uses_env_vars(monkeypatch, tmp_path):
@@ -29,7 +31,9 @@ def test_default_settings_uses_env_vars(monkeypatch, tmp_path):
     storage = tmp_path / "uploads"
     result = default_settings(storage)
     assert result == {
-        "whisper_model": "small.en",
+        # A legacy ".en" env value is normalized to its size.
+        "whisper_model": "small",
+        "transcription_language": "auto",
         "storage_dir": str(storage),
         "ollama_chat_model": "custom-chat:latest",
         "custom_vocabulary": "",
@@ -70,7 +74,8 @@ def test_default_settings_falls_back_without_env_vars(monkeypatch, tmp_path):
     monkeypatch.delenv("OLLAMA_CHAT_MODEL", raising=False)
     storage = tmp_path / "uploads"
     result = default_settings(storage)
-    assert result["whisper_model"] == "tiny.en"
+    assert result["whisper_model"] == "base"
+    assert result["transcription_language"] == "auto"
     assert result["ollama_chat_model"] == "gemma3:4b"
     assert result["storage_dir"] == str(storage)
     assert result["custom_vocabulary"] == ""
@@ -95,7 +100,7 @@ def test_load_or_init_returns_existing_file_unmodified(tmp_path):
     storage = tmp_path / "uploads"
     settings_path.write_text(
         json.dumps({
-            "whisper_model": "medium.en",
+            "whisper_model": "medium",
             "storage_dir": str(tmp_path / "custom"),
             "ollama_chat_model": "llama3.1:8b",
         }),
@@ -104,9 +109,80 @@ def test_load_or_init_returns_existing_file_unmodified(tmp_path):
 
     result = load_or_init(settings_path, storage)
 
-    assert result["whisper_model"] == "medium.en"
+    assert result["whisper_model"] == "medium"
     assert result["storage_dir"] == str(tmp_path / "custom")
     assert result["ollama_chat_model"] == "llama3.1:8b"
+
+
+def test_load_or_init_migrates_a_legacy_english_only_model(tmp_path):
+    """A pre-multilingual settings.json stored a concrete ".en" model name
+    and had no language setting: the size is kept and the language pinned
+    to English, so resolve_whisper_model lands on the exact model that
+    install was already running."""
+    from app.settings_store import resolve_whisper_model
+
+    settings_path = tmp_path / "settings.json"
+    storage = tmp_path / "uploads"
+    settings_path.write_text(
+        json.dumps({"whisper_model": "small.en", "storage_dir": str(tmp_path / "custom")}),
+        encoding="utf-8",
+    )
+
+    result = load_or_init(settings_path, storage)
+
+    assert result["whisper_model"] == "small"
+    assert result["transcription_language"] == "en"
+    assert resolve_whisper_model(result["whisper_model"], result["transcription_language"]) == "small.en"
+
+
+def test_load_or_init_respects_an_explicit_language_next_to_a_legacy_model(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    storage = tmp_path / "uploads"
+    settings_path.write_text(
+        json.dumps({
+            "whisper_model": "small.en",
+            "transcription_language": "tr",
+            "storage_dir": str(tmp_path / "custom"),
+        }),
+        encoding="utf-8",
+    )
+
+    result = load_or_init(settings_path, storage)
+
+    assert result["whisper_model"] == "small"
+    assert result["transcription_language"] == "tr"
+
+
+def test_resolve_whisper_model_picks_the_en_variant_only_for_english():
+    from app.settings_store import resolve_whisper_model
+
+    assert resolve_whisper_model("base", "en") == "base.en"
+    assert resolve_whisper_model("base", "auto") == "base"
+    assert resolve_whisper_model("base", "tr") == "base"
+    # Legacy concrete names from an old queued job's inputs snapshot.
+    assert resolve_whisper_model("base.en", "en") == "base.en"
+    assert resolve_whisper_model("base.en", "auto") == "base"
+
+
+def test_resolve_transcribe_language_maps_auto_to_none():
+    from app.settings_store import resolve_transcribe_language
+
+    assert resolve_transcribe_language("auto") is None
+    assert resolve_transcribe_language("en") == "en"
+    assert resolve_transcribe_language("tr") == "tr"
+
+
+def test_transcription_language_choices_are_valid_and_include_auto():
+    from app.settings_store import (
+        TRANSCRIPTION_LANGUAGE_CHOICES,
+        TRANSCRIPTION_LANGUAGE_VALUES,
+    )
+
+    assert TRANSCRIPTION_LANGUAGE_VALUES == {c["value"] for c in TRANSCRIPTION_LANGUAGE_CHOICES}
+    assert "auto" in TRANSCRIPTION_LANGUAGE_VALUES
+    assert "en" in TRANSCRIPTION_LANGUAGE_VALUES
+    # "auto" is the list's first entry (the dropdown default position).
+    assert TRANSCRIPTION_LANGUAGE_CHOICES[0]["value"] == "auto"
 
 
 def test_load_or_init_tolerates_corrupt_file(tmp_path):
@@ -193,11 +269,11 @@ def test_save_over_a_corrupt_file_rewrites_it_and_clears_the_error(tmp_path):
     settings_path.write_text("{oops", encoding="utf-8")
     storage = tmp_path / "uploads"
 
-    save(settings_path, {"whisper_model": "base.en"}, storage)
+    save(settings_path, {"whisper_model": "small"}, storage)
 
     settings, error = load_checked(settings_path, storage)
     assert error is None
-    assert settings["whisper_model"] == "base.en"
+    assert settings["whisper_model"] == "small"
     assert len(list(tmp_path.glob("settings.corrupt-*.json"))) == 1
 
 
@@ -229,11 +305,11 @@ def test_load_or_init_missing_file_creates_no_corrupt_sibling(tmp_path):
 def test_load_or_init_fills_missing_keys_from_defaults(tmp_path):
     settings_path = tmp_path / "settings.json"
     storage = tmp_path / "uploads"
-    settings_path.write_text(json.dumps({"whisper_model": "small.en"}), encoding="utf-8")
+    settings_path.write_text(json.dumps({"whisper_model": "small"}), encoding="utf-8")
 
     result = load_or_init(settings_path, storage)
 
-    assert result["whisper_model"] == "small.en"
+    assert result["whisper_model"] == "small"
     assert result["storage_dir"] == str(storage)
     assert "ollama_chat_model" in result
 

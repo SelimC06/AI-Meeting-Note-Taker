@@ -292,8 +292,19 @@ export type WhisperModelChoice = {
   description: string;
 };
 
+export type TranscriptionLanguageChoice = {
+  value: string;
+  label: string;
+};
+
 export type Settings = {
+  // The model SIZE ("base"), not a concrete faster-whisper name: the
+  // backend picks the multilingual or English-only variant per recording
+  // from transcription_language.
   whisper_model: string;
+  // "auto" (detect per recording) or a fixed language code from
+  // transcription_language_choices.
+  transcription_language: string;
   storage_dir: string;
   ollama_chat_model: string;
   custom_vocabulary: string;
@@ -314,6 +325,7 @@ export type Settings = {
   custom_api_key_set: boolean;
   custom_model_name: string;
   whisper_model_choices: WhisperModelChoice[];
+  transcription_language_choices: TranscriptionLanguageChoice[];
 };
 
 export type SettingsSecrets = {
@@ -334,6 +346,7 @@ export async function updateSettings(
     Pick<
       Settings,
       | "whisper_model"
+      | "transcription_language"
       | "storage_dir"
       | "ollama_chat_model"
       | "custom_vocabulary"

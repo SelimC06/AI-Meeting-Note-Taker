@@ -30,6 +30,7 @@ def transcribe_audio(
     model,
     path,
     initial_prompt=None,
+    language=None,
     beam_size=1,
     vad_filter=False,
     word_timestamps=True,
@@ -54,10 +55,16 @@ def transcribe_audio(
     in either the LibriSpeech utterances or the synthetic speed clips) --
     still exposed as a parameter for callers with real meeting audio to test
     against.
+
+    language=None lets Whisper auto-detect (the "auto" setting); a code
+    ("en", "tr", ...) pins it, which skips detection and is what
+    settings_store.resolve_transcribe_language passes for a fixed-language
+    setting. English-only ".en" models simply ignore it.
     """
     return model.transcribe(
         path,
         initial_prompt=initial_prompt,
+        language=language,
         beam_size=beam_size,
         vad_filter=vad_filter,
         word_timestamps=word_timestamps,

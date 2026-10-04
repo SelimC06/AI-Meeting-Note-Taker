@@ -58,10 +58,14 @@ from .settings_store import (
     SAVE_LOCK,
     WHISPER_MODEL_CHOICES,
     WHISPER_MODEL_VALUES,
+    TRANSCRIPTION_LANGUAGE_CHOICES,
+    TRANSCRIPTION_LANGUAGE_VALUES,
     EXPORT_DIR_NAME,
     StorageMoveError,
     load_checked as load_settings_checked,
     move_storage_dir,
+    resolve_transcribe_language,
+    resolve_whisper_model,
     save as save_settings,
 )
 from .bin_paths import FFMPEG_BIN, FFPROBE_BIN
@@ -469,6 +473,7 @@ def run_startup_maintenance() -> None:
         print(f"[server] startup export-zip sweep failed (continuing): {e}", flush=True)
 
 WHISPER_MODEL = _settings["whisper_model"]
+TRANSCRIPTION_LANGUAGE = _settings["transcription_language"]
 OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
 CUSTOM_VOCABULARY = _settings["custom_vocabulary"]
 ADVANCED_DIARIZATION_ENABLED = _settings["advanced_diarization_enabled"]
@@ -620,12 +625,19 @@ def transcribe_dual_tracks(
     system_wav: Path,
     model_name: str,
     initial_prompt: Optional[str],
+    language: Optional[str] = None,
 ) -> List[dict]:
     """Independently transcribe the mic and system tracks and merge them into
     one chronological, speaker-tagged timeline ("You" vs. "Others").
+    language=None auto-detects -- per track, so a call where you speak one
+    language and the remote side another still transcribes both correctly.
     """
-    mic_segments = transcribe_wav(str(mic_wav), model_name=model_name, initial_prompt=initial_prompt)
-    system_segments = transcribe_wav(str(system_wav), model_name=model_name, initial_prompt=initial_prompt)
+    mic_segments = transcribe_wav(
+        str(mic_wav), model_name=model_name, initial_prompt=initial_prompt, language=language
+    )
+    system_segments = transcribe_wav(
+        str(system_wav), model_name=model_name, initial_prompt=initial_prompt, language=language
+    )
     return merge_track_segments(mic_segments, system_segments)
 
 
@@ -889,6 +901,7 @@ def _is_http_url(value: str) -> bool:
 
 class SettingsUpdate(BaseModel):
     whisper_model: Optional[str] = None
+    transcription_language: Optional[str] = None
     storage_dir: Optional[str] = None
     ollama_chat_model: Optional[str] = None
     custom_vocabulary: Optional[str] = None
@@ -912,6 +925,7 @@ def _public_settings(settings: dict) -> dict:
     for key in SECRET_SETTING_KEYS:
         public[f"{key}_set"] = bool(settings.get(key))
     public["whisper_model_choices"] = WHISPER_MODEL_CHOICES
+    public["transcription_language_choices"] = TRANSCRIPTION_LANGUAGE_CHOICES
     return public
 
 
@@ -925,6 +939,7 @@ def get_settings():
     # wrong value and a subsequent PATCH to merge onto the stale re-seed.
     return _public_settings({
         "whisper_model": WHISPER_MODEL,
+        "transcription_language": TRANSCRIPTION_LANGUAGE,
         "storage_dir": str(STORE),
         "ollama_chat_model": OLLAMA_CHAT_MODEL,
         "custom_vocabulary": CUSTOM_VOCABULARY,
@@ -939,13 +954,19 @@ def get_settings():
 
 @app.patch("/settings")
 def patch_settings(body: SettingsUpdate):
-    global STORE, WHISPER_MODEL, OLLAMA_CHAT_MODEL, CUSTOM_VOCABULARY, move_in_progress
+    global STORE, WHISPER_MODEL, TRANSCRIPTION_LANGUAGE, OLLAMA_CHAT_MODEL, CUSTOM_VOCABULARY, move_in_progress
     global ADVANCED_DIARIZATION_ENABLED, HUGGINGFACE_TOKEN
     global AI_PROVIDER, CUSTOM_API_BASE_URL, CUSTOM_API_KEY, CUSTOM_MODEL_NAME
     global SETTINGS_ERROR, STORE_UNTRUSTED
 
     if body.whisper_model is not None and body.whisper_model not in WHISPER_MODEL_VALUES:
         raise HTTPException(400, f"Invalid whisper_model: {body.whisper_model!r}")
+
+    if (
+        body.transcription_language is not None
+        and body.transcription_language not in TRANSCRIPTION_LANGUAGE_VALUES
+    ):
+        raise HTTPException(400, f"Invalid transcription_language: {body.transcription_language!r}")
 
     if body.storage_dir is not None and not Path(body.storage_dir).is_absolute():
         raise HTTPException(400, "Storage folder must be an absolute path")
@@ -979,6 +1000,7 @@ def patch_settings(body: SettingsUpdate):
         # load_or_init-based merge a no-op on whatever is on disk.
         updates: dict = {
             "whisper_model": WHISPER_MODEL,
+            "transcription_language": TRANSCRIPTION_LANGUAGE,
             "storage_dir": str(STORE),
             "ollama_chat_model": OLLAMA_CHAT_MODEL,
             "custom_vocabulary": CUSTOM_VOCABULARY,
@@ -991,6 +1013,8 @@ def patch_settings(body: SettingsUpdate):
         }
         if body.whisper_model is not None:
             updates["whisper_model"] = body.whisper_model
+        if body.transcription_language is not None:
+            updates["transcription_language"] = body.transcription_language
         if body.ollama_chat_model is not None:
             updates["ollama_chat_model"] = body.ollama_chat_model
         if body.custom_vocabulary is not None:
@@ -1104,6 +1128,7 @@ def patch_settings(body: SettingsUpdate):
         STORE = Path(settings["storage_dir"])
         STORE.mkdir(parents=True, exist_ok=True)
         WHISPER_MODEL = settings["whisper_model"]
+        TRANSCRIPTION_LANGUAGE = settings["transcription_language"]
         OLLAMA_CHAT_MODEL = settings["ollama_chat_model"]
         CUSTOM_VOCABULARY = settings["custom_vocabulary"]
         ADVANCED_DIARIZATION_ENABLED = settings["advanced_diarization_enabled"]
@@ -1436,6 +1461,17 @@ def _run_process_job(job_id: str) -> None:
     whisper_model = inputs["whisper_model"]
     # .get, not [...]: a job queued by an older build (or persisted across an
     # upgrade) has none of these keys, and that must not crash the worker.
+    # The language default mirrors what an older job's concrete model name
+    # implied: a ".en" snapshot was an English-only run, and resolving it
+    # with "en" keeps that job on the exact model it was queued with.
+    transcription_language = inputs.get(
+        "transcription_language", "en" if whisper_model.endswith(".en") else "auto"
+    )
+    # Resolve once for the whole job: the concrete faster-whisper model
+    # (the ".en" variant when the language is pinned to English) and the
+    # language= argument every transcription below passes (None = detect).
+    whisper_model = resolve_whisper_model(whisper_model, transcription_language)
+    whisper_language = resolve_transcribe_language(transcription_language)
     custom_vocabulary = inputs.get("custom_vocabulary", "")
     ollama_chat_model = inputs.get("ollama_chat_model") or OLLAMA_CHAT_MODEL
     # .get(...) with defaults: inputs dicts created by an older backend
@@ -1517,7 +1553,8 @@ def _run_process_job(job_id: str) -> None:
         if mic_wav is not None and system_wav is not None and transcribe_wav is not None:
             try:
                 transcript_segments = transcribe_dual_tracks(
-                    mic_wav, system_wav, whisper_model, custom_vocabulary.strip() or None
+                    mic_wav, system_wav, whisper_model, custom_vocabulary.strip() or None,
+                    language=whisper_language,
                 )
             except Exception as e:
                 log(f"dual-track transcription failed, falling back to mixed audio: {e}")
@@ -1576,6 +1613,7 @@ def _run_process_job(job_id: str) -> None:
                     solo_segments = transcribe_wav(
                         str(single_wav), model_name=whisper_model,
                         initial_prompt=custom_vocabulary.strip() or None,
+                        language=whisper_language,
                     )
                     turns = pyannote_diarize(str(single_wav), token=huggingface_token)
                     diarized = align_speaker_turns(solo_segments, turns)
@@ -1610,6 +1648,7 @@ def _run_process_job(job_id: str) -> None:
                 single_segments = transcribe_wav(
                     str(mixed_wav), model_name=whisper_model,
                     initial_prompt=custom_vocabulary.strip() or None,
+                    language=whisper_language,
                 )
                 single_segments = [{**seg, "speaker": single_speaker} for seg in single_segments]
                 if single_segments:
@@ -1635,6 +1674,7 @@ def _run_process_job(job_id: str) -> None:
                     separate_tracks=False,
                     extract_frames_after=False,
                     initial_prompt=custom_vocabulary.strip() or None,
+                    language=whisper_language,
                 )
             except Exception as e:
                 log(f"stop_recording_and_transcribe failed, falling back to raw transcription: {e}")
@@ -1783,7 +1823,8 @@ def _run_process_job(job_id: str) -> None:
                 # double the RAM) for what's otherwise the same model.
                 model = get_whisper_model(WhisperModel, whisper_model, device="cpu", compute_type="int8")
                 segments, info = transcribe_audio(
-                    model, str(final_path), initial_prompt=custom_vocabulary.strip() or None
+                    model, str(final_path), initial_prompt=custom_vocabulary.strip() or None,
+                    language=whisper_language,
                 )
                 transcript = "\n".join(s.text.strip() for s in segments if s.text)
                 transcribed = True
@@ -1940,6 +1981,7 @@ def process(
         # video files land from where the session index entry gets appended.
         store = STORE
         whisper_model = WHISPER_MODEL
+        transcription_language = TRANSCRIPTION_LANGUAGE
         custom_vocabulary = CUSTOM_VOCABULARY
         ollama_chat_model = OLLAMA_CHAT_MODEL
         advanced_diarization_enabled = ADVANCED_DIARIZATION_ENABLED
@@ -1974,6 +2016,7 @@ def process(
                 "system_webm": str(system_webm) if system_webm else None,
                 "mic_webm": str(mic_webm) if mic_webm else None,
                 "whisper_model": whisper_model,
+                "transcription_language": transcription_language,
                 "custom_vocabulary": custom_vocabulary,
                 "ollama_chat_model": ollama_chat_model,
                 "advanced_diarization_enabled": advanced_diarization_enabled,

@@ -14,7 +14,8 @@ import {
 vi.mock("../api");
 
 const baseSettings: Settings = {
-  whisper_model: "base.en",
+  whisper_model: "base",
+  transcription_language: "auto",
   storage_dir: "C:\\Users\\test\\recordings",
   ollama_chat_model: "gemma3:4b",
   custom_vocabulary: "",
@@ -25,10 +26,15 @@ const baseSettings: Settings = {
   custom_api_key_set: false,
   custom_model_name: "",
   whisper_model_choices: [
-    { value: "tiny.en", label: "Tiny", description: "Fastest, lower accuracy" },
-    { value: "base.en", label: "Base", description: "Balanced (default)" },
-    { value: "small.en", label: "Small", description: "Slower, more accurate" },
-    { value: "medium.en", label: "Medium", description: "Slowest, most accurate" },
+    { value: "tiny", label: "Tiny", description: "Fastest, lower accuracy" },
+    { value: "base", label: "Base", description: "Balanced (default)" },
+    { value: "small", label: "Small", description: "Slower, more accurate" },
+    { value: "medium", label: "Medium", description: "Slowest, most accurate" },
+  ],
+  transcription_language_choices: [
+    { value: "auto", label: "Auto-detect" },
+    { value: "en", label: "English" },
+    { value: "tr", label: "Turkish" },
   ],
 };
 
@@ -78,34 +84,57 @@ afterEach(() => {
 it("renders whisper model choices on the default Transcription section, and the storage dir under Storage", async () => {
   render(<SettingsPage active />);
 
-  expect(await screen.findByText(/\[base\.en\]/)).toBeInTheDocument();
+  expect(await screen.findByText(/\[base\]/)).toBeInTheDocument();
 
   openSection("Storage");
   expect(await screen.findByText(baseSettings.storage_dir)).toBeInTheDocument();
 });
 
 it("selecting a whisper model persists it and updates the UI", async () => {
-  vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, whisper_model: "small.en" });
+  vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, whisper_model: "small" });
 
   render(<SettingsPage active />);
-  const smallButton = await screen.findByText(/\[small\.en\]/);
+  const smallButton = await screen.findByText(/\[small\]/);
   fireEvent.click(smallButton);
 
   await waitFor(() => {
-    expect(updateSettings).toHaveBeenCalledWith({ whisper_model: "small.en" });
+    expect(updateSettings).toHaveBeenCalledWith({ whisper_model: "small" });
   });
-  expect(await screen.findByText(/\[small\.en\]/)).toBeInTheDocument();
+  expect(await screen.findByText(/\[small\]/)).toBeInTheDocument();
 });
 
 it("rolls back the whisper model selection and shows an error when the save fails", async () => {
   vi.mocked(updateSettings).mockRejectedValue(new Error("network down"));
 
   render(<SettingsPage active />);
-  const smallButton = await screen.findByText(/\[small\.en\]/);
+  const smallButton = await screen.findByText(/\[small\]/);
   fireEvent.click(smallButton);
 
   expect(await screen.findByText("network down")).toBeInTheDocument();
   expect(updateSettings).toHaveBeenCalledTimes(1);
+});
+
+it("selecting a transcription language persists it", async () => {
+  vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, transcription_language: "tr" });
+
+  render(<SettingsPage active />);
+  const select = await screen.findByLabelText("transcription language");
+  fireEvent.change(select, { target: { value: "tr" } });
+
+  await waitFor(() => {
+    expect(updateSettings).toHaveBeenCalledWith({ transcription_language: "tr" });
+  });
+  expect((select as HTMLSelectElement).value).toBe("tr");
+});
+
+it("shows an error when saving the transcription language fails", async () => {
+  vi.mocked(updateSettings).mockRejectedValue(new Error("network down"));
+
+  render(<SettingsPage active />);
+  const select = await screen.findByLabelText("transcription language");
+  fireEvent.change(select, { target: { value: "en" } });
+
+  expect(await screen.findByText("network down")).toBeInTheDocument();
 });
 
 it("moves the storage directory on browse success", async () => {
@@ -113,7 +142,7 @@ it("moves the storage directory on browse success", async () => {
   vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, storage_dir: "D:\\new-recordings" });
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("Storage");
 
   const browseButton = await screen.findByRole("button", { name: /browse/i });
@@ -130,7 +159,7 @@ it("shows a storage error and keeps the old path when the move fails", async () 
   vi.mocked(updateSettings).mockRejectedValue(new Error("Destination not empty"));
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("Storage");
 
   const browseButton = await screen.findByRole("button", { name: /browse/i });
@@ -148,7 +177,7 @@ it("shows the not-installed marker when the configured model isn't in the instal
   });
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("AI Model");
 
   expect(await screen.findByText(/gemma3:4b \(not installed\)/)).toBeInTheDocument();
@@ -158,7 +187,7 @@ it("shows unreachable message and retries on button click", async () => {
   vi.mocked(getOllamaModels).mockResolvedValueOnce({ ok: false, models: [], error: "connection refused" });
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("AI Model");
 
   expect(await screen.findByText(/ollama unreachable/i)).toBeInTheDocument();
@@ -173,7 +202,7 @@ it("shows unreachable message and retries on button click", async () => {
 
 it("shows the local-first privacy statement", async () => {
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("Privacy");
 
   expect(await screen.findByText(/never uploaded anywhere/i)).toBeInTheDocument();
@@ -186,7 +215,7 @@ it("shows the current app version and a not-checked-yet message before any check
   // since "idle" doubled as both the not-yet-checked default AND the
   // completed-check-found-nothing result.
   render(<SettingsPage active={true} />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("About");
 
   await waitFor(() => {
@@ -211,7 +240,7 @@ it("shows 'You're on the latest version' once a completed check reports idle", a
   });
 
   render(<SettingsPage active={true} />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("About");
 
   await waitFor(() => expect(screen.getByText(/1\.0\.0/)).toBeInTheDocument());
@@ -240,7 +269,7 @@ it("shows a downloading message with percent when an update is downloading", asy
   });
 
   render(<SettingsPage active={true} />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("About");
 
   await waitFor(() => expect(screen.getByText(/1\.0\.0/)).toBeInTheDocument());
@@ -268,7 +297,7 @@ it("shows a restart button when an update is ready and calls install on click", 
   });
 
   render(<SettingsPage active={true} />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("About");
 
   await waitFor(() => expect(screen.getByText(/1\.0\.0/)).toBeInTheDocument());
@@ -301,7 +330,7 @@ it("does not throw or log an error when unmounted mid-request and the pending re
   const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 
   const { unmount } = render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("AI Model");
   await screen.findByText(/loading installed models/i);
 
@@ -363,7 +392,7 @@ it("shows an error and keeps the draft text when saving the vocabulary fails", a
 
 it("shows advanced diarization off by default with no token warning", async () => {
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("Diarization");
 
   expect(await screen.findByRole("button", { name: "Off" })).toHaveClass("bg-signal");
@@ -377,7 +406,7 @@ it("enabling advanced diarization persists the setting and warns when no token i
   });
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("Diarization");
 
   await screen.findByRole("button", { name: "Off" });
@@ -393,7 +422,7 @@ it("rolls back the diarization toggle and shows an error when the save fails", a
   vi.mocked(updateSettings).mockRejectedValue(new Error("network down"));
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("Diarization");
 
   await screen.findByRole("button", { name: "Off" });
@@ -410,7 +439,7 @@ it("saves an edited HuggingFace token", async () => {
   });
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("Diarization");
 
   const tokenInput = await screen.findByLabelText(/huggingface access token/i);
@@ -430,7 +459,7 @@ it("shows a saved HuggingFace token as set without its value, and can clear it",
   vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, huggingface_token_set: false });
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("Diarization");
 
   const tokenInput = await screen.findByLabelText(/huggingface access token/i);
@@ -455,7 +484,7 @@ it("does not warn about a missing token once diarization is enabled and a token 
   });
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("Diarization");
 
   await screen.findByRole("button", { name: "On" });
@@ -464,7 +493,7 @@ it("does not warn about a missing token once diarization is enabled and a token 
 
 it("shows the Ollama model picker by default in the AI Model section", async () => {
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("AI Model");
 
   const providerSelect = await screen.findByLabelText(/provider/i);
@@ -476,7 +505,7 @@ it("shows custom provider fields when Custom is selected, and hides the Ollama m
   vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, ai_provider: "custom" });
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("AI Model");
 
   const providerSelect = await screen.findByLabelText(/provider/i);
@@ -492,7 +521,7 @@ it("saves the provider selection immediately", async () => {
   vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, ai_provider: "custom" });
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("AI Model");
 
   const providerSelect = await screen.findByLabelText(/provider/i);
@@ -514,7 +543,7 @@ it("saves the custom provider connection fields together", async () => {
   });
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("AI Model");
 
   const baseUrlInput = await screen.findByLabelText(/base url/i);
@@ -548,7 +577,7 @@ it("keeps a saved API key when the connection is saved with the key field left e
   });
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("AI Model");
 
   const keyInput = await screen.findByLabelText(/^api key$/i);
@@ -574,7 +603,7 @@ it("clears a saved API key", async () => {
   vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, ai_provider: "custom" });
 
   render(<SettingsPage active />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("AI Model");
 
   fireEvent.click(await screen.findByRole("button", { name: /clear key/i }));
@@ -608,19 +637,19 @@ it("keeps the latest whisper choice when an older save answers last", async () =
   vi.mocked(updateSettings).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
 
   render(<SettingsPage active />);
-  fireEvent.click(await screen.findByText(/\[small\.en\]/));
-  fireEvent.click(screen.getByText(/\[medium\.en\]/));
+  fireEvent.click(await screen.findByText(/\[small\]/));
+  fireEvent.click(screen.getByText(/\[medium\]/));
 
   await act(async () => {
-    second.resolve({ ...baseSettings, whisper_model: "medium.en" });
+    second.resolve({ ...baseSettings, whisper_model: "medium" });
     await Promise.resolve();
   });
   await act(async () => {
-    first.resolve({ ...baseSettings, whisper_model: "small.en" });
+    first.resolve({ ...baseSettings, whisper_model: "small" });
     await Promise.resolve();
   });
 
-  expect(selectedWhisper()?.textContent).toContain("[medium.en]");
+  expect(selectedWhisper()?.textContent).toContain("[medium]");
 });
 
 it("a failed older save doesn't roll back a newer choice", async () => {
@@ -629,39 +658,39 @@ it("a failed older save doesn't roll back a newer choice", async () => {
   vi.mocked(updateSettings).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
 
   render(<SettingsPage active />);
-  fireEvent.click(await screen.findByText(/\[small\.en\]/));
-  fireEvent.click(screen.getByText(/\[medium\.en\]/));
+  fireEvent.click(await screen.findByText(/\[small\]/));
+  fireEvent.click(screen.getByText(/\[medium\]/));
 
   await act(async () => {
     first.reject(new Error("stale failure"));
     await Promise.resolve();
   });
 
-  expect(selectedWhisper()?.textContent).toContain("[medium.en]");
+  expect(selectedWhisper()?.textContent).toContain("[medium]");
   expect(screen.queryByText("stale failure")).not.toBeInTheDocument();
 
   await act(async () => {
-    second.resolve({ ...baseSettings, whisper_model: "medium.en" });
+    second.resolve({ ...baseSettings, whisper_model: "medium" });
     await Promise.resolve();
   });
-  expect(selectedWhisper()?.textContent).toContain("[medium.en]");
+  expect(selectedWhisper()?.textContent).toContain("[medium]");
 });
 
 it("a failed latest save rolls back to the last value the backend confirmed", async () => {
   vi.mocked(updateSettings)
-    .mockResolvedValueOnce({ ...baseSettings, whisper_model: "small.en" })
+    .mockResolvedValueOnce({ ...baseSettings, whisper_model: "small" })
     .mockRejectedValueOnce(new Error("disk full"));
 
   render(<SettingsPage active />);
-  fireEvent.click(await screen.findByText(/\[small\.en\]/));
+  fireEvent.click(await screen.findByText(/\[small\]/));
   await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(1));
   await act(async () => {
     await Promise.resolve();
   });
-  fireEvent.click(screen.getByText(/\[medium\.en\]/));
+  fireEvent.click(screen.getByText(/\[medium\]/));
 
   expect(await screen.findByText("disk full")).toBeInTheDocument();
-  expect(selectedWhisper()?.textContent).toContain("[small.en]");
+  expect(selectedWhisper()?.textContent).toContain("[small]");
 });
 
 // ---------- Empty Trash ----------
@@ -681,7 +710,7 @@ async function openStorageWithTrash() {
 it("Empty Trash asks for confirmation and deletes nothing on cancel", async () => {
   await openStorageWithTrash();
   render(<SettingsPage active />);
-  await screen.findByText(/\[small\.en\]/);
+  await screen.findByText(/\[small\]/);
   openSection("Storage");
 
   fireEvent.click(await screen.findByRole("button", { name: "Empty Trash" }));
@@ -696,7 +725,7 @@ it("Empty Trash deletes on confirm and reports the deleted ids", async () => {
   await openStorageWithTrash();
   const onSessionsDeleted = vi.fn();
   render(<SettingsPage active onSessionsDeleted={onSessionsDeleted} />);
-  await screen.findByText(/\[small\.en\]/);
+  await screen.findByText(/\[small\]/);
   openSection("Storage");
 
   fireEvent.click(await screen.findByRole("button", { name: "Empty Trash" }));
@@ -711,7 +740,7 @@ it("Empty Trash reports what it did delete even when a later delete fails", asyn
   vi.mocked(deleteSessionForever).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("500"));
   const onSessionsDeleted = vi.fn();
   render(<SettingsPage active onSessionsDeleted={onSessionsDeleted} />);
-  await screen.findByText(/\[small\.en\]/);
+  await screen.findByText(/\[small\]/);
   openSection("Storage");
 
   fireEvent.click(await screen.findByRole("button", { name: "Empty Trash" }));
@@ -735,7 +764,7 @@ it("on macOS, offers a download link for a new version instead of an install but
   });
 
   render(<SettingsPage active={true} />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("About");
 
   act(() => {
@@ -757,7 +786,7 @@ it("tells the app the library changed after the storage folder moves (and not wh
   const onLibraryChanged = vi.fn();
 
   render(<SettingsPage active onLibraryChanged={onLibraryChanged} />);
-  await screen.findByText(/\[base\.en\]/);
+  await screen.findByText(/\[base\]/);
   openSection("Storage");
   const browse = await screen.findByRole("button", { name: /browse/i });
 

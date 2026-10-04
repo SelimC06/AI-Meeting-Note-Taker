@@ -1811,7 +1811,8 @@ def test_get_settings_returns_current_values_and_choices(client: TestClient):
     assert "ollama_chat_model" in body
     assert "custom_vocabulary" in body
     values = {c["value"] for c in body["whisper_model_choices"]}
-    assert values == {"tiny.en", "base.en", "small.en", "medium.en"}
+    assert values == {"tiny", "base", "small", "medium"}
+    assert {c["value"] for c in body["transcription_language_choices"]} >= {"auto", "en"}
 
 
 def test_patch_settings_updates_custom_vocabulary(client: TestClient):
@@ -1828,16 +1829,16 @@ def test_patch_settings_updates_custom_vocabulary(client: TestClient):
 
 
 def test_patch_settings_updates_whisper_model(client: TestClient):
-    resp = client.patch("/settings", json={"whisper_model": "small.en"})
+    resp = client.patch("/settings", json={"whisper_model": "small"})
     assert resp.status_code == 200
-    assert resp.json()["whisper_model"] == "small.en"
+    assert resp.json()["whisper_model"] == "small"
 
     import app.server as server_module
-    assert server_module.WHISPER_MODEL == "small.en"
+    assert server_module.WHISPER_MODEL == "small"
 
     # Reflected on a subsequent GET too.
     resp2 = client.get("/settings")
-    assert resp2.json()["whisper_model"] == "small.en"
+    assert resp2.json()["whisper_model"] == "small"
 
 
 def test_patch_settings_rejects_invalid_whisper_model(client: TestClient):
@@ -2079,7 +2080,7 @@ def test_get_settings_reads_live_globals_not_disk_after_settings_file_deleted(cl
     # Cause settings.json to be created via a request. GET /settings itself
     # no longer touches disk (that's the fix under test), so use a PATCH,
     # which still writes through save_settings.
-    client.patch("/settings", json={"whisper_model": "base.en"})
+    client.patch("/settings", json={"whisper_model": "small"})
     assert server_module.SETTINGS_PATH.exists()
 
     # Push the live globals to non-default values, then delete settings.json
@@ -3448,7 +3449,7 @@ def test_process_transcribes_mic_and_system_tracks_independently_when_both_prese
     monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
     monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
 
-    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None, language=None):
         name = Path(wav_path).name
         if name == "mic.wav":
             return [{"start": 0.0, "end": 1.0, "text": "yes exactly"}]
@@ -3531,7 +3532,43 @@ def _post_dual_track(client, monkeypatch, fake_transcribe_wav):
     return wait_for_job(client, resp.json()["job_id"])
 
 
-def _two_speaker_system_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+def test_process_passes_transcription_language_and_resolved_model(client, monkeypatch):
+    """The language setting flows from PATCH /settings through the job's
+    inputs snapshot into every transcribe_wav call -- and the stored model
+    SIZE resolves to the concrete model: multilingual for a pinned
+    non-English language, the ".en" variant for English."""
+    captured = []
+
+    def capturing_transcribe_wav(wav_path, model_name=None, initial_prompt=None, language=None):
+        captured.append({"model": model_name, "language": language})
+        return [{"start": 0.0, "end": 1.0, "text": "merhaba"}]
+
+    client.patch("/settings", json={"whisper_model": "base", "transcription_language": "tr"})
+    job = _post_dual_track(client, monkeypatch, capturing_transcribe_wav)
+    assert job["status"] == "done"
+    assert captured and all(c == {"model": "base", "language": "tr"} for c in captured)
+
+    captured.clear()
+    client.patch("/settings", json={"transcription_language": "en"})
+    job = _post_dual_track(client, monkeypatch, capturing_transcribe_wav)
+    assert job["status"] == "done"
+    assert captured and all(c == {"model": "base.en", "language": "en"} for c in captured)
+
+    captured.clear()
+    client.patch("/settings", json={"transcription_language": "auto"})
+    job = _post_dual_track(client, monkeypatch, capturing_transcribe_wav)
+    assert job["status"] == "done"
+    # auto -> language=None lets Whisper detect, on the multilingual model.
+    assert captured and all(c == {"model": "base", "language": None} for c in captured)
+
+
+def test_patch_settings_rejects_unknown_transcription_language(client):
+    resp = client.patch("/settings", json={"transcription_language": "klingon"})
+    assert resp.status_code == 400
+    assert "transcription_language" in resp.json()["detail"]
+
+
+def _two_speaker_system_transcribe_wav(wav_path, model_name=None, initial_prompt=None, language=None):
     name = Path(wav_path).name
     if name == "mic.wav":
         return [{"start": 0.0, "end": 1.0, "text": "yes exactly"}]
@@ -3631,7 +3668,7 @@ def test_process_diarizes_single_track_fallback_when_enabled(client, monkeypatch
         server_module, "stop_recording_and_transcribe", fake_stop_recording_and_transcribe
     )
 
-    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None, language=None):
         return [
             {"start": 0.0, "end": 1.0, "text": "hello"},
             {"start": 2.0, "end": 3.0, "text": "hi back"},
@@ -3675,7 +3712,7 @@ def test_process_falls_back_when_dual_track_transcription_raises(client, monkeyp
     monkeypatch.setattr(server_module, "mux_video_audio", fake_mux)
     monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
 
-    def failing_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+    def failing_transcribe_wav(wav_path, model_name=None, initial_prompt=None, language=None):
         raise RuntimeError("whisper exploded")
 
     monkeypatch.setattr(server_module, "transcribe_wav", failing_transcribe_wav)
@@ -3757,7 +3794,7 @@ def test_get_session_transcript_resolves_speaker_names(client, monkeypatch):
     _fake_save_and_mux(monkeypatch)
     monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
 
-    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None, language=None):
         name = Path(wav_path).name
         if name == "mic.wav":
             return [{"start": 0.0, "end": 1.0, "text": "hi"}]
@@ -4034,7 +4071,7 @@ def _post_tracks(client, monkeypatch, fake_transcribe_wav, *, mic, system):
 
 
 def test_process_writes_transcript_for_mic_only_recording(client, monkeypatch):
-    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None, language=None):
         return [{"start": 0.0, "end": 1.0, "text": "just me talking"}]
 
     segments, captured = _post_tracks(client, monkeypatch, fake_transcribe_wav, mic=True, system=False)
@@ -4045,7 +4082,7 @@ def test_process_writes_transcript_for_mic_only_recording(client, monkeypatch):
 
 
 def test_process_writes_transcript_for_system_only_recording(client, monkeypatch):
-    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None, language=None):
         return [{"start": 0.0, "end": 1.0, "text": "the other side"}]
 
     segments, _ = _post_tracks(client, monkeypatch, fake_transcribe_wav, mic=False, system=True)
@@ -4060,7 +4097,7 @@ def test_process_falls_back_to_unlabeled_mixed_transcript_when_dual_track_fails(
 
     monkeypatch.setattr(server_module, "mix_audios_wav", fake_mix)
 
-    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None):
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None, language=None):
         if Path(wav_path).name != "mixed.wav":
             raise RuntimeError("per-track transcription blew up")
         return [{"start": 0.0, "end": 1.0, "text": "everyone at once"}]

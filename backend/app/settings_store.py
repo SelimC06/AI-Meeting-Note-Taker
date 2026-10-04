@@ -11,18 +11,91 @@ from .corrupt_files import preserve_corrupt_copy
 
 SAVE_LOCK = threading.RLock()
 
+# Stored as the multilingual model SIZE ("base"), not a concrete
+# faster-whisper model name: the concrete name is picked per transcription
+# by resolve_whisper_model below, which substitutes the English-only
+# ".en" variant (slightly better English WER, see whisper_cache's
+# benchmark notes) whenever the language setting says English.
 WHISPER_MODEL_CHOICES = [
-    {"value": "tiny.en", "label": "Tiny", "description": "Fastest, lower accuracy"},
-    {"value": "base.en", "label": "Base", "description": "Balanced (default)"},
-    {"value": "small.en", "label": "Small", "description": "Slower, more accurate"},
-    {"value": "medium.en", "label": "Medium", "description": "Slowest, most accurate"},
+    {"value": "tiny", "label": "Tiny", "description": "Fastest, lower accuracy"},
+    {"value": "base", "label": "Base", "description": "Balanced (default)"},
+    {"value": "small", "label": "Small", "description": "Slower, more accurate"},
+    {"value": "medium", "label": "Medium", "description": "Slowest, most accurate"},
 ]
 WHISPER_MODEL_VALUES = {c["value"] for c in WHISPER_MODEL_CHOICES}
+
+# Sizes that have an English-only variant published. (All of the current
+# choices do; large-v3 etc. would not, which is why this is a set and not
+# an assumption.)
+_EN_VARIANT_SIZES = {"tiny", "base", "small", "medium"}
+
+# Transcription language: "auto" lets Whisper detect the language per
+# recording; a fixed code skips detection (more reliable for short or
+# code-switched meetings) and, for English, unlocks the ".en" models.
+# A curated subset of Whisper's ~99 languages -- the ones with strong
+# Whisper accuracy -- rather than the full list; "auto" covers the rest.
+TRANSCRIPTION_LANGUAGE_CHOICES = [
+    {"value": "auto", "label": "Auto-detect"},
+    {"value": "ar", "label": "Arabic"},
+    {"value": "zh", "label": "Chinese"},
+    {"value": "cs", "label": "Czech"},
+    {"value": "da", "label": "Danish"},
+    {"value": "nl", "label": "Dutch"},
+    {"value": "en", "label": "English"},
+    {"value": "fi", "label": "Finnish"},
+    {"value": "fr", "label": "French"},
+    {"value": "de", "label": "German"},
+    {"value": "el", "label": "Greek"},
+    {"value": "he", "label": "Hebrew"},
+    {"value": "hi", "label": "Hindi"},
+    {"value": "hu", "label": "Hungarian"},
+    {"value": "id", "label": "Indonesian"},
+    {"value": "it", "label": "Italian"},
+    {"value": "ja", "label": "Japanese"},
+    {"value": "ko", "label": "Korean"},
+    {"value": "no", "label": "Norwegian"},
+    {"value": "pl", "label": "Polish"},
+    {"value": "pt", "label": "Portuguese"},
+    {"value": "ro", "label": "Romanian"},
+    {"value": "ru", "label": "Russian"},
+    {"value": "es", "label": "Spanish"},
+    {"value": "sv", "label": "Swedish"},
+    {"value": "th", "label": "Thai"},
+    {"value": "tr", "label": "Turkish"},
+    {"value": "uk", "label": "Ukrainian"},
+    {"value": "vi", "label": "Vietnamese"},
+]
+TRANSCRIPTION_LANGUAGE_VALUES = {c["value"] for c in TRANSCRIPTION_LANGUAGE_CHOICES}
+
+
+def _normalize_whisper_model(value: str) -> str:
+    """Strip a legacy English-only suffix ("base.en" -> "base") so stored
+    settings and env overrides always hold a plain size."""
+    return value[:-3] if value.endswith(".en") else value
+
+
+def resolve_whisper_model(model: str, language: str) -> str:
+    """Map the stored model size + language setting onto the concrete
+    faster-whisper model name for one transcription. Tolerates a legacy
+    ".en" value arriving from an old queued job's inputs snapshot."""
+    size = _normalize_whisper_model(model)
+    if language == "en" and size in _EN_VARIANT_SIZES:
+        return f"{size}.en"
+    return size
+
+
+def resolve_transcribe_language(language: str) -> Optional[str]:
+    """The `language=` argument for WhisperModel.transcribe(): None means
+    auto-detect; anything else pins the language."""
+    return None if language == "auto" else language
 
 
 def default_settings(default_storage_dir: Path) -> Dict[str, Any]:
     return {
-        "whisper_model": os.getenv("WHISPER_MODEL", "tiny.en"),
+        # "base" matches the "Balanced (default)" label in the choices above
+        # (the old code default, "tiny.en", silently contradicted it).
+        "whisper_model": _normalize_whisper_model(os.getenv("WHISPER_MODEL", "base")),
+        "transcription_language": "auto",
         "storage_dir": str(default_storage_dir),
         "ollama_chat_model": os.getenv("OLLAMA_CHAT_MODEL", "gemma3:4b"),
         "custom_vocabulary": "",
@@ -130,6 +203,17 @@ def load_checked(path: Path, default_storage_dir: Path) -> Tuple[Dict[str, Any],
             # Ollama setup to the bundled model on upgrade. Only a brand
             # new install (no settings file at all) gets "builtin".
             merged["ai_provider"] = "ollama"
+        stored_model = existing.get("whisper_model")
+        if isinstance(stored_model, str) and stored_model.endswith(".en"):
+            # Pre-multilingual installs stored concrete English-only model
+            # names ("base.en"). Store the size, and pin their language to
+            # English (unless the file already has a language, which can't
+            # happen for a file this old): resolve_whisper_model then picks
+            # the exact same ".en" model they ran before, rather than the
+            # upgrade silently switching them to auto-detect multilingual.
+            merged["whisper_model"] = _normalize_whisper_model(stored_model)
+            if "transcription_language" not in existing:
+                merged["transcription_language"] = "en"
         return merged, None
     if not path.exists():
         _write_json_dict(path, defaults)

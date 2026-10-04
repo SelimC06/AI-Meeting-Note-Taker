@@ -36,7 +36,12 @@ type SectionId =
 type DotTone = "ok" | "warn" | "err" | "idle" | "none";
 
 // The settings saved optimistically on click (see saveOptimistic).
-type OptimisticField = "whisper_model" | "ollama_chat_model" | "ai_provider" | "advanced_diarization_enabled";
+type OptimisticField =
+  | "whisper_model"
+  | "transcription_language"
+  | "ollama_chat_model"
+  | "ai_provider"
+  | "advanced_diarization_enabled";
 
 const NAV_GROUPS: { heading: string; sections: { id: SectionId; label: string }[] }[] = [
   {
@@ -99,6 +104,7 @@ export default function SettingsPage({
   const [storageError, setStorageError] = useState<string | null>(null);
 
   const [whisperError, setWhisperError] = useState<string | null>(null);
+  const [languageSaveError, setLanguageSaveError] = useState<string | null>(null);
   const [ollamaSaveError, setOllamaSaveError] = useState<string | null>(null);
 
   const [providerSaveError, setProviderSaveError] = useState<string | null>(null);
@@ -266,6 +272,9 @@ export default function SettingsPage({
   }, []);
 
   const handleWhisperChange = (value: string) => saveOptimistic("whisper_model", value, setWhisperError);
+
+  const handleLanguageChange = (value: string) =>
+    saveOptimistic("transcription_language", value, setLanguageSaveError);
 
   const handleOllamaChange = (value: string) => saveOptimistic("ollama_chat_model", value, setOllamaSaveError);
 
@@ -447,6 +456,33 @@ export default function SettingsPage({
                 ))}
               </div>
               {whisperError && <p className="text-xs text-red-400 mt-2">{whisperError}</p>}
+            </div>
+
+            <div className="pt-5 border-t border-line/60 flex flex-col gap-2">
+              <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+                language
+              </h2>
+              <p className="text-xs text-dim">
+                Auto-detect figures out the spoken language per recording (each audio track
+                separately). Pinning a language skips detection; English also uses the more
+                accurate English-only models.
+              </p>
+              <label htmlFor="transcription-language" className="sr-only">
+                transcription language
+              </label>
+              <select
+                id="transcription-language"
+                value={settings.transcription_language ?? "auto"}
+                onChange={(e) => handleLanguageChange(e.target.value)}
+                className="self-start bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+              >
+                {(settings.transcription_language_choices ?? []).map((choice) => (
+                  <option key={choice.value} value={choice.value}>
+                    {choice.label}
+                  </option>
+                ))}
+              </select>
+              {languageSaveError && <p className="text-xs text-red-400">{languageSaveError}</p>}
             </div>
 
             <div className="pt-5 border-t border-line/60 flex flex-col gap-2">
