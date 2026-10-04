@@ -517,8 +517,12 @@ function createRailWindow() {
     // Debounced rather than immediate: 'moved' fires continuously while the
     // user is actively dragging the floating window (via its own
     // -webkit-app-region:drag), and snapping mid-drag would fight the
-    // cursor. Waiting for 120ms of no further movement means this only
-    // runs once the drag has actually stopped.
+    // cursor. 450ms of stillness, not 120: Electron gives no mouse-button
+    // state during a native window drag, so stillness is the only release
+    // signal there is -- and at 120ms, merely pausing mid-hold near an
+    // edge yanked the rail out of the user's hand. A natural mid-drag
+    // pause survives 450ms; after a real release the extra wait is
+    // imperceptible (the snap happens while nobody is touching anything).
     railWindow.on('moved', () => {
         // The snap slide's own setBounds ticks fire 'moved' too -- they're
         // the result of a settle, not a new user drag to settle.
@@ -527,7 +531,7 @@ function createRailWindow() {
         railMoveSettleTimer = setTimeout(() => {
             railMoveSettleTimer = null;
             settleFloatingRailPosition();
-        }, 120);
+        }, 450);
     });
     disableZoom(railWindow.webContents);
     preventNavigation(railWindow.webContents);
@@ -1104,11 +1108,17 @@ function createWindow() {
             // allowOffScreen: unlike the rail (which should always be fully
             // reachable), the dashboard needs to stay draggable half off-
             // screen on purpose -- see computeCornerSnap's own comment.
-            const snapped = computeCornerSnap(display.workArea, bounds, 24, { allowOffScreen: true });
+            // Threshold 8 (the geometry default): only attach when the
+            // window is basically on the edge, not merely near it.
+            const snapped = computeCornerSnap(display.workArea, bounds, 8, { allowOffScreen: true });
             if (snapped.x !== bounds.x || snapped.y !== bounds.y) {
                 animateWindowPosition(mainWindow, bounds, snapped);
             }
-        }, 120);
+            // 450ms of stillness, same reasoning as the rail's settle
+            // listener: stillness is the only release signal available
+            // for a native drag, and 120ms treated a mid-hold pause as
+            // "let go".
+        }, 450);
     });
 
     // Cancellable, unlike 'closed' below -- lets us intercept a close

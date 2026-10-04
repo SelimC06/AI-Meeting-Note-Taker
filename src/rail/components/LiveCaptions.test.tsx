@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import LiveCaptions from "./LiveCaptions";
 
 const setRailCaptionsVisible = vi.fn();
@@ -27,10 +27,10 @@ it("renders nothing and reports hidden to main while not visible", () => {
 it("reports visible to main (so the window grows) and shows a listening placeholder", () => {
   render(<LiveCaptions visible captions={[]} />);
   expect(setRailCaptionsVisible).toHaveBeenCalledWith(true);
-  expect(screen.getByRole("log", { name: /live captions/i })).toHaveTextContent("listening…");
+  expect(screen.getByRole("log", { name: /live captions/i })).toHaveTextContent(/listening for speech/);
 });
 
-it("shows only the newest three captions with speaker prefixes", () => {
+it("shows only the newest caption, like real closed captions", async () => {
   render(
     <LiveCaptions
       visible
@@ -43,10 +43,14 @@ it("shows only the newest three captions with speaker prefixes", () => {
     />
   );
   const log = screen.getByRole("log", { name: /live captions/i });
+  // A history stack half-clipped against the fixed panel height; only the
+  // line being spoken is shown now.
   expect(log).not.toHaveTextContent("oldest line");
-  expect(log).toHaveTextContent("them: second");
-  expect(log).toHaveTextContent("you: third");
-  expect(log).toHaveTextContent("them: newest");
+  expect(log).not.toHaveTextContent("second");
+  expect(log).not.toHaveTextContent("third");
+  // The speaker chip sits in the card's status strip; the text types on.
+  expect(log).toHaveTextContent("them");
+  await waitFor(() => expect(log).toHaveTextContent("newest"));
 });
 
 it("reports hidden on unmount", () => {

@@ -142,7 +142,7 @@ const Chat: React.FC<Props> = ({
           <div
             ref={messagesContainerRef}
             onScroll={handleScroll}
-            className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-2 text-xs"
+            className="flex-1 overflow-y-auto flex flex-col gap-2 mb-2 text-[13px]"
           >
             {turns.length === 0 && (
               <div className="border border-line rounded-sm px-3 py-2 text-dim max-w-md">
@@ -153,7 +153,14 @@ const Chat: React.FC<Props> = ({
             {turns.map((t, i) => (
               <p
                 key={i}
-                className={"whitespace-pre-wrap " + (t.role === "user" ? "text-phosphor" : "text-dim")}
+                className={
+                  "whitespace-pre-wrap max-w-3xl " +
+                  (t.role === "user"
+                    ? "text-phosphor"
+                    : // Reading surface (UI refresh): model answers in the
+                      // proportional reading face; prompts stay mono chrome.
+                      "font-reading leading-relaxed text-dim")
+                }
               >
                 {t.role === "user" ? "> " : ""}
                 {t.content}
@@ -166,7 +173,7 @@ const Chat: React.FC<Props> = ({
             <div ref={bottomSentinelRef} />
           </div>
 
-          <div className="border-t border-line px-4 py-2 -mx-4 -mb-4 flex items-center gap-2 text-xs [-webkit-app-region:no-drag]">
+          <div className="border-t border-line px-4 py-2.5 -mx-4 -mb-4 flex items-center gap-2 text-[13px] [-webkit-app-region:no-drag]">
             <span className="text-signal shrink-0">&gt;</span>
             <input
               type="text"

@@ -4,6 +4,7 @@ import TitleBar from "./components/TitleBar";
 import ResizeHandles from "./components/ResizeHandles";
 import Sidebar from "./components/Sidebar";
 import Chat from "./components/Chat";
+import { MeetingHeader, NotesPane, TranscriptPane, type MeetingTab } from "./components/MeetingPane";
 import StatusLine from "./components/StatusLine";
 import SettingsModal from "./components/SettingsModal";
 import RecordingConsentModal from "./components/RecordingConsentModal";
@@ -18,7 +19,28 @@ import { useChatSessions } from "./hooks/useChatSessions";
 
 function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Which pane of the selected meeting is open (UI refresh: notes,
+  // transcript and chat are main-pane tabs rather than a modal). Reset to
+  // notes whenever a different meeting is selected.
+  const [meetingTab, setMeetingTab] = useState<MeetingTab>("notes");
+  const selectMeeting = (id: string | null, tab: MeetingTab = "notes") => {
+    setSelectedId(id);
+    setMeetingTab(tab);
+  };
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Closing settings (Escape or the close button) must not leave a focus
+  // ring on the title bar's gear: useDialog restores focus there on
+  // unmount, and since Escape counts as keyboard input, :focus-visible
+  // lit the button up. Dismissing a full-screen surface isn't tab
+  // navigation, so drop the ring right after the restore lands --
+  // a deliberate trade-off, by explicit request.
+  const closeSettings = () => {
+    setSettingsOpen(false);
+    requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== document.body) active.blur();
+    });
+  };
   const [showRecordingConsent, setShowRecordingConsent] = useState(false);
   useEffect(() => {
     const unsubscribe = window.consentAPI?.onShowRecordingNotice?.(() => setShowRecordingConsent(true));
@@ -43,7 +65,7 @@ function App() {
   // "delete forever" from the context menu does.
   const handleSessionsDeleted = (ids: string[]) => {
     ids.forEach((id) => chatSessions.discardSession(id));
-    if (selectedId !== null && ids.includes(selectedId)) setSelectedId(null);
+    if (selectedId !== null && ids.includes(selectedId)) selectMeeting(null);
     setTrashRefreshKey((k) => k + 1);
     reloadSessions();
   };
@@ -168,7 +190,7 @@ function App() {
                 sessionsIndexCorrupt={sessionsIndexCorrupt}
                 reloadSessions={reloadSessions}
                 selectedId={selectedId}
-                onSelect={setSelectedId}
+                onSelect={(id) => selectMeeting(id)}
                 backendUp={backendUp}
                 backendFailed={backendFailed}
                 onSessionDeleted={chatSessions.discardSession}
@@ -176,15 +198,39 @@ function App() {
               />
             </ErrorBoundary>
             <ErrorBoundary>
-              <Chat
-                sessions={sessions}
-                sessionsError={sessionsError}
-                selectedId={selectedId}
-                backendUp={backendUp}
-                backendFailed={backendFailed}
-                onSelectSession={setSelectedId}
-                chatSessions={chatSessions}
-              />
+              <div className="flex-1 min-w-0 min-h-0 flex flex-col">
+                {(() => {
+                  const selected = sessions?.find((s) => s.id === selectedId) ?? null;
+                  const chatVisible = selected === null || meetingTab === "chat";
+                  return (
+                    <>
+                      {selected && (
+                        <MeetingHeader session={selected} tab={meetingTab} onTabChange={setMeetingTab} />
+                      )}
+                      {selected && meetingTab === "notes" && <NotesPane session={selected} />}
+                      {selected && meetingTab === "transcript" && <TranscriptPane sessionId={selected.id} />}
+                      {/* Chat stays mounted whichever tab is open (and for
+                          the all-meetings view), so both conversations keep
+                          their state across tab/selection switches -- only
+                          its visibility toggles. */}
+                      <div
+                        className="flex-1 min-h-0 min-w-0 flex-col"
+                        style={{ display: chatVisible ? "flex" : "none" }}
+                      >
+                        <Chat
+                          sessions={sessions}
+                          sessionsError={sessionsError}
+                          selectedId={selectedId}
+                          backendUp={backendUp}
+                          backendFailed={backendFailed}
+                          onSelectSession={(id) => selectMeeting(id)}
+                          chatSessions={chatSessions}
+                        />
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
             </ErrorBoundary>
             <button
               onClick={() => {
@@ -207,7 +253,7 @@ function App() {
             {settingsOpen && (
               <SettingsModal
                 active
-                onClose={() => setSettingsOpen(false)}
+                onClose={closeSettings}
                 onSessionsDeleted={handleSessionsDeleted}
                 onLibraryChanged={handleLibraryChanged}
               />

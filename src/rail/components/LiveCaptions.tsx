@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import CaptionCard from "../../ui/components/CaptionCard";
 import type { LiveCaption } from "../hooks/useLiveCaptions";
 
 interface LiveCaptionsProps {
@@ -6,11 +7,7 @@ interface LiveCaptionsProps {
   captions: LiveCaption[];
 }
 
-// How many caption lines fit the fixed panel height
-// (railGeometry.RAIL_CAPTIONS_PANEL_HEIGHT -- main.js sizes the window,
-// this component must never need to scroll).
-const VISIBLE_LINES = 3;
-
+// The floating rail's caption panel: window plumbing around CaptionCard.
 export default function LiveCaptions({ visible, captions }: LiveCaptionsProps) {
   // Same contract as ErrorToast's setRailErrorVisible: main.js grows or
   // shrinks the rail window to make room for this panel.
@@ -23,25 +20,14 @@ export default function LiveCaptions({ visible, captions }: LiveCaptionsProps) {
 
   if (!visible) return null;
 
-  const tail = captions.slice(-VISIBLE_LINES);
+  const newest = captions.length > 0 ? captions[captions.length - 1] : null;
 
   return (
-    <div
-      role="log"
-      aria-label="Live captions"
-      aria-live="polite"
-      className="w-full flex-1 overflow-hidden rounded-sm border border-line bg-panel px-3 py-1.5 text-[10px] leading-snug text-phosphor flex flex-col justify-end gap-0.5"
-    >
-      {tail.length === 0 ? (
-        <span className="text-dim">listening…</span>
-      ) : (
-        tail.map((caption) => (
-          <p key={caption.id} className="truncate">
-            <span className="text-dim">{caption.speaker === "You" ? "you" : "them"}: </span>
-            {caption.text}
-          </p>
-        ))
-      )}
+    <div className="w-full flex-1 min-h-0">
+      <CaptionCard
+        caption={newest ? { speaker: newest.speaker, text: newest.text } : null}
+        captionKey={newest?.id}
+      />
     </div>
   );
 }

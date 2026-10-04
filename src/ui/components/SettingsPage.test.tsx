@@ -836,3 +836,16 @@ it("explains when speaker recognition is unavailable on this install", async () 
 
   expect(await screen.findByText(/speaker recognition is unavailable/i)).toBeInTheDocument();
 });
+
+it("switches the app theme from the Appearance section", async () => {
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\]/);
+  openSection("Appearance");
+
+  fireEvent.click(await screen.findByRole("button", { name: /light \(paper\)/i }));
+  expect(document.documentElement.dataset.theme).toBe("light");
+  expect(window.localStorage.getItem("deskrecap.theme")).toBe("light");
+
+  fireEvent.click(screen.getByRole("button", { name: /dark \(phosphor\)/i }));
+  expect(document.documentElement.dataset.theme).toBe("dark");
+});

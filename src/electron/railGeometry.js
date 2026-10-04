@@ -1,7 +1,12 @@
-export const RAIL_WIDTH = 280;
+// 296, up from the pre-captions 280: the pill gained the cc toggle (live
+// captions, Tier 2.2) and at 280 the row overflowed its fixed-width
+// window, visually breaking the rail. 296 is the slimmed toggle's snug
+// fit -- 312 read as too long.
+export const RAIL_WIDTH = 296;
 export const RAIL_HEIGHT = 40;
 export const RAIL_ERROR_PANEL_HEIGHT = 72;
-export const RAIL_CAPTIONS_PANEL_HEIGHT = 64;
+// Status strip (~20px) + up to two caption lines + padding.
+export const RAIL_CAPTIONS_PANEL_HEIGHT = 76;
 export const RAIL_GAP = 8;
 export const RAIL_INSET_TOP = 10;
 
@@ -66,7 +71,11 @@ export function isPointInRect(point, rect) {
 // turns the check into a small magnetic zone straddling the edge instead
 // (close from either side still snaps flush, same as before), matching how
 // Windows' own edge docking behaves for ordinary windows.
-export function computeCornerSnap(workArea, bounds, threshold = 24, { allowOffScreen = false } = {}) {
+// Threshold default dropped 24 -> 8px: at 24 the magnetism grabbed windows
+// that were merely near an edge, which read as the app yanking itself out
+// of the user's hands. 8px means you have to put it basically ON the edge
+// for it to attach.
+export function computeCornerSnap(workArea, bounds, threshold = 8, { allowOffScreen = false } = {}) {
     const within = (distance) => (allowOffScreen ? Math.abs(distance) <= threshold : distance <= threshold);
 
     const nearLeft = within(bounds.x - workArea.x);

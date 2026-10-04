@@ -8,7 +8,6 @@ interface Props {
   x: number;
   y: number;
   onClose: () => void;
-  onOpenNotes: (session: Session) => void;
   onRename: (session: Session) => void;
   onTrash: (session: Session) => void;
   onRestore: (session: Session) => void;
@@ -88,7 +87,6 @@ const SessionContextMenu: React.FC<Props> = ({
   x,
   y,
   onClose,
-  onOpenNotes,
   onRename,
   onTrash,
   onRestore,
@@ -188,9 +186,6 @@ const SessionContextMenu: React.FC<Props> = ({
       style={{ left, top, width: MENU_WIDTH }}
       className="fixed z-50 bg-panel border border-line rounded-sm shadow-lg py-1 text-phosphor [-webkit-app-region:no-drag]"
     >
-      <button role="menuitem" tabIndex={-1} className={itemClass} onClick={() => onOpenNotes(session)}>
-        [notes]
-      </button>
       <button
         role="menuitem"
         tabIndex={-1}

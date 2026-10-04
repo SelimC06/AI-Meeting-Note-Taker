@@ -19,8 +19,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-it("active view: shows notes/export/rename/trash and calls callbacks", () => {
-  const onOpenNotes = vi.fn();
+it("active view: shows export/rename/trash and calls callbacks", () => {
   const onRename = vi.fn();
   const onTrash = vi.fn();
   render(
@@ -30,7 +29,6 @@ it("active view: shows notes/export/rename/trash and calls callbacks", () => {
       x={10}
       y={10}
       onClose={() => {}}
-      onOpenNotes={onOpenNotes}
       onRename={onRename}
       onTrash={onTrash}
       onRestore={() => {}}
@@ -39,8 +37,9 @@ it("active view: shows notes/export/rename/trash and calls callbacks", () => {
     />
   );
 
-  fireEvent.click(screen.getByText("[notes]"));
-  expect(onOpenNotes).toHaveBeenCalledWith(session);
+  // [notes] is gone from the menu (UI refresh): clicking the meeting row
+  // itself opens its notes in the main pane.
+  expect(screen.queryByText("[notes]")).not.toBeInTheDocument();
 
   fireEvent.click(screen.getByText("[rename]"));
   expect(onRename).toHaveBeenCalledWith(session);
@@ -61,7 +60,6 @@ it("trash view: shows restore, and delete forever requires confirmation before c
       x={10}
       y={10}
       onClose={() => {}}
-      onOpenNotes={() => {}}
       onRename={() => {}}
       onTrash={() => {}}
       onRestore={onRestore}
@@ -93,7 +91,6 @@ it("trash view: delete-forever confirmation can be cancelled", () => {
       x={10}
       y={10}
       onClose={() => {}}
-      onOpenNotes={() => {}}
       onRename={() => {}}
       onTrash={() => {}}
       onRestore={() => {}}
@@ -130,7 +127,6 @@ it("export notes: fetches the URL, closes the menu, and downloads the response a
       x={10}
       y={10}
       onClose={onClose}
-      onOpenNotes={() => {}}
       onRename={() => {}}
       onTrash={() => {}}
       onRestore={() => {}}
@@ -158,7 +154,6 @@ it("export recording: surfaces a backend-offline error and does not close premat
       x={10}
       y={10}
       onClose={() => {}}
-      onOpenNotes={() => {}}
       onRename={() => {}}
       onTrash={() => {}}
       onRestore={() => {}}
@@ -185,7 +180,6 @@ it("export notes: surfaces an HTTP error status", async () => {
       x={10}
       y={10}
       onClose={() => {}}
-      onOpenNotes={() => {}}
       onRename={() => {}}
       onTrash={() => {}}
       onRestore={() => {}}
@@ -212,8 +206,7 @@ it("closes on outside click and on Escape", () => {
         x={10}
         y={10}
         onClose={onClose}
-        onOpenNotes={() => {}}
-        onRename={() => {}}
+          onRename={() => {}}
         onTrash={() => {}}
         onRestore={() => {}}
         onDeleteForever={() => {}}
@@ -238,7 +231,6 @@ function renderMenu(view: "active" | "trash", overrides: Partial<Parameters<type
     x: 10,
     y: 10,
     onClose: vi.fn(),
-    onOpenNotes: vi.fn(),
     onRename: vi.fn(),
     onTrash: vi.fn(),
     onRestore: vi.fn(),
@@ -255,7 +247,7 @@ it("is a labelled menu of menuitems, with focus on the first item when it opens"
   expect(screen.getByRole("menu", { name: "Actions for Sprint Planning" })).toBeInTheDocument();
   const items = screen.getAllByRole("menuitem");
   expect(items.map((i) => i.textContent)).toEqual([
-    "[notes]", "[export notes]", "[export recording]", "[rename]", "[trash]",
+    "[export notes]", "[export recording]", "[rename]", "[trash]",
   ]);
   expect(items[0]).toHaveFocus();
 });
@@ -268,11 +260,11 @@ it("arrow keys move between items (wrapping), Home/End jump to the ends", () => 
   fireEvent.keyDown(menu, { key: "ArrowDown" });
   expect(items[1]).toHaveFocus();
   fireEvent.keyDown(menu, { key: "End" });
-  expect(items[4]).toHaveFocus();
+  expect(items[3]).toHaveFocus();
   fireEvent.keyDown(menu, { key: "ArrowDown" });
   expect(items[0]).toHaveFocus();
   fireEvent.keyDown(menu, { key: "ArrowUp" });
-  expect(items[4]).toHaveFocus();
+  expect(items[3]).toHaveFocus();
   fireEvent.keyDown(menu, { key: "Home" });
   expect(items[0]).toHaveFocus();
 });

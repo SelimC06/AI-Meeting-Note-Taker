@@ -5467,3 +5467,24 @@ def test_live_transcribe_rejects_an_unreadable_chunk(client, monkeypatch):
     # The slot must have been released despite the failure.
     assert server_module._live_transcribe_slots.acquire(blocking=False)
     server_module._live_transcribe_slots.release()
+
+
+def test_live_warm_preloads_the_resolved_live_model(client, monkeypatch):
+    import threading as _threading
+
+    loaded = []
+    done = _threading.Event()
+
+    def fake_get_whisper_model(model_cls, model_name, **kwargs):
+        loaded.append(model_name)
+        done.set()
+        return object()
+
+    monkeypatch.setattr(server_module, "get_whisper_model", fake_get_whisper_model)
+    monkeypatch.setattr(server_module, "TRANSCRIPTION_LANGUAGE", "en")
+
+    resp = client.post("/live/warm")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "model": "tiny.en"}
+    assert done.wait(timeout=5.0)
+    assert loaded == ["tiny.en"]

@@ -14,6 +14,7 @@ import {
   type SpeakerProfilesResult,
 } from "../api";
 import { useUpdaterStatus } from "../hooks/useUpdaterStatus";
+import { getTheme, setTheme, type Theme } from "../theme";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -32,6 +33,7 @@ type SectionId =
   | "storage"
   | "ai"
   | "diarization"
+  | "appearance"
   | "privacy"
   | "diagnostics"
   | "about";
@@ -54,6 +56,7 @@ const NAV_GROUPS: { heading: string; sections: { id: SectionId; label: string }[
       { id: "storage", label: "Storage" },
       { id: "ai", label: "AI Model" },
       { id: "diarization", label: "Diarization" },
+      { id: "appearance", label: "Appearance" },
     ],
   },
   {
@@ -122,6 +125,13 @@ export default function SettingsPage({
   const [diarizationError, setDiarizationError] = useState<string | null>(null);
   const [voiceProfiles, setVoiceProfiles] = useState<SpeakerProfilesResult | null>(null);
   const [profilesError, setProfilesError] = useState<string | null>(null);
+  // Per-machine, applied instantly to both windows (see ../theme.ts) --
+  // deliberately not a backend setting.
+  const [theme, setThemeState] = useState<Theme>(() => getTheme());
+  const handleThemeChange = (value: Theme) => {
+    setTheme(value);
+    setThemeState(value);
+  };
   const [tokenDraft, setTokenDraft] = useState("");
   const [tokenSaveError, setTokenSaveError] = useState<string | null>(null);
 
@@ -875,6 +885,37 @@ export default function SettingsPage({
               )}
             </div>
             {tokenSaveError && <p className="text-xs text-red-400">{tokenSaveError}</p>}
+          </section>
+        )}
+
+        {activeSection === "appearance" && (
+          <section className="flex flex-col gap-2">
+            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">theme</h2>
+            <p className="text-xs text-dim">
+              Applies to the whole app, the recording rail included. Saved on this machine.
+            </p>
+            <div className="flex gap-1" role="group" aria-label="Theme">
+              {(
+                [
+                  { value: "dark", label: "Dark (phosphor)" },
+                  { value: "light", label: "Light (paper)" },
+                ] as { value: Theme; label: string }[]
+              ).map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => handleThemeChange(opt.value)}
+                  aria-pressed={theme === opt.value}
+                  className={
+                    "px-2 py-1 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
+                    (theme === opt.value
+                      ? "bg-signal text-void"
+                      : "text-dim hover:text-phosphor border border-line")
+                  }
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
           </section>
         )}
 

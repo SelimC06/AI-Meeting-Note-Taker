@@ -32,8 +32,21 @@ def test_extract_title_plain_heading():
 
 
 def test_extract_title_with_prefix():
-    notes = "# Title: Zoom Meeting\n\n# Transcript (auto)\nhello\n"
-    assert extract_title(notes) == "Zoom Meeting"
+    notes = "# Title: Sprint Planning\n\n# Transcript (auto)\nhello\n"
+    assert extract_title(notes) == "Sprint Planning"
+
+
+def test_extract_title_skips_placeholder_headings():
+    """Small models copy the template's '# Title' heading verbatim -- that
+    (and our own fallback scaffolding) must never become a meeting name."""
+    from app.sessions_store import UNTITLED_MEETING
+
+    assert extract_title("# Title\n- purpose\n\n## Key Points\n- x") == UNTITLED_MEETING
+    assert extract_title("# (specific 3-6 word meeting title)\n- x") == UNTITLED_MEETING
+    assert extract_title("# Meeting notes\n\n# Transcript (auto)\nhello") == UNTITLED_MEETING
+    assert extract_title("# Title: Zoom Meeting\n\n# Transcript (auto)\nhello") == UNTITLED_MEETING
+    # A placeholder first heading doesn't hide a real one later.
+    assert extract_title("# Title\n\n# Vektor pilot kickoff\n- x") == "Vektor pilot kickoff"
 
 
 def test_extract_title_no_heading_falls_back():

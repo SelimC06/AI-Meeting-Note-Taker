@@ -28,17 +28,50 @@ _APPEND_LOCK = threading.RLock()
 _index_cache: dict = {}
 
 
+# Headings that are template echoes or our own fallback scaffolding, not
+# names: small models copy the summary template's heading verbatim, which
+# used to name nearly every meeting "Title". extract_title skips these
+# (and anything still wrapped in template brackets) so the caller can fall
+# back to a date-based name instead.
+_PLACEHOLDER_TITLES = {
+    "title",
+    "untitled",
+    "untitled meeting",
+    "meeting",
+    "meeting notes",
+    "meeting summary",
+    "notes",
+    "summary",
+    "zoom meeting",
+    "transcript",
+    "transcript (auto)",
+    "specific 3-6 word meeting title",
+}
+
+UNTITLED_MEETING = "Untitled meeting"
+
+
 def extract_title(notes: str) -> str:
-    """Pull the first Markdown '# ' heading out of notes as a title."""
+    """Pull the first usable Markdown '# ' heading out of notes as a title.
+
+    Placeholder headings (template echoes, our own fallback scaffolding)
+    are skipped; when nothing usable exists, returns UNTITLED_MEETING and
+    the caller picks a better default (server.py names the session by its
+    date instead)."""
     for line in notes.splitlines():
         stripped = line.strip()
         if stripped.startswith("# "):
             title = stripped[2:].strip()
             if title.lower().startswith("title:"):
                 title = title[len("title:"):].strip()
-            if title:
-                return title
-    return "Untitled meeting"
+            bare = title.strip("()<>[] ").strip().lower()
+            if not bare or bare in _PLACEHOLDER_TITLES or title.lower() in _PLACEHOLDER_TITLES:
+                continue
+            if title.startswith(("(", "<", "[")) and title.endswith((")", ">", "]")):
+                # Still wrapped in template brackets: an un-filled slot.
+                continue
+            return title
+    return UNTITLED_MEETING
 
 
 def _index_path(store_dir: Path) -> Path:

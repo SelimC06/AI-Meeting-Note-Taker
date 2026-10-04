@@ -8,6 +8,8 @@ import {
   getOllamaModels,
   getStorageUsage,
   getHealthStatus,
+  getSessionActionItems,
+  getSessionTranscript,
   listJobs,
   type Session,
   type Settings,
@@ -43,6 +45,9 @@ beforeEach(() => {
   vi.mocked(getOllamaModels).mockResolvedValue({ ok: true, models: ["llama3"], error: null });
   vi.mocked(getHealthStatus).mockResolvedValue({ ok: true, backend: true, ollama: true });
   vi.mocked(listJobs).mockResolvedValue([]);
+  // The meeting view (notes tab + header chips) fetches these on selection.
+  vi.mocked(getSessionActionItems).mockResolvedValue(null);
+  vi.mocked(getSessionTranscript).mockResolvedValue([]);
   vi.mocked(getStorageUsage).mockResolvedValue({
     used_bytes: 0,
     free_bytes: 100,
@@ -134,10 +139,14 @@ it("does not flash 'failed to load' or the Ollama setup overlay during a normal 
   expect(screen.queryByText(/setup required/i)).not.toBeInTheDocument();
 });
 
-it("selecting a meeting in the sidebar shows it in the chat panel", async () => {
+it("selecting a meeting opens it in the main pane on the notes tab, with chat one tab away", async () => {
   render(<App />);
   const row = await screen.findByText("Sprint Planning");
   fireEvent.click(row);
+  // UI refresh: selection opens the meeting view (notes first), not chat.
+  expect(await screen.findByText(/Discussed roadmap\./)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "notes" })).toHaveAttribute("aria-current", "page");
+  fireEvent.click(screen.getByRole("button", { name: "chat" }));
   expect(await screen.findByText(/ask anything about this meeting's recording/i)).toBeInTheDocument();
 });
 

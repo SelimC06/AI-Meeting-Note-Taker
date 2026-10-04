@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import { useLiveCaptions, CAPTION_WINDOW_MS } from "./useLiveCaptions";
-import { liveTranscribe } from "../../ui/api";
+import { useLiveCaptions, CAPTION_WINDOW_MS, FIRST_CAPTION_WINDOW_MS } from "./useLiveCaptions";
+import { liveTranscribe, warmLiveTranscription } from "../../ui/api";
 
 vi.mock("../../ui/api");
 
@@ -67,7 +67,9 @@ it("rotates one caption recorder per track and pushes speaker-tagged captions", 
   const system = fakeStream();
   const { result } = renderHook(() => useLiveCaptions(true, "recording", mic, system));
 
-  // One dedicated caption recorder per audio track, already recording.
+  // One dedicated caption recorder per audio track, already recording,
+  // and the backend model warm-up fired immediately.
+  expect(warmLiveTranscription).toHaveBeenCalledTimes(1);
   expect(FakeMediaRecorder.instances).toHaveLength(2);
   expect(FakeMediaRecorder.instances.every((r) => r.state === "recording")).toBe(true);
 
@@ -150,4 +152,51 @@ it("clears captions when a new recording starts", async () => {
   expect(result.current).toHaveLength(1); // kept after stop, until...
   rerender({ status: "starting" });
   expect(result.current).toEqual([]); // ...the next recording begins
+});
+
+it("the first window is short, so the first caption lands fast", async () => {
+  vi.mocked(liveTranscribe).mockResolvedValue("quick first caption");
+
+  // Stable stream identity: a caption push re-renders, and a fresh
+  // stream object per render would restart the capture effect.
+  const mic = fakeStream();
+  const { result } = renderHook(() => useLiveCaptions(true, "recording", mic, null));
+  await act(async () => {
+    vi.advanceTimersByTime(FIRST_CAPTION_WINDOW_MS);
+  });
+  await flushAsync();
+
+  expect(liveTranscribe).toHaveBeenCalledTimes(1);
+  expect(result.current.map((c) => c.text)).toEqual(["quick first caption"]);
+
+  // The next window is full-size: nothing more fires until it elapses.
+  await act(async () => {
+    vi.advanceTimersByTime(CAPTION_WINDOW_MS - 1);
+  });
+  await flushAsync();
+  expect(liveTranscribe).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    vi.advanceTimersByTime(1);
+  });
+  await flushAsync();
+  expect(liveTranscribe).toHaveBeenCalledTimes(2);
+});
+
+it("drops a near-duplicate caption from the other track (speaker bleed)", async () => {
+  // Without headphones the mic hears the speakers: the same sentence can
+  // come back once per track. The second arrival is dropped.
+  vi.mocked(liveTranscribe)
+    .mockResolvedValueOnce("We have to make sure that doesn't happen.")
+    .mockResolvedValueOnce("we have to make sure that doesn't happen");
+
+  const mic = fakeStream();
+  const system = fakeStream();
+  const { result } = renderHook(() => useLiveCaptions(true, "recording", mic, system));
+  await act(async () => {
+    vi.advanceTimersByTime(FIRST_CAPTION_WINDOW_MS);
+  });
+  await flushAsync();
+
+  expect(liveTranscribe).toHaveBeenCalledTimes(2);
+  expect(result.current).toHaveLength(1);
 });

@@ -571,7 +571,7 @@ export default function RailApp() {
                     title={captionsEnabled ? "Live captions on" : "Live captions off"}
                     onClick={toggleCaptions}
                     className={
-                        "[-webkit-app-region:no-drag] flex-none font-mono text-[10px] px-1 rounded-sm border focus:outline-none focus-visible:ring-2 focus-visible:ring-signal transition-colors " +
+                        "[-webkit-app-region:no-drag] flex-none grid h-5 place-items-center rounded-full border px-1.5 font-mono text-[9px] leading-none tracking-wide focus:outline-none focus-visible:ring-2 focus-visible:ring-signal transition-colors " +
                         (captionsEnabled
                             ? "border-signal/60 text-signal"
                             : "border-line text-dim hover:text-phosphor")

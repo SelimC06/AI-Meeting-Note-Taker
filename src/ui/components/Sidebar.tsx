@@ -13,7 +13,6 @@ import {
 import { useSessions } from "../hooks/useSessions";
 import { useProcessingJobs } from "../hooks/useProcessingJobs";
 import SessionContextMenu from "./SessionContextMenu";
-import NotesModal from "./NotesModal";
 import DockedRail from "./DockedRail";
 import { formatRelativeTime } from "../utils/formatRelativeTime";
 
@@ -92,7 +91,6 @@ const Sidebar: React.FC<Props> = ({
   const [renameValue, setRenameValue] = useState("");
   const [undoToast, setUndoToast] = useState<{ id: string; title: string } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ session: Session; x: number; y: number } | null>(null);
-  const [notesSession, setNotesSession] = useState<Session | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [recovering, setRecovering] = useState(false);
   const undoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -554,10 +552,6 @@ const Sidebar: React.FC<Props> = ({
           x={contextMenu.x}
           y={contextMenu.y}
           onClose={() => setContextMenu(null)}
-          onOpenNotes={(s) => {
-            setContextMenu(null);
-            setNotesSession(s);
-          }}
           onRename={startRename}
           onTrash={handleTrash}
           onRestore={handleRestore}
@@ -566,7 +560,6 @@ const Sidebar: React.FC<Props> = ({
         />
       )}
 
-      {notesSession && <NotesModal session={notesSession} onClose={() => setNotesSession(null)} />}
     </>
   );
 };

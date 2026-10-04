@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { liveTranscribe } from "../../ui/api";
+import { liveTranscribe, warmLiveTranscription } from "../../ui/api";
 import { extensionForMimeType } from "../capture/recorder";
 
 export type LiveCaption = {
@@ -13,9 +13,15 @@ export type LiveCaption = {
 // language auto-detect to be reliable).
 export const CAPTION_WINDOW_MS = 7000;
 
-// Rolling buffer cap -- the panel only shows the tail, this just bounds
-// memory over a multi-hour meeting.
-const MAX_CAPTIONS = 60;
+// The FIRST window per track is much shorter: at a uniform 7s the pane sat
+// on "listening…" for 8-10s after hitting record, which read as broken.
+// A 3s opener gets the first caption on screen fast; every later window
+// uses the full size.
+export const FIRST_CAPTION_WINDOW_MS = 3000;
+
+// Small rolling tail: the panel shows only the newest caption and the
+// near-duplicate filter looks two back, so nothing needs a long history.
+const MAX_CAPTIONS = 8;
 
 const CAPTION_MIME_CANDIDATES = [
   "audio/webm;codecs=opus",
@@ -63,10 +69,22 @@ export function useLiveCaptions(
     let cancelled = false;
     const cleanups: Array<() => void> = [];
 
+    // Ask the backend to load the live model NOW, in parallel with the
+    // first window recording -- otherwise the cold model load serializes
+    // behind the first chunk and delays the first caption by seconds.
+    warmLiveTranscription();
+
+    const normalize = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+
     const push = (speaker: LiveCaption["speaker"], text: string) => {
       const trimmed = text.trim();
       if (!trimmed) return;
       setCaptions((current) => {
+        // Drop a near-duplicate of the last couple of captions: without
+        // headphones the mic can still pick up some of what the speakers
+        // play, and the same sentence then arrives once per track.
+        const normalized = normalize(trimmed);
+        if (current.slice(-2).some((c) => normalize(c.text) === normalized)) return current;
         const next = [...current, { id: nextIdRef.current++, speaker, text: trimmed }];
         return next.length > MAX_CAPTIONS ? next.slice(next.length - MAX_CAPTIONS) : next;
       });
@@ -77,6 +95,7 @@ export function useLiveCaptions(
       if (tracks.length === 0) return;
       let recorder: MediaRecorder | null = null;
       let timer: ReturnType<typeof setTimeout> | null = null;
+      let windowMs = FIRST_CAPTION_WINDOW_MS;
 
       const cycle = () => {
         if (cancelled) return;
@@ -122,7 +141,8 @@ export function useLiveCaptions(
           } catch {
             /* already stopped */
           }
-        }, CAPTION_WINDOW_MS);
+        }, windowMs);
+        windowMs = CAPTION_WINDOW_MS;
       };
 
       cycle();

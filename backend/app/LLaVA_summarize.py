@@ -181,13 +181,20 @@ def _report(on_progress, done, total):
 _SUMMARY_SYSTEM_PROMPT = (
     "You are a precise meeting-notes assistant.\n"
     "- Output ONLY valid Markdown.\n"
+    "- The FIRST line must be '# ' followed by a specific 3-6 word title "
+    "naming this meeting's actual topic (like '# Q3 budget review'). Never "
+    "output the literal word 'Title' or any placeholder as the title.\n"
     "- Fill EVERY section of the template; if unknown, leave the section but put '- (none)'.\n"
     "- DO NOT quote or reproduce the transcript verbatim (no long paragraphs copied).\n"
     "- Use short bullets with concrete nouns/verbs; keep each bullet ≤ 20 words.\n"
     "- Never include the raw transcript in your answer."
 )
 
-_SUMMARY_TEMPLATE = ("# Title\n"
+# The title line is a parenthesized placeholder rather than the literal
+# heading "Title": small models copy templates verbatim, and "# Title"
+# used to become the stored name of nearly every meeting (extract_title
+# also skips placeholder echoes as a backstop; see sessions_store).
+_SUMMARY_TEMPLATE = ("# (specific 3-6 word meeting title)\n"
     "- One-liner purpose of meeting\n\n"
     "## Key Points\n- (bullet)\n- (bullet)\n\n"
     "## Decisions\n- (decision)\n\n"

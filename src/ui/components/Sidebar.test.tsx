@@ -524,7 +524,7 @@ it("each active row has a visible actions button that opens the same menu, and f
 
   expect(screen.getByRole("menu", { name: "Actions for Sprint Planning" })).toBeInTheDocument();
   expect(actions).toHaveAttribute("aria-expanded", "true");
-  expect(screen.getByRole("menuitem", { name: "[notes]" })).toHaveFocus();
+  expect(screen.getByRole("menuitem", { name: "[export notes]" })).toHaveFocus();
 
   fireEvent.keyDown(document.activeElement!, { key: "Escape" });
 

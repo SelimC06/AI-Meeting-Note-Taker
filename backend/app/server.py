@@ -32,6 +32,7 @@ import httpx
 
 from .sessions_store import (
     extract_title,
+    UNTITLED_MEETING,
     load_sessions,
     append_session,
     update_session_fields,
@@ -1981,7 +1982,7 @@ def _run_process_job(job_id: str) -> None:
                             "_AI summarization failed -- showing the raw transcript instead._\n\n"
                         )
                     notes = (
-                        "# Title: Zoom Meeting\n\n"
+                        "# Meeting notes\n\n"
                         + explanation
                         + "# Transcript (auto)\n"
                         + _raw_transcript_notes_body(transcript)
@@ -2006,23 +2007,30 @@ def _run_process_job(job_id: str) -> None:
                 transcript = "\n".join(s.text.strip() for s in segments if s.text)
                 transcribed = True
                 notes = (
-                    "# Title: Zoom Meeting\n\n"
+                    "# Meeting notes\n\n"
                     "# Transcript (auto)\n"
                     + _raw_transcript_notes_body(transcript)
                 )
             except Exception as e:
                 log(f"fallback whisper failed: {e}")
                 notes = (
-                    "# Title: Zoom Meeting\n\n"
+                    "# Meeting notes\n\n"
                     "# Key Points\n- Uploaded, mixed and muxed successfully.\n"
                     f"- Final file: {final_path.name}\n"
                 )
 
         jobs.update_job(job_id, stage="saving")
+        # A summary whose title heading was a placeholder (small models
+        # copy the template's heading verbatim) gets a date-based name
+        # instead of a library full of meetings all called "Title".
+        title = extract_title(notes)
+        if title == UNTITLED_MEETING:
+            now_local = datetime.now()
+            title = f"Meeting — {now_local.strftime('%b')} {now_local.day}, {now_local.strftime('%H:%M')}"
         record = {
             "id": session.name,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "title": extract_title(notes),
+            "title": title,
             "notes": notes,
             "video_path": str(final_path),
             "trashed_at": None,
@@ -2317,6 +2325,29 @@ LIVE_WHISPER_MODEL = os.getenv("LIVE_WHISPER_MODEL", "tiny")
 # and the rail just skips that window -- captions may drop, the UI never
 # queues up a backlog that lags further and further behind live speech.
 _live_transcribe_slots = threading.BoundedSemaphore(2)
+
+
+@app.post("/live/warm")
+def live_warm():
+    """Preload the live-caption Whisper model on a background thread. The
+    rail calls this the moment a recording starts, so the model's cold
+    load runs in parallel with the first caption window being recorded
+    instead of serializing in front of it. Idempotent and best-effort:
+    whisper_cache returns the cached instance when it's already loaded,
+    and a failure here just means the first /live/transcribe loads it
+    itself, slower."""
+    model_name = resolve_whisper_model(LIVE_WHISPER_MODEL, TRANSCRIPTION_LANGUAGE)
+
+    def _load() -> None:
+        try:
+            from faster_whisper import WhisperModel
+
+            get_whisper_model(WhisperModel, model_name, device="cpu", compute_type="int8")
+        except Exception as e:
+            log(f"live warm failed (continuing): {e}")
+
+    threading.Thread(target=_load, name="live-warm", daemon=True).start()
+    return {"ok": True, "model": model_name}
 
 
 @app.post("/live/transcribe")

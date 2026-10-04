@@ -75,8 +75,14 @@ export async function startElectronCapture(opts: ElectronCaptureOptions = {}): P
   try {
     micAudio = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
+        // Echo cancellation subtracts what the speakers are playing from
+        // the mic signal. Without it, anyone not on headphones had the
+        // other side's audio bleed into the mic track -- so Track A (and
+        // the live captions) attributed system audio to "You".
+        echoCancellation: true,
+        noiseSuppression: true,
+        // AGC stays off: it pumps the gain between words, which hurts both
+        // the level meter's readability and Whisper's input consistency.
         autoGainControl: false,
       },
     });

@@ -419,12 +419,30 @@ export async function liveTranscribe(chunk: Blob, filename: string): Promise<str
       method: "POST",
       body: formData,
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      // 429 is routine (both slots busy -- the window is simply skipped);
+      // anything else means captions are silently broken (e.g. an old
+      // backend without this endpoint), which should at least be visible
+      // in the devtools console.
+      if (resp.status !== 429) {
+        console.warn(`live captions: /live/transcribe answered ${resp.status}`);
+      }
+      return null;
+    }
     const data = (await resp.json()) as { text?: unknown };
     return typeof data.text === "string" ? data.text : null;
-  } catch {
+  } catch (e) {
+    console.warn("live captions: /live/transcribe request failed", e);
     return null;
   }
+}
+
+// Fire-and-forget: asks the backend to load the live-caption Whisper model
+// now (recording just started), so the first caption window doesn't pay
+// the cold model load. Failures are irrelevant -- the first transcribe
+// call loads the model itself, just slower.
+export function warmLiveTranscription(): void {
+  void backendFetch(`${BACKEND_URL}/live/warm`, { method: "POST" }).catch(() => {});
 }
 
 // Mirrors the backend's /import whitelist (IMPORT_SUFFIXES in server.py)

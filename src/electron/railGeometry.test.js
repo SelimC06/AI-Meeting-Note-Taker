@@ -171,3 +171,15 @@ test('computeRailHeight matches computeRailBounds for every panel combination', 
         }
     }
 });
+
+test('computeCornerSnap default threshold is tight: merely near an edge does not attach', () => {
+    const workArea = { x: 0, y: 0, width: 1920, height: 1080 };
+    // 20px from the left edge: inside the OLD 24px magnetic zone, but the
+    // default is now 8px -- the window must stay where the user put it.
+    const near = computeCornerSnap(workArea, { x: 20, y: 500, width: RAIL_WIDTH, height: RAIL_HEIGHT });
+    assert.equal(near.x, 20);
+    assert.equal(near.y, 500);
+    // 6px away is basically on the edge -- that still attaches.
+    const close = computeCornerSnap(workArea, { x: 6, y: 500, width: RAIL_WIDTH, height: RAIL_HEIGHT });
+    assert.equal(close.x, 0);
+});

@@ -1,6 +1,9 @@
 @import "@fontsource/jetbrains-mono/400.css";
 @import "@fontsource/jetbrains-mono/500.css";
 @import "@fontsource/jetbrains-mono/600.css";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
 
 @theme {
   --color-void: #1A1A19;
@@ -10,6 +13,24 @@
   --color-dim: #A79C87;
   --color-signal: #EDE6D6;
   --font-sans: "JetBrains Mono", ui-monospace, monospace;
+  /* Reading surfaces only (notes, transcripts, chat answers): running text
+     is measurably easier to read in a proportional face, while every piece
+     of chrome, labels and data stays JetBrains Mono. */
+  --font-reading: "IBM Plex Sans", system-ui, sans-serif;
+}
+
+/* Light theme: the ink-on-paper mirror of the phosphor-on-void identity.
+   Tailwind v4 utilities resolve through these variables, so overriding the
+   tokens on the root element retypes every token-styled surface in both
+   windows; literal reds/ambers (record, processing) read fine on paper and
+   deliberately stay untouched. Applied via src/ui/theme.ts. */
+html[data-theme="light"] {
+  --color-void: #F3EFE5;
+  --color-panel: #EBE6D9;
+  --color-line: #D5CDBB;
+  --color-phosphor: #2A2721;
+  --color-dim: #6E6757;
+  --color-signal: #2A2721;
 }
 
 @layer base {
@@ -22,6 +43,30 @@
   body {
     background-color: var(--color-void);
     color: var(--color-phosphor);
+  }
+}
+
+/* A fresh live caption slides up into the card (CaptionCard). Subtle on
+   purpose: the typewriter is the main motion; this just keeps the swap
+   from popping. */
+@keyframes caption-in {
+  0% {
+    opacity: 0.2;
+    transform: translateY(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.caption-in {
+  animation: caption-in 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caption-in {
+    animation: none;
   }
 }
 
