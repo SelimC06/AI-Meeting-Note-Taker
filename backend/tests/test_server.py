@@ -2086,7 +2086,7 @@ def test_get_settings_reads_live_globals_not_disk_after_settings_file_deleted(cl
     # Push the live globals to non-default values, then delete settings.json
     # out from under the running server -- simulating it being deleted or
     # corrupted while the server is up.
-    server_module.WHISPER_MODEL = "small.en"
+    server_module.WHISPER_MODEL = "small"
     server_module.OLLAMA_CHAT_MODEL = "llama3.1:8b"
     live_store = server_module.STORE
     server_module.SETTINGS_PATH.unlink()
@@ -2099,7 +2099,7 @@ def test_get_settings_reads_live_globals_not_disk_after_settings_file_deleted(cl
     # fresh load_or_init() disk read (which would reset storage_dir back to
     # ROOT/"uploads" and whisper_model/ollama_chat_model to their env-var
     # defaults).
-    assert body["whisper_model"] == "small.en"
+    assert body["whisper_model"] == "small"
     assert body["ollama_chat_model"] == "llama3.1:8b"
     assert body["storage_dir"] == str(live_store)
 
@@ -2353,7 +2353,7 @@ def test_ollama_models_reports_read_timeout_without_hanging(client: TestClient, 
 def test_process_uses_configured_whisper_model_via_transcribe_helper(client, monkeypatch):
     import app.server as server_module
 
-    server_module.WHISPER_MODEL = "small.en"
+    server_module.WHISPER_MODEL = "small"
 
     captured = {}
 
@@ -2387,7 +2387,7 @@ def test_process_uses_configured_whisper_model_via_transcribe_helper(client, mon
     # wait_for_job's default timeout. Give it more headroom rather than
     # flaking; the point of this test is the model name plumbing, not timing.
     wait_for_job(client, resp.json()["job_id"], timeout=30.0)
-    assert captured["model_name"] == "small.en"
+    assert captured["model_name"] == "small"
 
 
 def test_process_passes_custom_vocabulary_as_initial_prompt(client, monkeypatch):
@@ -2463,7 +2463,7 @@ def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
     import types
     import app.server as server_module
 
-    server_module.WHISPER_MODEL = "medium.en"
+    server_module.WHISPER_MODEL = "medium"
 
     def fake_save_upload(dst_dir, uf, name):
         out = dst_dir / name
@@ -2501,7 +2501,7 @@ def test_process_fallback_whisper_uses_configured_model(client, monkeypatch):
     )
     assert resp.status_code == 202
     wait_for_job(client, resp.json()["job_id"])
-    assert captured["model_name"] == "medium.en"
+    assert captured["model_name"] == "medium"
 
 
 def test_process_fallback_whisper_uses_shared_transcribe_helper_defaults(client, monkeypatch):
@@ -2610,11 +2610,11 @@ def test_process_whitespace_only_custom_vocabulary_passes_none_as_initial_prompt
 
     server_module.CUSTOM_VOCABULARY = "   \n"
     # Reset WHISPER_MODEL -- a preceding test may have left it set to
-    # "medium.en" (used with a mocked faster_whisper module there), and if
+    # "medium" (used with a mocked faster_whisper module there), and if
     # that leaked here it would make the real fallback whisper path (which
     # this test can hit, since the primary path returns no txt_path) try to
     # actually download an uncached model instead of using a cached one.
-    server_module.WHISPER_MODEL = "small.en"
+    server_module.WHISPER_MODEL = "small"
 
     captured = {}
 
@@ -5124,3 +5124,129 @@ def test_failure_after_indexing_marks_the_existing_record(client, monkeypatch):
     assert records[0]["notes"] == "# Notes\n- x"
     assert records[0]["status"] == "failed"
     assert "cleanup exploded" in records[0]["error"]
+
+
+# ---- Tier 1.3: audio-only recording + file import ---------------------------
+
+def _fake_encode_audio_final(mixed_wav, out_base):
+    out = out_base.with_suffix(".m4a")
+    out.write_bytes(b"fake audio final")
+    return out
+
+
+def _fake_single_segment_transcribe_wav(wav_path, model_name=None, initial_prompt=None, language=None):
+    return [{"start": 0.0, "end": 1.0, "text": "audio only works"}]
+
+
+def test_process_accepts_audio_only_upload(client, monkeypatch):
+    """No screen track at all: the session still processes end to end, with
+    final.* produced from the mixed audio instead of a mux."""
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+    monkeypatch.setattr(server_module, "encode_audio_final", _fake_encode_audio_final)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
+    monkeypatch.setattr(server_module, "transcribe_wav", _two_speaker_system_transcribe_wav)
+
+    resp = client.post(
+        "/process",
+        files={
+            "system": ("system.webm", io.BytesIO(b"y"), "audio/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert job["video_path"].endswith("final.m4a")
+
+    # Dual-track You/Others transcription works exactly as with video.
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    assert {s["speaker"] for s in segments} == {"You", "Others"}
+
+
+def test_process_rejects_upload_with_no_valid_tracks(client):
+    resp = client.post("/process")
+    assert resp.status_code == 400
+    assert "No valid recording" in resp.json()["detail"]
+
+
+def test_process_keeps_the_meeting_when_only_the_screen_track_is_corrupt(client, monkeypatch):
+    """A corrupt screen upload used to 400 the whole request and lose the
+    meeting even when the audio tracks survived; now it degrades to an
+    audio-only session."""
+
+    def selective_save_upload(dst_dir, uf, name):
+        if name == "screen.webm":
+            return None  # what save_upload returns for an ffprobe-invalid file
+        out = dst_dir / name
+        out.write_bytes(b"fake bytes")
+        return out
+
+    monkeypatch.setattr(server_module, "save_upload", selective_save_upload)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+    monkeypatch.setattr(server_module, "encode_audio_final", _fake_encode_audio_final)
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
+    monkeypatch.setattr(server_module, "transcribe_wav", _fake_single_segment_transcribe_wav)
+
+    resp = client.post(
+        "/process",
+        files={
+            "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+            "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+        },
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    assert job["video_path"].endswith("final.m4a")
+
+
+def test_import_runs_the_full_pipeline_with_unattributed_speakers(client, monkeypatch):
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "probe_stream_types", lambda p: ["audio"])
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+    monkeypatch.setattr(server_module, "llava_complete", lambda **kwargs: "# Notes\n")
+
+    def fake_transcribe_wav(wav_path, model_name=None, initial_prompt=None, language=None):
+        return [{"start": 0.0, "end": 1.5, "text": "imported speech"}]
+
+    monkeypatch.setattr(server_module, "transcribe_wav", fake_transcribe_wav)
+
+    resp = client.post(
+        "/import",
+        files={"file": ("standup.m4a", io.BytesIO(b"audio bytes"), "audio/mp4")},
+    )
+    assert resp.status_code == 202
+    job = wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "done"
+    # The imported file itself became the final recording, keeping its
+    # container/extension.
+    assert job["video_path"].endswith("final.m4a")
+    assert Path(job["video_path"]).read_bytes() == b"fake bytes"
+
+    # An import has no mic/system provenance: segments must NOT be labeled
+    # "You" the way a mic-only recording is.
+    segments = client.get(f"/sessions/{job['session_id']}/transcript").json()["segments"]
+    assert [s["speaker"] for s in segments] == [None]
+    assert [s["text"] for s in segments] == ["imported speech"]
+
+
+def test_import_rejects_unsupported_extension(client):
+    resp = client.post("/import", files={"file": ("notes.txt", io.BytesIO(b"hi"), "text/plain")})
+    assert resp.status_code == 400
+    assert "Unsupported file type" in resp.json()["detail"]
+
+
+def test_import_rejects_a_file_without_an_audio_stream(client, monkeypatch):
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "probe_stream_types", lambda p: ["video"])
+    resp = client.post("/import", files={"file": ("clip.mp4", io.BytesIO(b"v"), "video/mp4")})
+    assert resp.status_code == 400
+    assert "no audio track" in resp.json()["detail"]
+
+
+def test_import_rejects_a_corrupt_file(client, monkeypatch):
+    monkeypatch.setattr(server_module, "save_upload", lambda dst_dir, uf, name: None)
+    resp = client.post("/import", files={"file": ("broken.mp3", io.BytesIO(b""), "audio/mpeg")})
+    assert resp.status_code == 400
+    assert "couldn't be read" in resp.json()["detail"]

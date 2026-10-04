@@ -6,6 +6,8 @@ import {
   deleteSessionForever,
   renameSession,
   recoverSessionsIndex,
+  importRecording,
+  IMPORT_FILE_EXTENSIONS,
   type Session,
 } from "../api";
 import { useSessions } from "../hooks/useSessions";
@@ -95,6 +97,28 @@ const Sidebar: React.FC<Props> = ({
   const [recovering, setRecovering] = useState(false);
   const undoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const actionErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [importing, setImporting] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // Reset so picking the same file again re-fires onChange.
+    e.target.value = "";
+    if (!file) return;
+    setImporting(true);
+    try {
+      // Success needs no further handling here: the job lands in the
+      // processing list via the normal jobs polling, and the finished
+      // session appears through the same justFinished reload as a
+      // recorded meeting.
+      await importRecording(file);
+    } catch (err) {
+      showActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const showActionError = (message: string) => {
     setActionError(message);
@@ -344,6 +368,22 @@ const Sidebar: React.FC<Props> = ({
               aria-label="Search meetings"
               className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor placeholder:text-dim focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
             />
+            <input
+              ref={importInputRef}
+              type="file"
+              accept={IMPORT_FILE_EXTENSIONS.join(",")}
+              onChange={handleImportFile}
+              className="hidden"
+              tabIndex={-1}
+              aria-hidden="true"
+            />
+            <button
+              onClick={() => importInputRef.current?.click()}
+              disabled={importing}
+              className="text-left text-xs px-2 py-1 rounded-sm border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {importing ? "importing…" : "[+] import recording"}
+            </button>
           </div>
 
           {actionError && (

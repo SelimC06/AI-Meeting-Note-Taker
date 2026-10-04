@@ -714,6 +714,65 @@ def mux_video_audio(video: Path, audio: Optional[Path], out_path: Path) -> Path:
     os.replace(tmp_out, out_path)
     return out_path
 
+
+def encode_audio_final(mixed_wav: Path, out_base: Path) -> Path:
+    """final.* for an audio-only recording (no screen track uploaded).
+
+    Prefers aac/.m4a -- the most universally playable audio file to hand a
+    user in an export -- then libopus/.webm, then a plain .wav copy when
+    ffmpeg somehow has neither encoder. Same temp-then-promote discipline
+    as mux_video_audio: export's final.* glob must never see a partial
+    file, and the leading dot keeps the temp name out of that glob.
+    """
+    if ffmpeg_has_encoder("aac"):
+        out_path = out_base.with_suffix(".m4a")
+        codec_args = ["-c:a", "aac", "-b:a", "96k", "-f", "mp4"]
+    elif ffmpeg_has_encoder("libopus"):
+        out_path = out_base.with_suffix(".webm")
+        codec_args = ["-c:a", "libopus", "-b:a", "48k", "-f", "webm"]
+    else:
+        out_path = out_base.with_suffix(".wav")
+        tmp_out = out_path.with_name("." + out_path.name + ".part")
+        try:
+            shutil.copy(mixed_wav, tmp_out)
+        except Exception:
+            tmp_out.unlink(missing_ok=True)
+            raise
+        os.replace(tmp_out, out_path)
+        return out_path
+
+    tmp_out = out_path.with_name("." + out_path.name + ".part")
+    p = run([FFMPEG_BIN, "-y", "-i", str(mixed_wav), *codec_args, str(tmp_out)])
+    if p.returncode != 0:
+        tmp_out.unlink(missing_ok=True)
+        raise RuntimeError(p.stderr[-1200:] if p.stderr else "audio encode failed")
+    os.replace(tmp_out, out_path)
+    return out_path
+
+
+# Containers/extensions POST /import accepts. ffprobe still validates the
+# actual content; this list exists because the imported file is kept as-is
+# (renamed to final.<ext>), so an extension that lies about the container
+# would produce a final.* that players can't open.
+IMPORT_SUFFIXES = {
+    ".mp4", ".m4v", ".mov", ".webm", ".mkv",
+    ".m4a", ".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".aiff",
+}
+
+
+def probe_stream_types(p: Path) -> List[str]:
+    """codec_type of every stream in the file ("audio"/"video"/...), or []
+    when ffprobe can't read it."""
+    probe = run([FFPROBE_BIN, "-v", "error", "-show_streams", "-of", "json", str(p)])
+    if probe.returncode != 0:
+        return []
+    try:
+        streams = json.loads(probe.stdout or "{}").get("streams", [])
+        return [s.get("codec_type", "") for s in streams if isinstance(s, dict)]
+    except ValueError:
+        return []
+
+
 _OLLAMA_HEALTH_TTL_SECONDS = 10.0
 _ollama_health = {"ok": False, "checked_at": 0.0}
 _ollama_health_lock = threading.Lock()
@@ -1455,9 +1514,14 @@ def _run_process_job(job_id: str) -> None:
     # started (jobs.is_busy() only blocks moves for this job's own duration).
     store = Path(inputs["store"])
     session = store / job["session_id"]
-    screen_webm = Path(inputs["screen_webm"])
+    # All three are optional since audio-only recording + file import
+    # (Tier 1.3): a job carries a screen video, standalone audio tracks,
+    # an imported media file, or some mix -- /process and /import guarantee
+    # at least one usable input exists before enqueueing.
+    screen_webm = Path(inputs["screen_webm"]) if inputs.get("screen_webm") else None
     system_webm = Path(inputs["system_webm"]) if inputs["system_webm"] else None
     mic_webm = Path(inputs["mic_webm"]) if inputs["mic_webm"] else None
+    import_media = Path(inputs["import_media"]) if inputs.get("import_media") else None
     whisper_model = inputs["whisper_model"]
     # .get, not [...]: a job queued by an older build (or persisted across an
     # upgrade) has none of these keys, and that must not crash the worker.
@@ -1509,31 +1573,73 @@ def _run_process_job(job_id: str) -> None:
     try:
         jobs.update_job(job_id, stage="muxing")
 
-        system_wav = to_wav(system_webm, session / "system.wav")
-        mic_wav = to_wav(mic_webm, session / "mic.wav")
-        mixed_wav, mix_complete = mix_audios_wav(system_wav, mic_wav, session / "mixed.wav")
-        # Whether final.* will carry every uploaded audio track. Not the case
-        # if a track failed to convert (a truncated upload makes to_wav
-        # return None) or amix failed and one track was used alone -- the
-        # recording still succeeds, but the missing track's raw webm is then
-        # the only copy of that audio anywhere.
-        all_audio_in_final = (
-            mix_complete
-            and (system_webm is None or system_wav is not None)
-            and (mic_webm is None or mic_wav is not None)
-        )
-
-        try:
-            final_path = mux_video_audio(screen_webm, mixed_wav, session / "final.webm")
-        except Exception as e:
-            log(f"mux failed: {e}")
-            error = (
-                "Couldn't combine your audio and video — the recording file may be "
-                "corrupted. Try recording again."
+        if import_media is not None:
+            # Imported file: it already IS the final recording -- promote it
+            # in place (same directory, so a plain rename) and derive the
+            # transcription wav from it. No mux, no track mixing.
+            final_path = session / f"final{import_media.suffix.lower()}"
+            os.replace(import_media, final_path)
+            system_wav = mic_wav = None
+            mix_complete = True
+            mixed_wav = to_wav(final_path, session / "mixed.wav")
+            all_audio_in_final = True
+            if mixed_wav is None:
+                error = (
+                    "Couldn't read audio from the imported file — it may be "
+                    "corrupted or have no audio track."
+                )
+                _record_failed_session(session, error)
+                jobs.update_job(job_id, status="failed", error=error)
+                return
+        else:
+            system_wav = to_wav(system_webm, session / "system.wav")
+            mic_wav = to_wav(mic_webm, session / "mic.wav")
+            mixed_wav, mix_complete = mix_audios_wav(system_wav, mic_wav, session / "mixed.wav")
+            # Whether final.* will carry every uploaded audio track. Not the case
+            # if a track failed to convert (a truncated upload makes to_wav
+            # return None) or amix failed and one track was used alone -- the
+            # recording still succeeds, but the missing track's raw webm is then
+            # the only copy of that audio anywhere.
+            all_audio_in_final = (
+                mix_complete
+                and (system_webm is None or system_wav is not None)
+                and (mic_webm is None or mic_wav is not None)
             )
-            _record_failed_session(session, error)
-            jobs.update_job(job_id, status="failed", error=error)
-            return
+
+            if screen_webm is not None:
+                try:
+                    final_path = mux_video_audio(screen_webm, mixed_wav, session / "final.webm")
+                except Exception as e:
+                    log(f"mux failed: {e}")
+                    error = (
+                        "Couldn't combine your audio and video — the recording file may be "
+                        "corrupted. Try recording again."
+                    )
+                    _record_failed_session(session, error)
+                    jobs.update_job(job_id, status="failed", error=error)
+                    return
+            else:
+                # Audio-only recording: no video to mux; final.* is the mixed
+                # audio, encoded small (see encode_audio_final).
+                if mixed_wav is None:
+                    error = (
+                        "Couldn't read the recorded audio — the recording file may be "
+                        "corrupted. Try recording again."
+                    )
+                    _record_failed_session(session, error)
+                    jobs.update_job(job_id, status="failed", error=error)
+                    return
+                try:
+                    final_path = encode_audio_final(mixed_wav, session / "final")
+                except Exception as e:
+                    log(f"audio final encode failed: {e}")
+                    error = (
+                        "Couldn't save the recorded audio — the recording file may be "
+                        "corrupted. Try recording again."
+                    )
+                    _record_failed_session(session, error)
+                    jobs.update_job(job_id, status="failed", error=error)
+                    return
 
         notes: str = ""
         structured_action_items: Optional[list] = None
@@ -1607,7 +1713,10 @@ def _run_process_job(job_id: str) -> None:
             and pyannote_diarize is not None
             and transcribe_wav is not None
         ):
-            single_wav = mic_wav or system_wav
+            # Imported files have no separate tracks; diarize the derived
+            # mixed.wav instead, so an imported multi-speaker meeting still
+            # gets per-speaker labels when Track B is enabled.
+            single_wav = mic_wav or system_wav or (mixed_wav if import_media is not None else None)
             if single_wav is not None:
                 try:
                     solo_segments = transcribe_wav(
@@ -1637,8 +1746,11 @@ def _run_process_job(job_id: str) -> None:
         ):
             # mixed_wav is whichever track(s) exist, so label by source:
             # mic alone is the user, system alone is the other side, and a
-            # mix of both can't be attributed to either.
-            if system_wav is None:
+            # mix of both can't be attributed to either. An imported file
+            # has no track provenance at all -- never label it "You".
+            if import_media is not None:
+                single_speaker = None
+            elif system_wav is None:
                 single_speaker = "You"
             elif mic_wav is None:
                 single_speaker = "Others"
@@ -1987,34 +2099,125 @@ def process(
         advanced_diarization_enabled = ADVANCED_DIARIZATION_ENABLED
         huggingface_token = HUGGINGFACE_TOKEN
 
-        # Validate the screen upload fully before creating the permanent session
+        # Validate every upload fully before creating the permanent session
         # directory: staged in a scratch temp dir first (on the same filesystem
-        # as `store`, so the move below is a cheap rename, not a multi-GB copy)
-        # so a rejected upload (missing/invalid video) never leaves a
+        # as `store`, so the moves below are cheap renames, not multi-GB copies)
+        # so a rejected request (no valid track at all) never leaves a
         # mkdir'd-but-otherwise-empty session folder behind (brief 08). The temp
         # dir is removed on the way out either way, success or rejection.
+        #
+        # The screen video is no longer required (Tier 1.3): an audio-only
+        # recording (mic and/or system alone) is a valid session -- which
+        # also means a corrupted screen track no longer loses the meeting
+        # when the audio tracks survived.
         with tempfile.TemporaryDirectory(prefix=STAGING_DIR_PREFIX, dir=store) as staging:
-            staged_screen = save_upload(Path(staging), screen, "screen.webm")
-            if not staged_screen:
-                raise HTTPException(400, "valid screen video is required")
+            staged = Path(staging)
+            staged_screen = save_upload(staged, screen, "screen.webm") if screen else None
+            staged_system = save_upload(staged, system, "system.webm") if system else None
+            staged_mic    = save_upload(staged, mic,    "mic.webm")    if mic    else None
+            if not (staged_screen or staged_system or staged_mic):
+                raise HTTPException(400, "No valid recording was uploaded (screen, system, or mic)")
 
             session = store / uuid.uuid4().hex
             session.mkdir(parents=True, exist_ok=True)
             log(f"session: {session}")
 
-            screen_webm = session / "screen.webm"
-            shutil.move(str(staged_screen), str(screen_webm))
+            def _into_session(staged_path: Optional[Path], name: str) -> Optional[Path]:
+                if staged_path is None:
+                    return None
+                dest = session / name
+                shutil.move(str(staged_path), str(dest))
+                return dest
 
-        system_webm = save_upload(session, system, "system.webm") if system else None
-        mic_webm    = save_upload(session, mic,    "mic.webm")    if mic    else None
+            screen_webm = _into_session(staged_screen, "screen.webm")
+            system_webm = _into_session(staged_system, "system.webm")
+            mic_webm    = _into_session(staged_mic,    "mic.webm")
 
         job_id = jobs.create_job(
             session_id=session.name,
             inputs={
                 "store": str(store),
-                "screen_webm": str(screen_webm),
+                "screen_webm": str(screen_webm) if screen_webm else None,
                 "system_webm": str(system_webm) if system_webm else None,
                 "mic_webm": str(mic_webm) if mic_webm else None,
+                "whisper_model": whisper_model,
+                "transcription_language": transcription_language,
+                "custom_vocabulary": custom_vocabulary,
+                "ollama_chat_model": ollama_chat_model,
+                "advanced_diarization_enabled": advanced_diarization_enabled,
+                "huggingface_token": huggingface_token,
+                "ai_provider": AI_PROVIDER,
+                "custom_api_base_url": CUSTOM_API_BASE_URL,
+                "custom_api_key": CUSTOM_API_KEY,
+                "custom_model_name": CUSTOM_MODEL_NAME,
+            },
+        )
+        jobs.enqueue(job_id)
+
+        return {"job_id": job_id, "session_id": session.name}
+    finally:
+        with _store_state_lock:
+            _active_uploads -= 1
+
+
+@app.post("/import", status_code=202)
+def import_recording(file: UploadFile | None = File(None)):
+    """Import an existing audio or video recording as a new session
+    (Tier 1.3). The file is kept as-is (promoted to final.<ext> by the
+    job), its audio is extracted for transcription, and from there it runs
+    the exact same pipeline as a live recording: transcribe -> summarize ->
+    chat/knowledge-graph.
+
+    Plain def for the same threadpool reason as /process above, and the
+    same move-guard/_active_uploads bookkeeping: an import is an upload
+    into the store like any other.
+    """
+    global _active_uploads
+    if file is None or not file.filename:
+        raise HTTPException(400, "Choose an audio or video file to import")
+
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in IMPORT_SUFFIXES:
+        allowed = ", ".join(sorted(IMPORT_SUFFIXES))
+        raise HTTPException(400, f"Unsupported file type {suffix or '(none)'} — supported: {allowed}")
+
+    with _store_state_lock:
+        if move_in_progress:
+            raise HTTPException(503, "Storage folder is being moved -- try again in a moment")
+        _active_uploads += 1
+    try:
+        store = STORE
+        whisper_model = WHISPER_MODEL
+        transcription_language = TRANSCRIPTION_LANGUAGE
+        custom_vocabulary = CUSTOM_VOCABULARY
+        ollama_chat_model = OLLAMA_CHAT_MODEL
+        advanced_diarization_enabled = ADVANCED_DIARIZATION_ENABLED
+        huggingface_token = HUGGINGFACE_TOKEN
+
+        with tempfile.TemporaryDirectory(prefix=STAGING_DIR_PREFIX, dir=store) as staging:
+            staged = save_upload(Path(staging), file, f"import{suffix}")
+            if staged is None:
+                raise HTTPException(400, "That file couldn't be read as audio or video — it may be corrupted")
+            # save_upload's ffprobe proved it parses; an import additionally
+            # needs an actual audio stream, or there's nothing to transcribe
+            # (e.g. a silent screen capture or an image-in-a-video-container).
+            if "audio" not in probe_stream_types(staged):
+                raise HTTPException(400, "That file has no audio track to transcribe")
+
+            session = store / uuid.uuid4().hex
+            session.mkdir(parents=True, exist_ok=True)
+            log(f"session (import): {session}")
+            import_path = session / f"import{suffix}"
+            shutil.move(str(staged), str(import_path))
+
+        job_id = jobs.create_job(
+            session_id=session.name,
+            inputs={
+                "store": str(store),
+                "screen_webm": None,
+                "system_webm": None,
+                "mic_webm": None,
+                "import_media": str(import_path),
                 "whisper_model": whisper_model,
                 "transcription_language": transcription_language,
                 "custom_vocabulary": custom_vocabulary,

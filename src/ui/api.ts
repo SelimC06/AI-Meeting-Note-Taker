@@ -406,6 +406,29 @@ export async function startBuiltinSetup(): Promise<BuiltinStatus | null> {
   }
 }
 
+// Mirrors the backend's /import whitelist (IMPORT_SUFFIXES in server.py)
+// so the file picker only offers what will actually be accepted.
+export const IMPORT_FILE_EXTENSIONS = [
+  ".mp4", ".m4v", ".mov", ".webm", ".mkv",
+  ".m4a", ".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".aiff",
+];
+
+// POST /import: uploads an existing audio/video recording; the backend
+// runs it through the same transcribe -> summarize pipeline as a live
+// recording and the returned job shows up in the normal jobs polling.
+export async function importRecording(file: File): Promise<{ job_id: string; session_id: string }> {
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+  const resp = await backendFetch(`${BACKEND_URL}/import`, { method: "POST", body: formData });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null);
+    throw new Error(
+      typeof body?.detail === "string" ? body.detail : `Import failed: ${resp.status}`
+    );
+  }
+  return (await resp.json()) as { job_id: string; session_id: string };
+}
+
 export type OllamaModelsResult = {
   ok: boolean;
   models: string[];

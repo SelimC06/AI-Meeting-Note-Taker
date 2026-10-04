@@ -12,6 +12,7 @@ import {
   listJobs,
   getJobStatus,
   recoverSessionsIndex,
+  importRecording,
   type Session,
 } from "../api";
 
@@ -563,4 +564,33 @@ it("trash rows are keyboard-reachable buttons whose menu restores the meeting", 
   fireEvent.click(document.activeElement!);
 
   await waitFor(() => expect(restoreSession).toHaveBeenCalledWith("a1"));
+});
+
+it("imports a recording via the hidden file input and re-enables the button", async () => {
+  vi.mocked(importRecording).mockResolvedValue({ job_id: "j1", session_id: "s1" });
+  const { container } = renderSidebar();
+
+  const button = screen.getByRole("button", { name: /import recording/i });
+  const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+  const file = new File([new Uint8Array([1, 2, 3])], "standup.m4a", { type: "audio/mp4" });
+
+  fireEvent.change(input, { target: { files: [file] } });
+
+  await waitFor(() => expect(importRecording).toHaveBeenCalledWith(file));
+  await waitFor(() => expect(button).not.toBeDisabled());
+  expect(button).toHaveTextContent(/import recording/i);
+});
+
+it("surfaces the backend's import rejection in the error banner", async () => {
+  vi.mocked(importRecording).mockRejectedValue(
+    new Error("That file has no audio track to transcribe")
+  );
+  const { container } = renderSidebar();
+
+  const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+  fireEvent.change(input, {
+    target: { files: [new File([new Uint8Array([1])], "clip.mp4", { type: "video/mp4" })] },
+  });
+
+  expect(await screen.findByText(/no audio track/)).toBeInTheDocument();
 });
