@@ -113,6 +113,11 @@ def default_settings(default_storage_dir: Path) -> Dict[str, Any]:
         # installs keep whatever their settings.json already says -- an
         # on-disk value always wins over this default (see load_checked).
         "ai_provider": "builtin",
+        # Note template (Tier 2.3): which Markdown skeleton summaries are
+        # written into. A built-in id from note_templates, or "custom" to
+        # use custom_note_template's body.
+        "note_template": "general",
+        "custom_note_template": "",
         "custom_api_base_url": "",
         "custom_api_key": "",
         "custom_model_name": "",

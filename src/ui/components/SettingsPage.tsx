@@ -32,6 +32,7 @@ type SectionId =
   | "transcription"
   | "storage"
   | "ai"
+  | "notes"
   | "diarization"
   | "appearance"
   | "privacy"
@@ -44,6 +45,7 @@ type DotTone = "ok" | "warn" | "err" | "idle" | "none";
 type OptimisticField =
   | "whisper_model"
   | "transcription_language"
+  | "note_template"
   | "ollama_chat_model"
   | "ai_provider"
   | "advanced_diarization_enabled";
@@ -55,6 +57,7 @@ const NAV_GROUPS: { heading: string; sections: { id: SectionId; label: string }[
       { id: "transcription", label: "Transcription" },
       { id: "storage", label: "Storage" },
       { id: "ai", label: "AI Model" },
+      { id: "notes", label: "Notes" },
       { id: "diarization", label: "Diarization" },
       { id: "appearance", label: "Appearance" },
     ],
@@ -111,6 +114,9 @@ export default function SettingsPage({
 
   const [whisperError, setWhisperError] = useState<string | null>(null);
   const [languageSaveError, setLanguageSaveError] = useState<string | null>(null);
+  const [templateSaveError, setTemplateSaveError] = useState<string | null>(null);
+  const [customTemplateDraft, setCustomTemplateDraft] = useState("");
+  const [customTemplateSaveError, setCustomTemplateSaveError] = useState<string | null>(null);
   const [ollamaSaveError, setOllamaSaveError] = useState<string | null>(null);
 
   const [providerSaveError, setProviderSaveError] = useState<string | null>(null);
@@ -165,6 +171,7 @@ export default function SettingsPage({
           confirmedRef.current = s;
           setSettings(s);
           setVocabularyDraft(s.custom_vocabulary);
+          setCustomTemplateDraft(s.custom_note_template ?? "");
           // No token/API-key drafts to seed: the backend never sends the
           // saved secrets back (only *_set flags), so those inputs always
           // start empty and only ever carry a replacement value.
@@ -290,6 +297,28 @@ export default function SettingsPage({
 
   const handleLanguageChange = (value: string) =>
     saveOptimistic("transcription_language", value, setLanguageSaveError);
+
+  const handleTemplateChange = (value: string) =>
+    saveOptimistic("note_template", value, setTemplateSaveError);
+
+  const handleSaveCustomTemplate = async () => {
+    setCustomTemplateSaveError(null);
+    try {
+      const updated = await updateSettings({ custom_note_template: customTemplateDraft });
+      setCustomTemplateDraft(updated.custom_note_template);
+    } catch (e) {
+      setCustomTemplateSaveError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // "Edit as custom": seed the custom body from a built-in and switch to it.
+  const handleEditAsCustom = (body: string) => {
+    setCustomTemplateDraft(body);
+    saveOptimistic("note_template", "custom", setTemplateSaveError);
+    void updateSettings({ custom_note_template: body }).catch((e) => {
+      setCustomTemplateSaveError(e instanceof Error ? e.message : String(e));
+    });
+  };
 
   const handleOllamaChange = (value: string) => saveOptimistic("ollama_chat_model", value, setOllamaSaveError);
 
@@ -455,7 +484,7 @@ export default function SettingsPage({
 
   return (
     <div className="flex-1 min-h-0 flex flex-row text-phosphor">
-      <nav className="w-40 shrink-0 border-r border-line bg-void/40 p-2 flex flex-col gap-0.5">
+      <nav className="w-44 shrink-0 border-r border-line bg-void/40 p-2.5 flex flex-col gap-0.5">
         {NAV_GROUPS.map((group) => (
           <div key={group.heading}>
             <p className="px-2 pt-2 pb-1.5 text-[9px] tracking-[0.15em] text-dim/50 select-none">
@@ -467,7 +496,7 @@ export default function SettingsPage({
                 onClick={() => setActiveSection(section.id)}
                 aria-current={activeSection === section.id ? "true" : undefined}
                 className={
-                  "w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm text-xs text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
+                  "w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-sm text-xs text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
                   (activeSection === section.id
                     ? "bg-signal text-void font-semibold"
                     : "text-dim hover:text-phosphor hover:bg-line")
@@ -481,11 +510,11 @@ export default function SettingsPage({
         ))}
       </nav>
 
-      <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
+      <div className="flex-1 min-h-0 overflow-y-auto px-8 py-6">
         {activeSection === "transcription" && (
-          <section className="flex flex-col gap-5">
+          <section className="max-w-xl flex flex-col gap-5">
             <div>
-              <h2 className="text-xs font-semibold text-dim uppercase tracking-wide mb-2">
+              <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em] mb-2">
                 whisper model
               </h2>
               <div className="flex flex-col gap-1">
@@ -494,7 +523,7 @@ export default function SettingsPage({
                     key={choice.value}
                     onClick={() => handleWhisperChange(choice.value)}
                     className={
-                      "text-left px-2 py-1 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
+                      "text-left px-3 py-2 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
                       (settings.whisper_model === choice.value
                         ? "bg-signal text-void"
                         : "text-dim hover:text-phosphor border border-line")
@@ -508,7 +537,7 @@ export default function SettingsPage({
             </div>
 
             <div className="pt-5 border-t border-line/60 flex flex-col gap-2">
-              <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+              <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">
                 language
               </h2>
               <p className="text-xs text-dim">
@@ -523,7 +552,7 @@ export default function SettingsPage({
                 id="transcription-language"
                 value={settings.transcription_language ?? "auto"}
                 onChange={(e) => handleLanguageChange(e.target.value)}
-                className="self-start bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                className="self-start bg-void border border-line rounded-sm text-xs px-2.5 py-1.5 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
               >
                 {(settings.transcription_language_choices ?? []).map((choice) => (
                   <option key={choice.value} value={choice.value}>
@@ -535,7 +564,7 @@ export default function SettingsPage({
             </div>
 
             <div className="pt-5 border-t border-line/60 flex flex-col gap-2">
-              <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+              <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">
                 custom vocabulary
               </h2>
               <p className="text-xs text-dim">
@@ -549,7 +578,7 @@ export default function SettingsPage({
                 value={vocabularyDraft}
                 onChange={(e) => setVocabularyDraft(e.target.value)}
                 rows={3}
-                className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal resize-none"
+                className="bg-void border border-line rounded-sm text-xs px-2.5 py-1.5 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal resize-none"
               />
               <button
                 onClick={handleSaveVocabulary}
@@ -565,9 +594,9 @@ export default function SettingsPage({
         )}
 
         {activeSection === "storage" && (
-          <section className="flex flex-col gap-5">
+          <section className="max-w-xl flex flex-col gap-5">
             <div className="flex flex-col gap-2">
-              <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+              <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">
                 storage location
               </h2>
               <p className="text-xs text-phosphor break-all">{settings.storage_dir}</p>
@@ -582,7 +611,7 @@ export default function SettingsPage({
             </div>
 
             <div className="pt-5 border-t border-line/60 flex flex-col gap-2">
-              <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+              <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">
                 storage usage
               </h2>
               {usageError && <p className="text-xs text-red-400">{usageError}</p>}
@@ -641,39 +670,53 @@ export default function SettingsPage({
         )}
 
         {activeSection === "ai" && (
-          <section className="flex flex-col gap-2">
-            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">AI model</h2>
+          <section className="max-w-xl flex flex-col gap-4">
+            <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">AI model</h2>
             <p className="text-xs text-dim">Used for chat, meeting summarization, and the knowledge graph.</p>
 
-            <div className="flex items-center gap-2">
-              <label htmlFor="ai-provider" className="text-xs text-dim">
-                Provider
-              </label>
-              <select
-                id="ai-provider"
-                value={settings.ai_provider}
-                onChange={(e) => handleProviderChange(e.target.value as "builtin" | "ollama" | "custom")}
-                className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-              >
-                <option value="builtin">Built-in (recommended)</option>
-                <option value="ollama">Ollama (local)</option>
-                <option value="custom">Custom (OpenAI-compatible)</option>
-              </select>
-            </div>
-            {providerSaveError && <p className="text-xs text-red-400">{providerSaveError}</p>}
-
-            {settings.ai_provider === "builtin" && (
-              <div className="mt-2 pl-3 border-l-2 border-line flex flex-col gap-2">
-                <p className="text-xs text-dim">
-                  Runs the bundled model (Gemma 3 4B) on this machine via llama.cpp — no
-                  Ollama or account needed, and nothing leaves your computer. The model is
-                  downloaded once (~2.5 GB) the first time it's used.
-                </p>
+            <div role="radiogroup" aria-label="Provider" className="flex flex-col gap-2">
+              {/* Built-in */}
+              <div className={"rounded-md border " + (settings.ai_provider === "builtin" ? "border-signal bg-panel" : "border-line")}>
+                <button
+                  role="radio"
+                  aria-checked={settings.ai_provider === "builtin"}
+                  onClick={() => handleProviderChange("builtin")}
+                  className="w-full text-left flex items-center gap-3 px-4 py-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-signal rounded-md"
+                >
+                  <span aria-hidden="true" className={"h-3.5 w-3.5 shrink-0 grid place-items-center rounded-full border " + (settings.ai_provider === "builtin" ? "border-signal" : "border-line")}>
+                    {settings.ai_provider === "builtin" && <span className="h-1.5 w-1.5 rounded-full bg-signal" />}
+                  </span>
+                  <span className="flex-1 min-w-0">
+                    <span className="text-[13px] font-semibold text-phosphor">
+                      Built-in
+                      <span className="ml-2 align-middle text-[9px] font-bold uppercase tracking-[0.08em] bg-signal text-void rounded-sm px-1.5 py-0.5">recommended</span>
+                    </span>
+                    <span className="block text-xs text-dim mt-0.5">
+                      Gemma 3 4B on this machine via llama.cpp — nothing leaves your computer.
+                      Downloaded once (~2.5 GB) on first use.
+                    </span>
+                  </span>
+                </button>
               </div>
-            )}
 
-            {settings.ai_provider === "ollama" && (
-              <div className="mt-2 pl-3 border-l-2 border-line flex flex-col gap-2">
+              {/* Ollama */}
+              <div className={"rounded-md border " + (settings.ai_provider === "ollama" ? "border-signal bg-panel" : "border-line")}>
+                <button
+                  role="radio"
+                  aria-checked={settings.ai_provider === "ollama"}
+                  onClick={() => handleProviderChange("ollama")}
+                  className="w-full text-left flex items-center gap-3 px-4 py-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-signal rounded-md"
+                >
+                  <span aria-hidden="true" className={"h-3.5 w-3.5 shrink-0 grid place-items-center rounded-full border " + (settings.ai_provider === "ollama" ? "border-signal" : "border-line")}>
+                    {settings.ai_provider === "ollama" && <span className="h-1.5 w-1.5 rounded-full bg-signal" />}
+                  </span>
+                  <span className="flex-1 min-w-0">
+                    <span className="text-[13px] font-semibold text-phosphor">Ollama</span>
+                    <span className="block text-xs text-dim mt-0.5">Use your own Ollama install and models.</span>
+                  </span>
+                </button>
+                {settings.ai_provider === "ollama" && (
+                  <div className="px-4 pb-3 pl-11 flex flex-col gap-2">
                 {ollamaLoading ? (
                   <p className="text-xs text-dim">Loading installed models...</p>
                 ) : ollamaError ? (
@@ -695,7 +738,7 @@ export default function SettingsPage({
                       id="ollama-chat-model"
                       value={settings.ollama_chat_model}
                       onChange={(e) => handleOllamaChange(e.target.value)}
-                      className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                      className="bg-void border border-line rounded-sm text-xs px-2.5 py-1.5 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                     >
                       {!ollamaModels.includes(settings.ollama_chat_model) && (
                         <option value={settings.ollama_chat_model}>
@@ -711,15 +754,31 @@ export default function SettingsPage({
                     {ollamaSaveError && <p className="text-xs text-red-400">{ollamaSaveError}</p>}
                   </>
                 )}
+                  </div>
+                )}
               </div>
-            )}
 
-            {settings.ai_provider === "custom" && (
-              <div className="mt-2 pl-3 border-l-2 border-line flex flex-col gap-2">
-                <p className="text-xs text-dim">
-                  Connects to any OpenAI-compatible endpoint. Meeting content is sent to this
-                  provider instead of staying on this machine.
-                </p>
+              {/* Custom */}
+              <div className={"rounded-md border " + (settings.ai_provider === "custom" ? "border-signal bg-panel" : "border-line")}>
+                <button
+                  role="radio"
+                  aria-checked={settings.ai_provider === "custom"}
+                  onClick={() => handleProviderChange("custom")}
+                  className="w-full text-left flex items-center gap-3 px-4 py-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-signal rounded-md"
+                >
+                  <span aria-hidden="true" className={"h-3.5 w-3.5 shrink-0 grid place-items-center rounded-full border " + (settings.ai_provider === "custom" ? "border-signal" : "border-line")}>
+                    {settings.ai_provider === "custom" && <span className="h-1.5 w-1.5 rounded-full bg-signal" />}
+                  </span>
+                  <span className="flex-1 min-w-0">
+                    <span className="text-[13px] font-semibold text-phosphor">Custom endpoint</span>
+                    <span className="block text-xs text-dim mt-0.5">
+                      Any OpenAI-compatible API. Meeting content is sent to that provider
+                      instead of staying on this machine.
+                    </span>
+                  </span>
+                </button>
+                {settings.ai_provider === "custom" && (
+                  <div className="px-4 pb-3 pl-11 flex flex-col gap-2">
                 <label htmlFor="custom-base-url" className="text-xs text-dim">
                   Base URL
                 </label>
@@ -729,7 +788,7 @@ export default function SettingsPage({
                   value={baseUrlDraft}
                   onChange={(e) => setBaseUrlDraft(e.target.value)}
                   placeholder="https://api.openai.com/v1"
-                  className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                  className="bg-void border border-line rounded-sm text-xs px-2.5 py-1.5 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                 />
                 <label htmlFor="custom-api-key" className="text-xs text-dim">
                   API Key
@@ -740,7 +799,7 @@ export default function SettingsPage({
                   value={apiKeyDraft}
                   onChange={(e) => setApiKeyDraft(e.target.value)}
                   placeholder={settings.custom_api_key_set ? "Saved -- type a new key to replace it" : "sk-..."}
-                  className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                  className="bg-void border border-line rounded-sm text-xs px-2.5 py-1.5 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                 />
                 {settings.custom_api_key_set && (
                   <div className="flex items-center gap-2">
@@ -762,7 +821,7 @@ export default function SettingsPage({
                   value={customModelDraft}
                   onChange={(e) => setCustomModelDraft(e.target.value)}
                   placeholder="gpt-4o-mini"
-                  className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                  className="bg-void border border-line rounded-sm text-xs px-2.5 py-1.5 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                 />
                 <button
                   onClick={handleSaveConnection}
@@ -771,14 +830,97 @@ export default function SettingsPage({
                   Save connection
                 </button>
                 {connectionSaveError && <p className="text-xs text-red-400">{connectionSaveError}</p>}
+                  </div>
+                )}
+              </div>
+            </div>
+            {providerSaveError && <p className="text-xs text-red-400">{providerSaveError}</p>}
+          </section>
+        )}
+
+        {activeSection === "notes" && (
+          <section className="max-w-xl flex flex-col gap-4">
+            <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">note template</h2>
+            <p className="text-xs text-dim">
+              The structure your meeting summaries are written into. Applies to new recordings
+              and imports.
+            </p>
+            <div className="flex flex-col gap-1">
+              {(settings.note_template_choices ?? []).map((choice) => (
+                <button
+                  key={choice.id}
+                  onClick={() => handleTemplateChange(choice.id)}
+                  className={
+                    "text-left px-3 py-2 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
+                    (settings.note_template === choice.id
+                      ? "bg-signal text-void"
+                      : "text-dim hover:text-phosphor border border-line")
+                  }
+                >
+                  [{choice.id}] {choice.label} — {choice.description}
+                </button>
+              ))}
+              <button
+                onClick={() => handleTemplateChange("custom")}
+                className={
+                  "text-left px-3 py-2 rounded-sm text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
+                  (settings.note_template === "custom"
+                    ? "bg-signal text-void"
+                    : "text-dim hover:text-phosphor border border-line")
+                }
+              >
+                [custom] Custom — your own sections
+              </button>
+            </div>
+            {templateSaveError && <p className="text-xs text-red-400">{templateSaveError}</p>}
+
+            {settings.note_template === "custom" ? (
+              <div className="mt-2 flex flex-col gap-2">
+                <label htmlFor="custom-note-template" className="text-xs text-dim">
+                  Custom template (Markdown — keep the first line as the title placeholder)
+                </label>
+                <textarea
+                  id="custom-note-template"
+                  value={customTemplateDraft}
+                  onChange={(e) => setCustomTemplateDraft(e.target.value)}
+                  rows={10}
+                  spellCheck={false}
+                  className="bg-void border border-line rounded-sm text-xs px-2 py-1.5 text-phosphor font-mono leading-relaxed focus:outline-none focus-visible:ring-2 focus-visible:ring-signal resize-none"
+                />
+                <button
+                  onClick={handleSaveCustomTemplate}
+                  className="self-start px-2 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                >
+                  Save template
+                </button>
+                {customTemplateSaveError && (
+                  <p className="text-xs text-red-400">{customTemplateSaveError}</p>
+                )}
+              </div>
+            ) : (
+              <div className="mt-1 flex flex-col gap-1.5">
+                <span className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">preview</span>
+                <pre className="bg-void border border-line rounded-md text-[11px] leading-relaxed text-dim px-3 py-2.5 whitespace-pre-wrap max-h-56 overflow-y-auto">
+                  {(settings.note_template_choices ?? []).find((c) => c.id === settings.note_template)?.body ?? ""}
+                </pre>
+                <button
+                  onClick={() =>
+                    handleEditAsCustom(
+                      (settings.note_template_choices ?? []).find((c) => c.id === settings.note_template)?.body ?? ""
+                    )
+                  }
+                  className="self-start px-2.5 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+                >
+                  edit as custom
+                </button>
               </div>
             )}
           </section>
         )}
 
         {activeSection === "diarization" && (
-          <section className="flex flex-col gap-2">
-            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">
+          <section className="max-w-xl flex flex-col gap-4">
+            <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">
               voice profiles
             </h2>
             <p className="text-xs text-dim">
@@ -821,7 +963,7 @@ export default function SettingsPage({
             )}
             {profilesError && <p className="text-xs text-red-400">{profilesError}</p>}
 
-            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide mt-4 pt-4 border-t border-line/60">
+            <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em] mt-4 pt-4 border-t border-line/60">
               advanced diarization
             </h2>
             <p className="text-xs text-dim">
@@ -864,7 +1006,7 @@ export default function SettingsPage({
               value={tokenDraft}
               onChange={(e) => setTokenDraft(e.target.value)}
               placeholder={settings.huggingface_token_set ? "Saved -- type a new token to replace it" : "hf_..."}
-              className="bg-void border border-line rounded-sm text-xs px-2 py-1 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+              className="bg-void border border-line rounded-sm text-xs px-2.5 py-1.5 text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
             />
             {settings.huggingface_token_set && <p className="text-xs text-dim">A token is saved.</p>}
             <div className="flex gap-2">
@@ -889,8 +1031,8 @@ export default function SettingsPage({
         )}
 
         {activeSection === "appearance" && (
-          <section className="flex flex-col gap-2">
-            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">theme</h2>
+          <section className="max-w-xl flex flex-col gap-4">
+            <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">theme</h2>
             <p className="text-xs text-dim">
               Applies to the whole app, the recording rail included. Saved on this machine.
             </p>
@@ -920,8 +1062,8 @@ export default function SettingsPage({
         )}
 
         {activeSection === "privacy" && (
-          <section className="flex flex-col gap-2">
-            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">privacy</h2>
+          <section className="max-w-xl flex flex-col gap-4">
+            <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">privacy</h2>
             <p className="text-xs text-dim max-w-md leading-relaxed">
               Recordings and notes are stored only on this machine and never uploaded anywhere.
               Items moved to trash are permanently deleted after 30 days.
@@ -930,8 +1072,8 @@ export default function SettingsPage({
         )}
 
         {activeSection === "diagnostics" && (
-          <section className="flex flex-col gap-2">
-            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">diagnostics</h2>
+          <section className="max-w-xl flex flex-col gap-4">
+            <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">diagnostics</h2>
             <p className="text-xs text-dim max-w-md leading-relaxed">
               If something breaks, this app writes what happened to a local log file — nothing is
               sent anywhere automatically. Open the folder below to find it if you want to look
@@ -947,8 +1089,8 @@ export default function SettingsPage({
         )}
 
         {activeSection === "about" && (
-          <section className="flex flex-col gap-2">
-            <h2 className="text-xs font-semibold text-dim uppercase tracking-wide">updates</h2>
+          <section className="max-w-xl flex flex-col gap-4">
+            <h2 className="text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">updates</h2>
             <p className="text-xs text-phosphor">
               {appVersion ? `version ${appVersion}` : "loading version..."}
             </p>

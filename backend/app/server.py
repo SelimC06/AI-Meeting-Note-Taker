@@ -75,6 +75,7 @@ from . import jobs
 from . import llm_provider
 from . import builtin_llm
 from . import speaker_id
+from . import note_templates
 
 try:
     from .ffmpeg_transcribe import stop_recording_and_transcribe, transcribe_wav  # type: ignore
@@ -479,6 +480,8 @@ def run_startup_maintenance() -> None:
 
 WHISPER_MODEL = _settings["whisper_model"]
 TRANSCRIPTION_LANGUAGE = _settings["transcription_language"]
+NOTE_TEMPLATE = _settings["note_template"]
+CUSTOM_NOTE_TEMPLATE = _settings["custom_note_template"]
 OLLAMA_CHAT_MODEL = _settings["ollama_chat_model"]
 CUSTOM_VOCABULARY = _settings["custom_vocabulary"]
 ADVANCED_DIARIZATION_ENABLED = _settings["advanced_diarization_enabled"]
@@ -966,6 +969,8 @@ def _is_http_url(value: str) -> bool:
 class SettingsUpdate(BaseModel):
     whisper_model: Optional[str] = None
     transcription_language: Optional[str] = None
+    note_template: Optional[str] = None
+    custom_note_template: Optional[str] = None
     storage_dir: Optional[str] = None
     ollama_chat_model: Optional[str] = None
     custom_vocabulary: Optional[str] = None
@@ -990,6 +995,7 @@ def _public_settings(settings: dict) -> dict:
         public[f"{key}_set"] = bool(settings.get(key))
     public["whisper_model_choices"] = WHISPER_MODEL_CHOICES
     public["transcription_language_choices"] = TRANSCRIPTION_LANGUAGE_CHOICES
+    public["note_template_choices"] = note_templates.public_choices()
     return public
 
 
@@ -1004,6 +1010,8 @@ def get_settings():
     return _public_settings({
         "whisper_model": WHISPER_MODEL,
         "transcription_language": TRANSCRIPTION_LANGUAGE,
+        "note_template": NOTE_TEMPLATE,
+        "custom_note_template": CUSTOM_NOTE_TEMPLATE,
         "storage_dir": str(STORE),
         "ollama_chat_model": OLLAMA_CHAT_MODEL,
         "custom_vocabulary": CUSTOM_VOCABULARY,
@@ -1019,6 +1027,7 @@ def get_settings():
 @app.patch("/settings")
 def patch_settings(body: SettingsUpdate):
     global STORE, WHISPER_MODEL, TRANSCRIPTION_LANGUAGE, OLLAMA_CHAT_MODEL, CUSTOM_VOCABULARY, move_in_progress
+    global NOTE_TEMPLATE, CUSTOM_NOTE_TEMPLATE
     global ADVANCED_DIARIZATION_ENABLED, HUGGINGFACE_TOKEN
     global AI_PROVIDER, CUSTOM_API_BASE_URL, CUSTOM_API_KEY, CUSTOM_MODEL_NAME
     global SETTINGS_ERROR, STORE_UNTRUSTED
@@ -1031,6 +1040,18 @@ def patch_settings(body: SettingsUpdate):
         and body.transcription_language not in TRANSCRIPTION_LANGUAGE_VALUES
     ):
         raise HTTPException(400, f"Invalid transcription_language: {body.transcription_language!r}")
+
+    if body.note_template is not None and body.note_template not in note_templates.TEMPLATE_IDS:
+        raise HTTPException(400, f"Invalid note_template: {body.note_template!r}")
+
+    if (
+        body.custom_note_template is not None
+        and len(body.custom_note_template) > note_templates.MAX_CUSTOM_TEMPLATE_CHARS
+    ):
+        raise HTTPException(
+            400,
+            f"Custom template is too long (max {note_templates.MAX_CUSTOM_TEMPLATE_CHARS} characters)",
+        )
 
     if body.storage_dir is not None and not Path(body.storage_dir).is_absolute():
         raise HTTPException(400, "Storage folder must be an absolute path")
@@ -1065,6 +1086,8 @@ def patch_settings(body: SettingsUpdate):
         updates: dict = {
             "whisper_model": WHISPER_MODEL,
             "transcription_language": TRANSCRIPTION_LANGUAGE,
+            "note_template": NOTE_TEMPLATE,
+            "custom_note_template": CUSTOM_NOTE_TEMPLATE,
             "storage_dir": str(STORE),
             "ollama_chat_model": OLLAMA_CHAT_MODEL,
             "custom_vocabulary": CUSTOM_VOCABULARY,
@@ -1079,6 +1102,10 @@ def patch_settings(body: SettingsUpdate):
             updates["whisper_model"] = body.whisper_model
         if body.transcription_language is not None:
             updates["transcription_language"] = body.transcription_language
+        if body.note_template is not None:
+            updates["note_template"] = body.note_template
+        if body.custom_note_template is not None:
+            updates["custom_note_template"] = body.custom_note_template
         if body.ollama_chat_model is not None:
             updates["ollama_chat_model"] = body.ollama_chat_model
         if body.custom_vocabulary is not None:
@@ -1193,6 +1220,8 @@ def patch_settings(body: SettingsUpdate):
         STORE.mkdir(parents=True, exist_ok=True)
         WHISPER_MODEL = settings["whisper_model"]
         TRANSCRIPTION_LANGUAGE = settings["transcription_language"]
+        NOTE_TEMPLATE = settings["note_template"]
+        CUSTOM_NOTE_TEMPLATE = settings["custom_note_template"]
         OLLAMA_CHAT_MODEL = settings["ollama_chat_model"]
         CUSTOM_VOCABULARY = settings["custom_vocabulary"]
         ADVANCED_DIARIZATION_ENABLED = settings["advanced_diarization_enabled"]
@@ -1569,6 +1598,11 @@ def _run_process_job(job_id: str) -> None:
     whisper_model = resolve_whisper_model(whisper_model, transcription_language)
     whisper_language = resolve_transcribe_language(transcription_language)
     custom_vocabulary = inputs.get("custom_vocabulary", "")
+    # Resolved to the concrete Markdown body here; unknown/missing ids
+    # (an old queued job) fall back to the general template.
+    note_template_body = note_templates.resolve_template_body(
+        inputs.get("note_template"), inputs.get("custom_note_template")
+    )
     ollama_chat_model = inputs.get("ollama_chat_model") or OLLAMA_CHAT_MODEL
     # .get(...) with defaults: inputs dicts created by an older backend
     # build (before Track B) won't have these keys if a job was somehow
@@ -1910,6 +1944,7 @@ def _run_process_job(job_id: str) -> None:
                     client=active_client,
                     on_progress=report_progress,
                     duration_seconds=meeting_seconds,
+                    template_body=note_template_body,
                 )
                 jobs.update_job(job_id, progress=None)
 
@@ -2167,6 +2202,8 @@ def process(
         store = STORE
         whisper_model = WHISPER_MODEL
         transcription_language = TRANSCRIPTION_LANGUAGE
+        note_template = NOTE_TEMPLATE
+        custom_note_template = CUSTOM_NOTE_TEMPLATE
         custom_vocabulary = CUSTOM_VOCABULARY
         ollama_chat_model = OLLAMA_CHAT_MODEL
         advanced_diarization_enabled = ADVANCED_DIARIZATION_ENABLED
@@ -2215,6 +2252,8 @@ def process(
                 "mic_webm": str(mic_webm) if mic_webm else None,
                 "whisper_model": whisper_model,
                 "transcription_language": transcription_language,
+                "note_template": note_template,
+                "custom_note_template": custom_note_template,
                 "custom_vocabulary": custom_vocabulary,
                 "ollama_chat_model": ollama_chat_model,
                 "advanced_diarization_enabled": advanced_diarization_enabled,
@@ -2262,6 +2301,8 @@ def import_recording(file: UploadFile | None = File(None)):
         store = STORE
         whisper_model = WHISPER_MODEL
         transcription_language = TRANSCRIPTION_LANGUAGE
+        note_template = NOTE_TEMPLATE
+        custom_note_template = CUSTOM_NOTE_TEMPLATE
         custom_vocabulary = CUSTOM_VOCABULARY
         ollama_chat_model = OLLAMA_CHAT_MODEL
         advanced_diarization_enabled = ADVANCED_DIARIZATION_ENABLED
@@ -2293,6 +2334,8 @@ def import_recording(file: UploadFile | None = File(None)):
                 "import_media": str(import_path),
                 "whisper_model": whisper_model,
                 "transcription_language": transcription_language,
+                "note_template": note_template,
+                "custom_note_template": custom_note_template,
                 "custom_vocabulary": custom_vocabulary,
                 "ollama_chat_model": ollama_chat_model,
                 "advanced_diarization_enabled": advanced_diarization_enabled,

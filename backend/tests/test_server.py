@@ -5488,3 +5488,99 @@ def test_live_warm_preloads_the_resolved_live_model(client, monkeypatch):
     assert resp.json() == {"ok": True, "model": "tiny.en"}
     assert done.wait(timeout=5.0)
     assert loaded == ["tiny.en"]
+
+
+# ---- Tier 2.3: note templates -----------------------------------------------
+
+def test_settings_serve_note_template_choices_and_default(client):
+    body = client.get("/settings").json()
+    assert body["note_template"] == "general"
+    assert body["custom_note_template"] == ""
+    choices = body["note_template_choices"]
+    assert [c["id"] for c in choices] == ["general", "one_on_one", "standup", "interview", "sales"]
+    # Every built-in body keeps the real-titles contract.
+    assert all(c["body"].startswith("# (specific") for c in choices)
+
+
+def test_patch_settings_selects_a_template_and_saves_a_custom_body(client):
+    resp = client.patch(
+        "/settings",
+        json={"note_template": "standup", "custom_note_template": "# (title)\n\n## Mine\n- x\n"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["note_template"] == "standup"
+    assert body["custom_note_template"].startswith("# (title)")
+
+    import app.server as server_module
+    assert server_module.NOTE_TEMPLATE == "standup"
+
+    client.patch("/settings", json={"note_template": "general"})
+
+
+def test_patch_settings_rejects_unknown_template_and_oversized_custom_body(client):
+    assert client.patch("/settings", json={"note_template": "brainstorm"}).status_code == 400
+    too_long = "x" * 4001
+    assert client.patch("/settings", json={"custom_note_template": too_long}).status_code == 400
+
+
+def test_job_summarizes_into_the_selected_template(client, monkeypatch):
+    """The template choice at record time reaches the summarizer: a standup
+    recording's summary prompt carries the standup skeleton."""
+    captured = {}
+
+    def fake_llava_complete(**kwargs):
+        captured.update(kwargs)
+        return "# Standup sync\n\n## Blockers\n- none\n"
+
+    monkeypatch.setattr(server_module, "llava_complete", fake_llava_complete)
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+    monkeypatch.setattr(server_module, "transcribe_wav", _fake_single_segment_transcribe_wav)
+    monkeypatch.setattr(server_module, "mux_video_audio", _fake_mux)
+
+    client.patch("/settings", json={"note_template": "standup"})
+    try:
+        resp = client.post(
+            "/process",
+            files={
+                "screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+                "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm"),
+            },
+        )
+        job = wait_for_job(client, resp.json()["job_id"])
+        assert job["status"] == "done"
+        assert "## Updates by Person" in captured["template_body"]
+        assert "## Blockers" in captured["template_body"]
+    finally:
+        client.patch("/settings", json={"note_template": "general"})
+
+
+def test_job_with_custom_template_uses_the_custom_body(client, monkeypatch):
+    captured = {}
+
+    def fake_llava_complete(**kwargs):
+        captured.update(kwargs)
+        return "# Weekly review\n"
+
+    monkeypatch.setattr(server_module, "llava_complete", fake_llava_complete)
+    monkeypatch.setattr(server_module, "save_upload", _fake_save_upload)
+    monkeypatch.setattr(server_module, "to_wav", _fake_to_wav_writer())
+    monkeypatch.setattr(server_module, "transcribe_wav", _fake_single_segment_transcribe_wav)
+    monkeypatch.setattr(server_module, "mux_video_audio", _fake_mux)
+
+    client.patch(
+        "/settings",
+        json={"note_template": "custom", "custom_note_template": "# (title)\n\n## My Section\n- (x)"},
+    )
+    try:
+        resp = client.post(
+            "/process",
+            files={"screen": ("screen.webm", io.BytesIO(b"x"), "video/webm"),
+                   "mic": ("mic.webm", io.BytesIO(b"z"), "audio/webm")},
+        )
+        job = wait_for_job(client, resp.json()["job_id"])
+        assert job["status"] == "done"
+        assert "## My Section" in captured["template_body"]
+    finally:
+        client.patch("/settings", json={"note_template": "general"})

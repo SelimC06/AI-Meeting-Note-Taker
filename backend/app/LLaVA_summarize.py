@@ -299,6 +299,7 @@ def complete(
     client=None,
     on_progress=None,      # on_progress(done, total) per model call on long transcripts
     duration_seconds=None, # meeting length, only used to word a coverage notice
+    template_body=None,    # note template Markdown (Tier 2.3); None = the general template
     ):
 
     active_client = client if client is not None else _client
@@ -311,7 +312,10 @@ def complete(
     transcript = Path(raw_txt_path).read_text(encoding="utf-8")
 
     system_prompt = _SUMMARY_SYSTEM_PROMPT
-    template = _SUMMARY_TEMPLATE
+    # The template reaches the model in the FINAL call of both paths (the
+    # single-shot prompt and the map-reduce combine), so swapping the body
+    # here is all a meeting-type template needs.
+    template = template_body if template_body else _SUMMARY_TEMPLATE
 
     # The transcript must never push the prompt past num_ctx: Ollama then
     # silently truncates the WHOLE prompt (including the instructions and

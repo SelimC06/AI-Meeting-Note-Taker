@@ -18,6 +18,8 @@ vi.mock("../api");
 const baseSettings: Settings = {
   whisper_model: "base",
   transcription_language: "auto",
+  note_template: "general",
+  custom_note_template: "",
   storage_dir: "C:\\Users\\test\\recordings",
   ollama_chat_model: "gemma3:4b",
   custom_vocabulary: "",
@@ -32,6 +34,10 @@ const baseSettings: Settings = {
     { value: "base", label: "Base", description: "Balanced (default)" },
     { value: "small", label: "Small", description: "Slower, more accurate" },
     { value: "medium", label: "Medium", description: "Slowest, most accurate" },
+  ],
+  note_template_choices: [
+    { id: "general", label: "General", description: "Any meeting", body: "# (title)\n\n## Key Points\n- (bullet)\n" },
+    { id: "standup", label: "Standup", description: "Daily sync", body: "# (title)\n\n## Blockers\n- (blocker)\n" },
   ],
   transcription_language_choices: [
     { value: "auto", label: "Auto-detect" },
@@ -499,8 +505,10 @@ it("shows the Ollama model picker by default in the AI Model section", async () 
   await screen.findByText(/\[base\]/);
   openSection("AI Model");
 
-  const providerSelect = await screen.findByLabelText(/provider/i);
-  expect(providerSelect).toHaveValue("ollama");
+  // Provider is a card radiogroup now (UI refresh), not a select.
+  await screen.findByRole("radiogroup", { name: /provider/i });
+  expect(screen.getByRole("radio", { name: /ollama/i })).toHaveAttribute("aria-checked", "true");
+  expect(screen.getByRole("radio", { name: /built-in/i })).toHaveAttribute("aria-checked", "false");
   expect(screen.queryByLabelText(/base url/i)).not.toBeInTheDocument();
 });
 
@@ -511,8 +519,7 @@ it("shows custom provider fields when Custom is selected, and hides the Ollama m
   await screen.findByText(/\[base\]/);
   openSection("AI Model");
 
-  const providerSelect = await screen.findByLabelText(/provider/i);
-  fireEvent.change(providerSelect, { target: { value: "custom" } });
+  fireEvent.click(await screen.findByRole("radio", { name: /custom endpoint/i }));
 
   expect(await screen.findByLabelText(/base url/i)).toBeInTheDocument();
   expect(screen.getByLabelText(/^api key$/i)).toBeInTheDocument();
@@ -527,8 +534,7 @@ it("saves the provider selection immediately", async () => {
   await screen.findByText(/\[base\]/);
   openSection("AI Model");
 
-  const providerSelect = await screen.findByLabelText(/provider/i);
-  fireEvent.change(providerSelect, { target: { value: "custom" } });
+  fireEvent.click(await screen.findByRole("radio", { name: /custom endpoint/i }));
 
   await waitFor(() => {
     expect(updateSettings).toHaveBeenCalledWith({ ai_provider: "custom" });
@@ -848,4 +854,58 @@ it("switches the app theme from the Appearance section", async () => {
 
   fireEvent.click(screen.getByRole("button", { name: /dark \(phosphor\)/i }));
   expect(document.documentElement.dataset.theme).toBe("dark");
+});
+
+it("selects a note template and shows its preview", async () => {
+  vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, note_template: "standup" });
+
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\]/);
+  openSection("Notes");
+
+  expect(screen.getByText(/\[general\] General/)).toBeInTheDocument();
+  // The general preview is shown for the current selection.
+  expect(screen.getByText(/## Key Points/)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByText(/\[standup\] Standup/));
+  await waitFor(() => {
+    expect(updateSettings).toHaveBeenCalledWith({ note_template: "standup" });
+  });
+  expect(await screen.findByText(/## Blockers/)).toBeInTheDocument();
+});
+
+it("saves an edited custom template body", async () => {
+  vi.mocked(getSettings).mockResolvedValue({ ...baseSettings, note_template: "custom", custom_note_template: "# (t)\n## Mine\n- x" });
+  vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, note_template: "custom", custom_note_template: "# (t)\n## Mine v2\n- x" });
+
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\]/);
+  openSection("Notes");
+
+  const textarea = await screen.findByLabelText(/custom template/i);
+  expect(textarea).toHaveValue("# (t)\n## Mine\n- x");
+  fireEvent.change(textarea, { target: { value: "# (t)\n## Mine v2\n- x" } });
+  fireEvent.click(screen.getByRole("button", { name: /save template/i }));
+
+  await waitFor(() => {
+    expect(updateSettings).toHaveBeenCalledWith({ custom_note_template: "# (t)\n## Mine v2\n- x" });
+  });
+});
+
+it("edit-as-custom seeds the custom body from the previewed template and switches to custom", async () => {
+  vi.mocked(updateSettings).mockResolvedValue({ ...baseSettings, note_template: "custom" });
+
+  render(<SettingsPage active />);
+  await screen.findByText(/\[base\]/);
+  openSection("Notes");
+
+  // One action under the preview: it copies whatever template is selected
+  // (general here) into the custom body.
+  fireEvent.click(await screen.findByRole("button", { name: /edit as custom/i }));
+
+  await waitFor(() => {
+    expect(updateSettings).toHaveBeenCalledWith({ note_template: "custom" });
+  });
+  const textarea = await screen.findByLabelText(/custom template/i);
+  expect(textarea).toHaveValue("# (title)\n\n## Key Points\n- (bullet)\n");
 });

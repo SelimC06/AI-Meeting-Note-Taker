@@ -40,6 +40,8 @@ def test_default_settings_uses_env_vars(monkeypatch, tmp_path):
         "advanced_diarization_enabled": False,
         "huggingface_token": "",
         "ai_provider": "builtin",
+        "note_template": "general",
+        "custom_note_template": "",
         "custom_api_base_url": "",
         "custom_api_key": "",
         "custom_model_name": "",

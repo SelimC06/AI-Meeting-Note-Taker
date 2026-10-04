@@ -297,6 +297,15 @@ export type TranscriptionLanguageChoice = {
   label: string;
 };
 
+// Note templates (Tier 2.3): the Markdown skeletons summaries are written
+// into. Built-ins come from the backend; "custom" uses the user's body.
+export type NoteTemplateChoice = {
+  id: string;
+  label: string;
+  description: string;
+  body: string;
+};
+
 export type Settings = {
   // The model SIZE ("base"), not a concrete faster-whisper name: the
   // backend picks the multilingual or English-only variant per recording
@@ -305,6 +314,9 @@ export type Settings = {
   // "auto" (detect per recording) or a fixed language code from
   // transcription_language_choices.
   transcription_language: string;
+  // A built-in template id, or "custom" to use custom_note_template.
+  note_template: string;
+  custom_note_template: string;
   storage_dir: string;
   ollama_chat_model: string;
   custom_vocabulary: string;
@@ -326,6 +338,7 @@ export type Settings = {
   custom_model_name: string;
   whisper_model_choices: WhisperModelChoice[];
   transcription_language_choices: TranscriptionLanguageChoice[];
+  note_template_choices: NoteTemplateChoice[];
 };
 
 export type SettingsSecrets = {
@@ -347,6 +360,8 @@ export async function updateSettings(
       Settings,
       | "whisper_model"
       | "transcription_language"
+      | "note_template"
+      | "custom_note_template"
       | "storage_dir"
       | "ollama_chat_model"
       | "custom_vocabulary"
