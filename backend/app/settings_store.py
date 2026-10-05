@@ -17,10 +17,10 @@ SAVE_LOCK = threading.RLock()
 # ".en" variant (slightly better English WER, see whisper_cache's
 # benchmark notes) whenever the language setting says English.
 WHISPER_MODEL_CHOICES = [
-    {"value": "tiny", "label": "Tiny", "description": "Fastest, lower accuracy"},
-    {"value": "base", "label": "Base", "description": "Balanced (default)"},
-    {"value": "small", "label": "Small", "description": "Slower, more accurate"},
-    {"value": "medium", "label": "Medium", "description": "Slowest, most accurate"},
+    {"value": "tiny", "label": "Tiny", "description": "Fastest; rough outside English"},
+    {"value": "base", "label": "Base", "description": "Balanced for English (default)"},
+    {"value": "small", "label": "Small", "description": "Recommended for multilingual meetings"},
+    {"value": "medium", "label": "Medium", "description": "Most accurate, slowest"},
 ]
 WHISPER_MODEL_VALUES = {c["value"] for c in WHISPER_MODEL_CHOICES}
 

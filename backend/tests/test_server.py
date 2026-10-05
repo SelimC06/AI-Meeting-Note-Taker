@@ -5421,6 +5421,7 @@ def test_live_transcribe_returns_caption_text_with_live_flags(client, monkeypatc
     monkeypatch.setattr(server_module, "get_whisper_model", fake_get_whisper_model)
     monkeypatch.setattr(server_module, "transcribe_audio", fake_transcribe_audio)
     monkeypatch.setattr(server_module, "TRANSCRIPTION_LANGUAGE", "en")
+    monkeypatch.setattr(server_module, "WHISPER_MODEL", "base")
 
     resp = client.post(
         "/live/transcribe",
@@ -5428,8 +5429,8 @@ def test_live_transcribe_returns_caption_text_with_live_flags(client, monkeypatc
     )
     assert resp.status_code == 200
     assert resp.json() == {"text": "live caption text"}
-    # tiny resolved against the pinned language -> the English-only variant.
-    assert captured["model_name"] == "tiny.en"
+    # The configured model, resolved against the pinned language.
+    assert captured["model_name"] == "base.en"
     assert captured["language"] == "en"
     assert captured["vad_filter"] is True
     assert captured["condition_on_previous_text"] is False
@@ -5482,17 +5483,36 @@ def test_live_warm_preloads_the_resolved_live_model(client, monkeypatch):
 
     monkeypatch.setattr(server_module, "get_whisper_model", fake_get_whisper_model)
     monkeypatch.setattr(server_module, "TRANSCRIPTION_LANGUAGE", "en")
+    monkeypatch.setattr(server_module, "WHISPER_MODEL", "base")
 
     resp = client.post("/live/warm")
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "model": "tiny.en"}
+    assert resp.json() == {"ok": True, "model": "base.en"}
     assert done.wait(timeout=5.0)
-    assert loaded == ["tiny.en"]
+    assert loaded == ["base.en"]
+
+
+def test_live_model_clamps_large_configured_models_for_realtime(client, monkeypatch):
+    """A medium/large configured model would fall behind 7s caption
+    windows on CPU -- live clamps to small (while batch keeps medium)."""
+    monkeypatch.delenv("LIVE_WHISPER_MODEL", raising=False)
+    monkeypatch.setattr(server_module, "WHISPER_MODEL", "medium")
+    assert server_module._live_model_size() == "small"
+    monkeypatch.setattr(server_module, "WHISPER_MODEL", "base")
+    assert server_module._live_model_size() == "base"
+    # The env override still wins outright.
+    monkeypatch.setenv("LIVE_WHISPER_MODEL", "tiny")
+    assert server_module._live_model_size() == "tiny"
 
 
 # ---- Tier 2.3: note templates -----------------------------------------------
 
-def test_settings_serve_note_template_choices_and_default(client):
+def test_settings_serve_note_template_choices_and_default(client, monkeypatch):
+    # Pin the live globals: they load from whatever settings.json exists in
+    # the checkout at import time (a dev machine may have picked another
+    # template), and this test is about the served SHAPE, not that file.
+    monkeypatch.setattr(server_module, "NOTE_TEMPLATE", "general")
+    monkeypatch.setattr(server_module, "CUSTOM_NOTE_TEMPLATE", "")
     body = client.get("/settings").json()
     assert body["note_template"] == "general"
     assert body["custom_note_template"] == ""

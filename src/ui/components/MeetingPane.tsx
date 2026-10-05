@@ -401,6 +401,22 @@ export const TranscriptPane: React.FC<{ sessionId: string }> = ({ sessionId }) =
     );
   }
 
+  // The dominant language of the recording; segments in any OTHER
+  // language get a small tag (code-switched meetings, 1.2b). Monolingual
+  // recordings have at most one language value, so nothing is tagged.
+  const languageCounts = new Map<string, number>();
+  for (const seg of segments) {
+    if (seg.language) languageCounts.set(seg.language, (languageCounts.get(seg.language) ?? 0) + 1);
+  }
+  const dominantLanguage =
+    [...languageCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  const languageTag = (seg: TranscriptSegment) =>
+    seg.language && seg.language !== dominantLanguage ? (
+      <span className="ml-1.5 align-middle font-sans text-[9px] uppercase tracking-[0.08em] text-dim border border-line rounded-sm px-1 py-px">
+        {seg.language}
+      </span>
+    ) : null;
+
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 [-webkit-app-region:no-drag]">
       <div className="max-w-3xl space-y-2.5">
@@ -421,6 +437,7 @@ export const TranscriptPane: React.FC<{ sessionId: string }> = ({ sessionId }) =
             return (
               <p key={i} className="font-reading text-[13px] leading-relaxed text-phosphor">
                 {seg.text}
+                {languageTag(seg)}
               </p>
             );
           }
@@ -436,6 +453,7 @@ export const TranscriptPane: React.FC<{ sessionId: string }> = ({ sessionId }) =
                   isYou={isYou}
                   onRename={handleRename}
                 />
+                {languageTag(seg)}
               </span>
               <p className="mt-0.5 font-reading text-[13px] leading-relaxed text-phosphor">{seg.text}</p>
             </div>

@@ -2,7 +2,63 @@ import subprocess
 from faster_whisper import WhisperModel
 from pathlib import Path
 from .bin_paths import FFMPEG_BIN
+from .language_spans import detect_language_spans, read_wav_f32
 from .whisper_cache import get_whisper_model, transcribe_audio
+
+
+def _segment_dicts(segments, offset_seconds: float = 0.0, language: str | None = None) -> list[dict]:
+    """faster-whisper segments -> the pipeline's plain dicts, with every
+    timestamp (words included) shifted by offset_seconds and tagged with
+    the span's language when known."""
+    out = []
+    for seg in segments:
+        if not (seg.text and seg.text.strip()):
+            continue
+        entry = {
+            "start": seg.start + offset_seconds,
+            "end": seg.end + offset_seconds,
+            "text": seg.text.strip(),
+            "words": [
+                {
+                    "word": w.word,
+                    "start": w.start + offset_seconds,
+                    "end": w.end + offset_seconds,
+                    "probability": w.probability,
+                }
+                for w in (seg.words or [])
+            ],
+        }
+        if language:
+            entry["language"] = language
+        out.append(entry)
+    return out
+
+
+def _transcribe_language_spans(model, wav_path: str, initial_prompt: str | None) -> list[dict] | None:
+    """Code-switch handling for language="auto" (1.2b): detect languages
+    over windows of the audio and transcribe each span with its language
+    pinned, so English -> Turkish -> English in one recording stops being
+    transliterated into the first language Whisper saw.
+
+    Returns None whenever a single pass is the right call -- unreadable
+    audio, detection unavailable, or one language throughout -- and the
+    caller then runs the normal path."""
+    samples, rate = read_wav_f32(wav_path)
+    if samples is None or rate <= 0 or len(samples) == 0:
+        return None
+    spans = detect_language_spans(model, samples, rate)
+    if len(spans) <= 1:
+        return None
+    results: list[dict] = []
+    for span in spans:
+        chunk = samples[int(span["start"] * rate):int(span["end"] * rate)]
+        if len(chunk) == 0:
+            continue
+        segments, _ = transcribe_audio(
+            model, chunk, initial_prompt=initial_prompt, language=span["language"]
+        )
+        results.extend(_segment_dicts(segments, offset_seconds=span["start"], language=span["language"]))
+    return results
 
 
 def extract_frames(
@@ -53,23 +109,17 @@ def transcribe_wav(
 
     model_name and language arrive already resolved by the caller (see
     settings_store.resolve_whisper_model / resolve_transcribe_language);
-    language=None means auto-detect.
+    language=None means auto-detect -- including across the recording:
+    code-switched audio is split into language spans, each transcribed
+    with its own language pinned (see _transcribe_language_spans).
     """
     model = get_whisper_model(WhisperModel, model_name, device="cpu", compute_type="int8")
+    if language is None:
+        multilingual = _transcribe_language_spans(model, wav_path, initial_prompt)
+        if multilingual is not None:
+            return multilingual
     segments, _ = transcribe_audio(model, wav_path, initial_prompt=initial_prompt, language=language)
-    return [
-        {
-            "start": seg.start,
-            "end": seg.end,
-            "text": seg.text.strip(),
-            "words": [
-                {"word": w.word, "start": w.start, "end": w.end, "probability": w.probability}
-                for w in (seg.words or [])
-            ],
-        }
-        for seg in segments
-        if seg.text and seg.text.strip()
-    ]
+    return _segment_dicts(segments)
 
 
 def stop_recording_and_transcribe(

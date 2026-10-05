@@ -482,3 +482,101 @@ def test_stop_recording_and_transcribe_defaults_initial_prompt_to_none(tmp_path,
     )
 
     assert captured_kwargs["initial_prompt"] is None
+
+
+# ---- 1.2b: language-switch detection ---------------------------------------
+
+def _write_wav(path, seconds, rate=16000):
+    import wave
+    import numpy as np
+
+    pcm = (np.sin(np.linspace(0, 400, int(seconds * rate))) * 8000).astype(np.int16)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm.tobytes())
+
+
+class _Word:
+    def __init__(self, word, start, end):
+        self.word, self.start, self.end, self.probability = word, start, end, 0.9
+
+
+class _Seg:
+    def __init__(self, start, end, text):
+        self.start, self.end, self.text = start, end, text
+        self.words = [_Word(text, start, end)]
+
+
+class _SwitchingModel:
+    """Scripted per-window detection; transcribe() echoes the language it
+    was pinned to, so span -> language -> transcription is verifiable."""
+
+    def __init__(self, detections):
+        self.detections = list(detections)
+        self.transcribe_calls = []
+
+    def detect_language(self, audio=None, **kwargs):
+        language, prob = self.detections.pop(0)
+        return language, prob, []
+
+    def transcribe(self, audio, **kwargs):
+        self.transcribe_calls.append({"language": kwargs.get("language"), "samples": len(audio)})
+        return [_Seg(0.5, 2.0, f"spoken-{kwargs.get('language')}")], object()
+
+
+def test_transcribe_wav_splits_code_switched_audio_into_language_spans(tmp_path, monkeypatch):
+    import app.ffmpeg_transcribe as ft
+    from app.language_spans import DETECTION_WINDOW_SECONDS
+
+    wav = tmp_path / "meeting.wav"
+    _write_wav(wav, 3 * DETECTION_WINDOW_SECONDS)
+    model = _SwitchingModel([("en", 0.95), ("tr", 0.93), ("en", 0.9)])
+    monkeypatch.setattr(ft, "get_whisper_model", lambda cls, name, **kw: model)
+
+    segments = ft.transcribe_wav(str(wav), model_name="base", language=None)
+
+    # One pinned-language transcription per span.
+    assert [c["language"] for c in model.transcribe_calls] == ["en", "tr", "en"]
+    assert [s["language"] for s in segments] == ["en", "tr", "en"]
+    assert [s["text"] for s in segments] == ["spoken-en", "spoken-tr", "spoken-en"]
+    # Timestamps (words included) are offset into recording time.
+    assert segments[1]["start"] == pytest.approx(DETECTION_WINDOW_SECONDS + 0.5)
+    assert segments[1]["words"][0]["start"] == pytest.approx(DETECTION_WINDOW_SECONDS + 0.5)
+    assert segments[2]["start"] == pytest.approx(2 * DETECTION_WINDOW_SECONDS + 0.5)
+
+
+def test_transcribe_wav_single_language_stays_a_single_pass(tmp_path, monkeypatch):
+    import app.ffmpeg_transcribe as ft
+    from app.language_spans import DETECTION_WINDOW_SECONDS
+
+    wav = tmp_path / "meeting.wav"
+    _write_wav(wav, 2 * DETECTION_WINDOW_SECONDS)
+    model = _SwitchingModel([("tr", 0.95), ("tr", 0.9)])
+    monkeypatch.setattr(ft, "get_whisper_model", lambda cls, name, **kw: model)
+
+    segments = ft.transcribe_wav(str(wav), model_name="base", language=None)
+
+    # One whole-file transcription; auto-detect ran but found one language.
+    assert len(model.transcribe_calls) == 1
+    assert segments[0]["text"] == "spoken-None"
+    assert "language" not in segments[0]
+
+
+def test_transcribe_wav_pinned_language_never_runs_detection(tmp_path, monkeypatch):
+    import app.ffmpeg_transcribe as ft
+
+    wav = tmp_path / "meeting.wav"
+    _write_wav(wav, 30)
+
+    class NoDetectAllowed(_SwitchingModel):
+        def detect_language(self, audio=None, **kwargs):
+            raise AssertionError("detection must not run for a pinned language")
+
+    model = NoDetectAllowed([])
+    monkeypatch.setattr(ft, "get_whisper_model", lambda cls, name, **kw: model)
+
+    segments = ft.transcribe_wav(str(wav), model_name="base", language="tr")
+    assert model.transcribe_calls[0]["language"] == "tr"
+    assert segments[0]["text"] == "spoken-tr"

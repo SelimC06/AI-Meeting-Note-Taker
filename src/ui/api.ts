@@ -585,6 +585,10 @@ export type TranscriptSegment = {
   // or a plain-text transcript) -- rendered as text with no speaker label.
   speaker: string | null;
   text: string;
+  // Set by the multilingual span pass when a recording switches languages
+  // (1.2b); absent on monolingual recordings and older sessions. The
+  // transcript pane tags minority-language segments with it.
+  language?: string | null;
   // The original, stable label (e.g. "SPEAKER_00") before any user rename
   // was resolved into `speaker` -- needed to target a second rename at the
   // right key, since `speaker` alone can't be reversed back to it.

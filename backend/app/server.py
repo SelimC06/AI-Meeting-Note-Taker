@@ -2354,14 +2354,23 @@ def import_recording(file: UploadFile | None = File(None)):
             _active_uploads -= 1
 
 
-# Live captions (Tier 2.2). Always the fast tiny model regardless of the
-# configured (final-transcript) model: captions must keep up with speech on
-# CPU, and the real transcript is still produced by the full pipeline after
-# stop. Resolved per request against the language setting, so a pinned
-# English uses tiny.en and "auto" detects per window -- which also means a
-# meeting that switches language mid-way (English -> Turkish -> English)
-# captions each window in its own language.
-LIVE_WHISPER_MODEL = os.getenv("LIVE_WHISPER_MODEL", "tiny")
+# Live captions (Tier 2.2) follow the CONFIGURED transcription model, so
+# caption quality matches what the user chose -- hardcoding tiny gave a
+# medium user rough multilingual captions while their real transcripts
+# were fine. Clamped to "small": larger models can't keep up with 7-second
+# windows on CPU, and a caption that arrives after the next window is
+# worse than a slightly rougher one. LIVE_WHISPER_MODEL still overrides
+# outright for experimentation. Resolved per request against the language
+# setting ("auto" detects per window, so code-switched meetings caption
+# each window in its own language).
+_LIVE_REALTIME_SIZES = {"tiny", "base", "small"}
+
+
+def _live_model_size() -> str:
+    override = os.getenv("LIVE_WHISPER_MODEL")
+    if override:
+        return override
+    return WHISPER_MODEL if WHISPER_MODEL in _LIVE_REALTIME_SIZES else "small"
 
 # At most two windows transcribing at once (the rail sends one mic and one
 # system window per cycle). Anything beyond that answers 429 immediately
@@ -2379,7 +2388,7 @@ def live_warm():
     whisper_cache returns the cached instance when it's already loaded,
     and a failure here just means the first /live/transcribe loads it
     itself, slower."""
-    model_name = resolve_whisper_model(LIVE_WHISPER_MODEL, TRANSCRIPTION_LANGUAGE)
+    model_name = resolve_whisper_model(_live_model_size(), TRANSCRIPTION_LANGUAGE)
 
     def _load() -> None:
         try:
@@ -2406,7 +2415,7 @@ def live_transcribe(chunk: UploadFile | None = File(None)):
     try:
         # Snapshot settings once per request, same as the other endpoints.
         language = TRANSCRIPTION_LANGUAGE
-        model_name = resolve_whisper_model(LIVE_WHISPER_MODEL, language)
+        model_name = resolve_whisper_model(_live_model_size(), language)
         vocabulary = CUSTOM_VOCABULARY
 
         # System temp, NOT the store: these windows are ephemeral and must

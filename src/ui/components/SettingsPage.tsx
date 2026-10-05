@@ -484,10 +484,18 @@ export default function SettingsPage({
 
   return (
     <div className="flex-1 min-h-0 flex flex-row text-phosphor">
-      <nav className="w-44 shrink-0 border-r border-line bg-void/40 p-2.5 flex flex-col gap-0.5">
-        {NAV_GROUPS.map((group) => (
+      {/* Compact on purpose (py-1.5 items, slim group labels): all nine
+          items plus both group labels must fit a short window without a
+          scrollbar, and the old spacing pushed About nearly off-screen. */}
+      <nav className="w-44 shrink-0 border-r border-line bg-void/40 p-2 flex flex-col">
+        {NAV_GROUPS.map((group, groupIndex) => (
           <div key={group.heading}>
-            <p className="px-2 pt-2 pb-1.5 text-[9px] tracking-[0.15em] text-dim/50 select-none">
+            <p
+              className={
+                "px-2 pb-1 text-[9px] tracking-[0.15em] text-dim/50 select-none " +
+                (groupIndex === 0 ? "pt-1" : "pt-3")
+              }
+            >
               {group.heading.toUpperCase()}
             </p>
             {group.sections.map((section) => (
@@ -496,7 +504,7 @@ export default function SettingsPage({
                 onClick={() => setActiveSection(section.id)}
                 aria-current={activeSection === section.id ? "true" : undefined}
                 className={
-                  "w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-sm text-xs text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
+                  "w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-sm text-xs text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-signal " +
                   (activeSection === section.id
                     ? "bg-signal text-void font-semibold"
                     : "text-dim hover:text-phosphor hover:bg-line")

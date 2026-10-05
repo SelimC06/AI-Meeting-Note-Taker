@@ -23,13 +23,18 @@ def merge_track_segments(
     are kept.
     """
     def _tag(seg: dict, speaker: str) -> Dict:
-        return {
+        tagged = {
             "start": seg["start"],
             "end": seg["end"],
             "speaker": speaker,
             "text": seg["text"],
             "words": seg.get("words", []),
         }
+        # Carried when the multilingual span pass set it (1.2b) -- the UI
+        # tags minority-language segments with it.
+        if seg.get("language"):
+            tagged["language"] = seg["language"]
+        return tagged
 
     tagged = [_tag(seg, "You") for seg in (mic_segments or [])] + [
         _tag(seg, "Others") for seg in (system_segments or [])
