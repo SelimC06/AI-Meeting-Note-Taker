@@ -1,0 +1,51 @@
+name: Release (Windows)
+
+# Builds and publishes the Windows installer to the R2 update bucket --
+# the Windows counterpart of running `npm run release` on a Mac. Manual
+# trigger only: releasing is a deliberate act, never a side effect of a
+# push. Run it from the Actions tab (or `gh workflow run release-windows`)
+# on the commit whose version you bumped; release.mjs itself refuses to
+# re-publish an already-published version, so a stray run can't clobber
+# anything.
+#
+# Requires two repository secrets (Settings > Secrets and variables >
+# Actions): AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY -- the same R2
+# write credentials as the local .env.release.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build and publish (Windows x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          # The version the release build is made with (.venv / PyInstaller),
+          # same pin as CI.
+          python-version-file: .python-version
+          cache: pip
+
+      - run: npm ci
+
+      # Creates the .venv release.mjs's build:backend step freezes from.
+      - run: npm run setup:backend
+
+      # release.mjs runs its own checks, then build -> build:backend ->
+      # fetch:ffmpeg/llama/speaker-model -> electron-builder -> upload ->
+      # verify. Nothing is uploaded unless every check passes.
+      - run: npm run release
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

@@ -164,6 +164,12 @@ if (checkOnly) {
 run('npm', ['run', 'build']);
 run('npm', ['run', 'build:backend']);
 run('npm', ['run', 'fetch:ffmpeg']);
+// Vendored like ffmpeg and just as load-bearing: without these, a build
+// from a fresh clone packages WITHOUT the built-in AI's llama-server and
+// the speaker-ID model (a dev machine's already-populated vendor/ hid
+// this). Both fetchers are no-ops when the pinned files are present.
+run('npm', ['run', 'fetch:llama']);
+run('npm', ['run', 'fetch:speaker-model']);
 run('npx', ['electron-builder', '--publish', 'never']);
 
 const files = releaseFiles(manifestName, version);
