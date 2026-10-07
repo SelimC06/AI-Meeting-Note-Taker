@@ -8,7 +8,8 @@ name: Release (Windows)
 # looks the argument up as a workflow *name*). It builds the tip of the
 # branch or tag it runs on -- master, or the vX.Y.Z tag if that version is
 # already tagged -- so push the version bump first. release.mjs refuses to
-# re-publish an already-published version unless `force` is ticked, and
+# re-publish an already-published version (published installers are
+# immutable, docs/adr/0001 -- a repair ships as the next patch version), and
 # runs of this workflow are queued, never overlapped (see `concurrency`).
 #
 # Requires two repository secrets (Settings > Secrets and variables >
@@ -20,10 +21,6 @@ on:
     inputs:
       check:
         description: Only run release.mjs's checks (--check); nothing is built or uploaded
-        type: boolean
-        default: false
-      force:
-        description: Re-publish the version that is already live (--force); ONLY to repair a broken upload of it
         type: boolean
         default: false
 
@@ -71,7 +68,7 @@ jobs:
       # published or older, feed unreachable, UPDATE_FEED_URL set) need only
       # Node and node_modules, so they run before the Python install and the
       # build. `--check` only warns about missing credentials, hence the
-      # explicit test. The inputs only ever expand to a fixed flag or nothing.
+      # explicit test.
       - name: Release checks
         shell: bash
         env:
@@ -82,7 +79,7 @@ jobs:
             echo "::error::The AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY repository secrets are not set."
             exit 1
           fi
-          npm run release -- --check ${{ inputs.force && '--force' || '' }}
+          npm run release -- --check
 
       - uses: actions/setup-python@v5
         if: ${{ !inputs.check }}
@@ -99,16 +96,15 @@ jobs:
       # scripts/release.mjs re-runs its checks, fetches the vendored binaries,
       # builds, uploads (latest.yml last) and verifies. Nothing is uploaded
       # unless every step before the upload succeeded.
-      - run: npm run release -- ${{ inputs.force && '--force' || '' }}
+      - run: npm run release
         if: ${{ !inputs.check }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      # After a failed run, the exact bytes it built (and maybe uploaded) exist
-      # only on this runner. Keep them, so one file can be re-uploaded by hand
-      # (`node scripts/upload-r2.mjs release/<file>`, see README) instead of
-      # rebuilding different bytes under the same name.
+      # After a failed run, keep what it built for diagnosis. (Nothing needs
+      # re-uploading by hand: a failed upload never made the version live,
+      # so re-running the workflow is safe.)
       - name: Keep the installer of a failed run
         if: failure()
         uses: actions/upload-artifact@v4

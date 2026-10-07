@@ -164,6 +164,8 @@ declare global {
       // handler, so it can't itself risk throwing or await anything.
       reportRendererError: (payload: { kind: string; message: string; stack?: string }) => void;
       openLogsFolder: () => Promise<void>;
+      // Settings > About: opens THIRD_PARTY_NOTICES.md with the OS viewer.
+      openThirdPartyNotices: () => Promise<void>;
     };
     consentAPI?: {
       // Called from the rail right before a recording starts; resolves

@@ -86,16 +86,25 @@ npm run setup:backend
 ```
 
 `npm run setup:backend` creates a `.venv` at the project root and installs
-`requirements-dev.txt` into it: the pinned runtime dependencies from
-`requirements.txt` plus the test and lint tools (pytest, ruff). Re-run it any
-time a requirements file changes. Python dependencies are pinned to exact
-versions -- bump them deliberately, then run the tests and a packaging build.
+**`requirements.lock`** into it: every Python package the app, the tests and
+the build need -- transitive dependencies included -- pinned to exact,
+hash-checked versions for both macOS and Windows. CI and the release build
+install the same lock, so a fresh build environment can never pick up a
+different version than the one tested (a new transitive release once broke
+every transcription exactly that way). Re-run setup any time the lock
+changes.
+
+To change a dependency, edit the relevant `requirements*.txt`, then run
+`npm run lock:python` to regenerate the lock (it never upgrades anything you
+didn't ask for; `npm run lock:python -- --upgrade-package <name>` upgrades
+one package deliberately). CI fails if the lock is out of date.
 
 | File | What it's for |
 | --- | --- |
+| `requirements.lock` | Generated (`npm run lock:python`): everything below, fully pinned with hashes. What setup, CI and the build install. |
 | `requirements.txt` | What the backend needs at runtime (and what PyInstaller freezes). |
-| `requirements-dev.txt` | `requirements.txt` + pytest and ruff. Used by setup and CI. |
-| `requirements-build.txt` | PyInstaller (+ hooks), installed by `npm run build:backend`. |
+| `requirements-dev.txt` | `requirements.txt` + pytest, ruff and uv (which generates the lock). |
+| `requirements-build.txt` | PyInstaller (+ hooks), for `npm run build:backend`. |
 | `requirements-diarization.txt` | Optional torch + pyannote.audio 4.x for advanced diarization. The default speaker identification needs none of this: it runs on the bundled ONNX embedding model (`npm run fetch:speaker-model`, `backend/app/speaker_id.py`) with persistent voice profiles — name a speaker once and their voice is recognized in later meetings. |
 
 Backend tests and lint:
@@ -162,6 +171,20 @@ End users need no external installs at all: the AI chat/summarize features
 use the bundled llama.cpp server by default, downloading its model once on
 first use. Installing [Ollama](https://ollama.com) is only needed if the
 user switches the provider to Ollama in Settings.
+
+**System requirements:** macOS 14 or later (the build declares it, so older
+macOS refuses to open the app instead of failing at first run), or Windows
+10/11 x64. On Windows, the Microsoft C++ runtime `llama-server` needs
+(`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`) is bundled next
+to it, so clean installs without the Visual C++ Redistributable work too:
+the `beforePack` hook (`scripts/check-extra-resources.mjs`) copies the newest
+copy found on the build machine (its System32, or the frozen backend) and
+fails the build if any is missing.
+
+**Third-party licenses:** `THIRD_PARTY_NOTICES.md` (FFmpeg under GPLv3 with
+its source offer, llama.cpp, the speaker model, bundled Python packages)
+ships inside the app and opens from Settings → About. Update it when a
+bundled component or its license changes.
 
 `npm run setup:backend` and the `.venv` it creates are only needed for
 *building* the installer (or running the backend directly in dev mode) — they
@@ -317,9 +340,10 @@ both must stay correct:
    - **refuses** prerelease versions (`1.1.0-beta.1`): electron-builder would
      publish them to `beta*.yml`, which nothing reads;
    - fetches the published manifest for this platform and **refuses** if
-     `package.json`'s version is already published or older (`--force`
-     overrides, only to repair a broken upload of the same version), or if
-     the manifest can't be read at all;
+     `package.json`'s version is already published or older, or if the
+     manifest can't be read at all. There is no override: published
+     versions are final ([ADR 0001](docs/adr/0001-immutable-published-installers.md)),
+     so a fix to a live release ships as the next patch version;
    - on macOS, **refuses** if the published `latest-mac.yml` lists another
      architecture's files (see below; `--force-arch` overrides);
    - refuses if the R2 credentials aren't set, or if `UPDATE_FEED_URL` is
@@ -368,9 +392,8 @@ tag). Runs are queued one at a time, so don't also run a local Windows
 release of the same version. It needs two repository secrets (Settings →
 Secrets and variables → Actions), `AWS_ACCESS_KEY_ID` and
 `AWS_SECRET_ACCESS_KEY` -- the same R2 write credentials as `.env.release`.
-Its **check** and **force** inputs are `--check` and `--force`. A failed
-run keeps the installer it built as a workflow artifact for 14 days, for
-re-uploading a single file by hand (below).
+Its **check** input is `--check`. A failed run keeps the installer it built
+as a workflow artifact for 14 days, for diagnosis.
 
 **Big uploads on a flaky network.** The installers are ~240 MB, and
 electron-builder's own publisher sends each in a single request, which
@@ -380,13 +403,13 @@ uploads itself, in 10 MB parts with per-part retries. The installers must be
 completely uploaded *before* the manifest: a manifest pointing at a missing
 or truncated installer breaks both the updater and the website's download
 button. The script guarantees that order and stops before the manifest if
-any file fails, so users keep getting the previous version. Fix the network
-and run `npm run release -- --force` (from CI: tick **force**) to upload
-that same version again. A single file can also be re-uploaded by hand:
-`node scripts/upload-r2.mjs release/<file>` (same credentials). After
-re-uploading an installer under the same name, purge it from the Cloudflare
-cache in front of the bucket: the CDN can otherwise keep serving the
-previous bytes for hours, which fail the new manifest's checksum.
+any file fails, so users keep getting the previous version -- the version
+never went live, so just fix the network and run `npm run release` again.
+Once a manifest *is* live, never re-upload its installers: a rebuild
+produces different bytes, and the CDN in front of the bucket keeps serving
+the old installer for hours against the new manifest's checksum, so every
+update fails. Ship the next patch version instead
+([ADR 0001](docs/adr/0001-immutable-published-installers.md)).
 
 **One Mac architecture per manifest.** `latest-mac.yml` only lists the files
 of the architecture that published it, so publishing from an Apple Silicon
@@ -407,7 +430,8 @@ both sets of installers; the script doesn't do that.
 | `npm run lint` | Run ESLint (TypeScript/React, and the Node `.js`/`.mjs` in `src/electron` and `scripts`). |
 | `npm run test:main` | Run Electron main-process and build/release-script tests (`src/electron/*.test.js`, `scripts/*.test.mjs`). |
 | `npm run test:ui` | Run frontend tests (Vitest). |
-| `npm run setup:backend` | Create/refresh the Python `.venv` from `requirements-dev.txt` (runtime + test/lint tools). |
+| `npm run setup:backend` | Create/refresh the Python `.venv` from `requirements.lock` (runtime, test/lint and build tools, all pinned with hashes). |
+| `npm run lock:python` | Regenerate `requirements.lock` after editing a `requirements*.txt` (`-- --check` verifies it's current, as CI does). |
 | `npm run fetch:ffmpeg` | Download the ffmpeg/ffprobe binaries used by the backend. |
 | `npm run fetch:llama` | Download the llama.cpp `llama-server` binary used by the built-in AI provider. |
 | `npm run fetch:speaker-model` | Download the ONNX speaker-embedding model used for speaker identification (`backend/app/speaker_id.py`). |

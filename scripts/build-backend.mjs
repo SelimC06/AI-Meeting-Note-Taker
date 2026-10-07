@@ -27,10 +27,11 @@ if (!fs.existsSync(venvPython)) {
     process.exit(1);
 }
 
-// Always (not only when PyInstaller is missing): installing the pinned
-// requirements-build.txt is a quick no-op when they're already there, and
-// brings an older/newer PyInstaller already in the venv to the pinned one.
-run(venvPython, ['-m', 'pip', 'install', '-r', path.join(projectRoot, 'requirements-build.txt')]);
+// Always (not only when PyInstaller is missing): installing requirements.lock
+// is a quick no-op when the venv already matches, and it brings anything that
+// drifted (an older/newer PyInstaller, a stray upgrade) back to the exact,
+// hash-checked versions the release is built and tested with.
+run(venvPython, ['-m', 'pip', 'install', '--require-hashes', '-r', path.join(projectRoot, 'requirements.lock')]);
 
 if (fs.existsSync(distDir)) {
     fs.rmSync(distDir, { recursive: true, force: true });

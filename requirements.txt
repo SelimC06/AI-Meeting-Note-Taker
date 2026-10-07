@@ -22,3 +22,7 @@ httpx==0.28.1
 # Speaker embeddings for diarization + voice profiles (app/speaker_id.py):
 # ONNX runtime under the hood, no torch, prebuilt wheels for mac/win.
 sherpa-onnx==1.13.8
+# Pinned explicitly: sherpa-onnx needs it at runtime, but not every one of
+# its wheels declares the dependency, so the universal lock (uv --universal)
+# dropped it and a fresh install failed --require-hashes.
+sherpa-onnx-core==1.13.8

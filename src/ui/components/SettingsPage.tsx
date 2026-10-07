@@ -1148,6 +1148,19 @@ export default function SettingsPage({
             {updaterStatus.state === "error" && (
               <p className="text-xs text-dim">Update check failed: {updaterStatus.message}</p>
             )}
+            <h2 className="mt-2 pt-4 border-t border-line/60 text-[10px] font-semibold text-dim uppercase tracking-[0.16em]">
+              licenses
+            </h2>
+            <p className="text-xs text-dim">
+              DeskRecap includes open-source software, including FFmpeg (GPLv3) and llama.cpp
+              (MIT), each under its own license.
+            </p>
+            <button
+              onClick={() => void window.diagnosticsAPI?.openThirdPartyNotices?.()}
+              className="self-start px-2.5 py-1 rounded-sm text-xs border border-line text-dim hover:text-phosphor focus:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+            >
+              Third-party notices
+            </button>
           </section>
         )}
       </div>

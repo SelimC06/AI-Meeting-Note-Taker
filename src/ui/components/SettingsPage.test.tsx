@@ -909,3 +909,18 @@ it("edit-as-custom seeds the custom body from the previewed template and switche
   const textarea = await screen.findByLabelText(/custom template/i);
   expect(textarea).toHaveValue("# (title)\n\n## Key Points\n- (bullet)\n");
 });
+
+it("opens the third-party notices from About", async () => {
+  const openThirdPartyNotices = vi.fn().mockResolvedValue(undefined);
+  const previous = window.diagnosticsAPI;
+  window.diagnosticsAPI = { ...(previous ?? {}), openThirdPartyNotices } as typeof window.diagnosticsAPI;
+  try {
+    render(<SettingsPage active />);
+    await screen.findByText(/\[base\]/);
+    openSection("About");
+    fireEvent.click(await screen.findByRole("button", { name: /third-party notices/i }));
+    expect(openThirdPartyNotices).toHaveBeenCalledTimes(1);
+  } finally {
+    window.diagnosticsAPI = previous;
+  }
+});

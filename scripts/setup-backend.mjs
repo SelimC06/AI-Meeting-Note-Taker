@@ -78,9 +78,12 @@ if (fs.existsSync(venvDir)) {
     run(systemPython, ['-m', 'venv', venvDir]);
 }
 
-// requirements-dev.txt = the pinned runtime requirements.txt plus pytest and
-// ruff, so the same venv runs the app, the tests and the lint. Only what the
-// backend actually imports ends up in the frozen app (build:backend).
-run(venvPython, ['-m', 'pip', 'install', '-r', path.join(projectRoot, 'requirements-dev.txt')]);
+// requirements.lock pins everything requirements-dev.txt and
+// requirements-build.txt pull in (runtime deps, pytest/ruff/uv, PyInstaller)
+// to exact hash-checked versions for macOS and Windows, so every venv -- a
+// dev machine, CI, the release build -- gets identical packages. Only what
+// the backend actually imports ends up in the frozen app (build:backend).
+// The hashes make pip refuse any file that doesn't match the lock.
+run(venvPython, ['-m', 'pip', 'install', '--require-hashes', '-r', path.join(projectRoot, 'requirements.lock')]);
 
 console.log('Backend venv ready.');

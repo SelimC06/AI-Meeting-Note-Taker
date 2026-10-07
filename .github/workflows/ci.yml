@@ -54,7 +54,12 @@ jobs:
           node-version: 22
       - run: npm run fetch:ffmpeg
 
-      - run: pip install -r requirements-dev.txt
+      # requirements.lock: every package (transitive deps included) pinned
+      # and hash-checked for macOS and Windows -- the same set setup:backend
+      # and the release build install, so CI tests exactly what ships.
+      - run: pip install --require-hashes -r requirements.lock
+      # Fails when a requirements*.txt changed without regenerating the lock.
+      - run: npm run lock:python -- --check
       - run: ruff check .
       - run: python -m pytest -q
         working-directory: backend
@@ -96,7 +101,7 @@ jobs:
           node-version: 22
       - run: npm run fetch:ffmpeg
 
-      - run: pip install -r requirements-dev.txt
+      - run: pip install --require-hashes -r requirements.lock
       - run: ruff check .
       - run: python -m pytest -q
         working-directory: backend

@@ -1,5 +1,10 @@
 # Development / CI: the runtime dependencies plus test and lint tools.
-# Installed by `npm run setup:backend` and by CI; never frozen into the app.
+# Never frozen into the app. NOT installed directly: setup and CI install
+# requirements.lock, which pins everything here (and everything it pulls
+# in) to exact, hash-checked versions. Edit this file, then run
+# `npm run lock:python` to regenerate the lock.
 -r requirements.txt
 pytest==9.1.1
 ruff==0.16.9
+# Generates requirements.lock (npm run lock:python).
+uv==0.9.5

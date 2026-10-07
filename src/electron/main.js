@@ -856,6 +856,18 @@ ipcHandle('diagnostics:openLogsFolder', async () => {
     await shell.openPath(dir);
 });
 
+// Settings > About > Third-party notices. Packaged builds ship the file as
+// an extraResource; a dev run reads the repo's copy. Opened with the OS's
+// default viewer for .md files (a text editor at worst) -- it's a long legal
+// document, not something to render inside the settings screen.
+ipcHandle('about:openThirdPartyNotices', async () => {
+    const file = app.isPackaged
+        ? path.join(process.resourcesPath, 'THIRD_PARTY_NOTICES.md')
+        : path.join(app.getAppPath(), 'THIRD_PARTY_NOTICES.md');
+    const error = await shell.openPath(file);
+    if (error) throw new Error(error);
+});
+
 
 // Waits for the rail:stopAndSaveComplete ack (see the ipcMain.on handler
 // above), or gives up after timeoutMs so a renderer that never acks (crash,

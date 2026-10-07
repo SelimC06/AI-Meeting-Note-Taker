@@ -2,8 +2,6 @@
 //
 //   npm run release              check, build, upload, verify
 //   npm run release -- --check   only run the checks (no build, no upload)
-//   npm run release -- --force   publish even if this version is already
-//                                published (only to repair a broken upload)
 //   npm run release -- --force-arch
 //                                (macOS) publish even though it drops the
 //                                other architecture from latest-mac.yml
@@ -16,6 +14,14 @@
 // build itself never uploads (`electron-builder --publish never`); the files
 // are then uploaded by scripts/upload-r2.mjs in 10 MB retried parts, with
 // the manifest LAST, only after every installer and blockmap made it.
+//
+// Published versions are immutable (docs/adr/0001): once a version's
+// manifest is live, its installers are never overwritten. A rebuild never
+// reproduces the same bytes, so re-uploading under the same names leaves the
+// CDN serving the old installer against the new manifest's sha512, and every
+// auto-update fails its checksum. A failed upload is safe to re-run (the
+// manifest goes last, so the version never went live); anything wrong after
+// it went live ships as the next patch version.
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -34,12 +40,25 @@ import { createR2Client, r2ConfigFromPackageJson, uploadAll } from './upload-r2.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const releaseDir = path.join(root, 'release');
 const { checkOnly, force, forceArch } = resolveFlags(process.argv.slice(2), process.env);
-const REPAIR_HINT = 'Fix the problem, then run `npm run release -- --force` to upload this same version again.';
+// After the manifest is live (verification failed): the version is final.
+const REPAIR_HINT = 'This version is now live and final (published installers are immutable, docs/adr/0001). ' +
+    'Fix the problem, bump the patch version in package.json, and release again.';
+// Before the manifest went live (an upload failed): nothing was published.
+const RETRY_HINT = 'Users still get the previous version. Fix the problem and run `npm run release` again.';
 const FETCH_TIMEOUT_MS = 30000;
 
 function fail(message) {
     console.error(`\nrelease: ${message}`);
     process.exit(1);
+}
+
+// Refused before anything touches the network: there is nothing to check.
+if (force) {
+    fail(
+        '--force was removed: a published version is final, because re-uploading an installer under the same ' +
+        'name leaves the CDN serving the old one against the new manifest (docs/adr/0001). Bump the patch ' +
+        'version in package.json and release that instead.',
+    );
 }
 
 async function fetchManifest(url, { allowMissing = true } = {}) {
@@ -144,10 +163,7 @@ const remote = await fetchManifest(`${feedUrl}/${manifestName}`);
 console.log(`published ${manifestName}: ${remote ? remote.version : 'none yet'}`);
 
 const vProblem = versionProblem(version, remote?.version);
-if (vProblem) {
-    if (!force) fail(`${vProblem}\n(--force publishes anyway; only use it to repair a broken upload of this same version.)`);
-    console.warn(`warning (--force): ${vProblem}`);
-}
+if (vProblem) fail(vProblem);
 
 if (process.platform === 'darwin' && remote) {
     const aProblem = macArchProblem(remote.urls, process.arch);
@@ -187,7 +203,7 @@ const files = releaseFiles(manifestName, version);
 // published meanwhile (another CI run, or a release from another machine),
 // uploading would overwrite that build's installer under the same name with
 // different bytes, and latest.yml's sha512 would no longer match it.
-if (!force) {
+{
     const latest = await fetchManifest(`${feedUrl}/${manifestName}`);
     const lateProblem = versionProblem(version, latest?.version);
     if (lateProblem) fail(`${lateProblem} (It was published while this build ran.) Nothing was uploaded.`);
@@ -197,18 +213,11 @@ const client = createR2Client({ ...r2ConfigFromPackageJson(pkg), accessKeyId, se
 try {
     await uploadAll(client, files);
 } catch (err) {
-    fail(`upload failed: ${err.message}. ${manifestName} was NOT updated, so users still get the previous version. ${REPAIR_HINT}`);
+    fail(`upload failed: ${err.message}. ${manifestName} was NOT updated. ${RETRY_HINT}`);
 }
 
 await verifyPublished(feedUrl, manifestName, version);
 
-if (force && vProblem) {
-    console.warn(
-        `\nwarning (--force): the files were re-uploaded under the same names, and the CDN in front of ${feedUrl} ` +
-        'can keep serving copies it cached from the previous upload for hours (verification above only checks ' +
-        'sizes, at the origin). Purge them in Cloudflare so downloads match the new latest.yml.',
-    );
-}
 
 // In CI the commit that was built is GITHUB_SHA (what actions/checkout
 // checked out), which needn't be the maintainer's local HEAD -- tag that one.

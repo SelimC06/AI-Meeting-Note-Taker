@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseManifest, compareVersions, versionProblem, macArchOfUrl, macArchProblem } from './release-checks.mjs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const MAC_MANIFEST = `version: 1.0.0
 files:
@@ -94,4 +96,20 @@ test('an unreadable manifest is a problem, not "nothing published"', async () =>
     assert.match(manifestProblem(parseManifest(''), 'u'), /readable/);
     assert.match(manifestProblem(parseManifest('version: 1.0.0\n'), 'u'), /readable/); // no files
     assert.equal(manifestProblem(parseManifest(MAC_MANIFEST), 'u'), null);
+});
+
+test('--force is refused before anything is fetched: published versions are immutable (ADR 0001)', () => {
+    const scriptPath = fileURLToPath(new URL('./release.mjs', import.meta.url));
+    for (const args of [['--force'], ['--check', '--force']]) {
+        const result = spawnSync(process.execPath, [scriptPath, ...args], {
+            encoding: 'utf8',
+            // An unroutable feed: if the refusal ever moved after a network
+            // call, this test would hang/fail instead of passing silently.
+            env: { ...process.env, UPDATE_FEED_URL: 'http://127.0.0.1:9', npm_config_force: '' },
+            timeout: 20000,
+        });
+        assert.equal(result.status, 1, `exit status for ${args.join(' ')}`);
+        assert.match(result.stderr, /--force was removed/);
+        assert.match(result.stderr, /docs\/adr\/0001/);
+    }
 });

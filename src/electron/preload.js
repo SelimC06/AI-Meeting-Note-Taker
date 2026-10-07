@@ -214,6 +214,14 @@ contextBridge.exposeInMainWorld("diagnosticsAPI", {
       console.warn("[preload] openLogsFolder failed:", e);
     }
   },
+
+  openThirdPartyNotices: async () => {
+    try {
+      await ipcRenderer.invoke('about:openThirdPartyNotices');
+    } catch (e) {
+      console.warn("[preload] openThirdPartyNotices failed:", e);
+    }
+  },
 });
 
 contextBridge.exposeInMainWorld("updaterAPI", {
