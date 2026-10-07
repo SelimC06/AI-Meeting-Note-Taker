@@ -161,3 +161,16 @@ html[data-theme="light"] {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-dim);
 }
+
+/* Scrollable without a visible scrollbar (the sidebar's meeting list):
+   Windows keeps scrollbars permanently visible, which read as clutter in
+   the narrow sidebar. Wheel, trackpad and keyboard scrolling still work.
+   Both rules are needed: scrollbar-width for the standard property, the
+   ::-webkit-scrollbar rule because Chromium honors the global one above. */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

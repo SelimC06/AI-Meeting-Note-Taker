@@ -415,7 +415,7 @@ const Sidebar: React.FC<Props> = ({
             </div>
           )}
 
-          <div className="flex-1 min-h-0 overflow-y-auto">
+          <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
             {view === "active" && list !== null && list.length > 0 && (
               <button
                 onClick={() => onSelect(null)}
