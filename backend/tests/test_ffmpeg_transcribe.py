@@ -440,7 +440,7 @@ def test_stop_recording_and_transcribe_uses_shared_transcribe_helper_defaults(tm
     )
 
     assert captured_kwargs["beam_size"] == 1
-    assert captured_kwargs["vad_filter"] is False
+    assert captured_kwargs["vad_filter"] is True  # silence hallucinates "you" without it
     assert captured_kwargs["word_timestamps"] is True
 
 
@@ -580,3 +580,29 @@ def test_transcribe_wav_pinned_language_never_runs_detection(tmp_path, monkeypat
     segments = ft.transcribe_wav(str(wav), model_name="base", language="tr")
     assert model.transcribe_calls[0]["language"] == "tr"
     assert segments[0]["text"] == "spoken-tr"
+
+
+def test_transcribe_wav_runs_with_vad_so_a_silent_track_yields_nothing(tmp_path, monkeypatch):
+    """A system-audio track recorded while nothing played is digital
+    silence, and Whisper hallucinates on it ("you", "Thanks for watching!")
+    -- which used to show up as a phantom second speaker in solo
+    recordings. Every batch transcription must run with VAD on."""
+    import app.ffmpeg_transcribe as ft
+
+    wav = tmp_path / "system.wav"
+    _write_wav(wav, 5)
+    seen = {}
+
+    class VadAwareModel:
+        def transcribe(self, audio, **kwargs):
+            seen.update(kwargs)
+            # Mimic Whisper: with VAD, silence is skipped entirely;
+            # without it, it hallucinates.
+            if kwargs.get("vad_filter"):
+                return [], object()
+            return [_Seg(0.0, 1.0, "you")], object()
+
+    monkeypatch.setattr(ft, "get_whisper_model", lambda cls, name, **kw: VadAwareModel())
+    segments = ft.transcribe_wav(str(wav), model_name="base", language="en")
+    assert seen["vad_filter"] is True
+    assert segments == []

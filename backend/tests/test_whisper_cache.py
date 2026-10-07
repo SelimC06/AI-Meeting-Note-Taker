@@ -74,7 +74,7 @@ def test_transcribe_audio_default_params_are_consistent_across_all_call_sites():
     assert captured["path"] == "audio.wav"
     assert captured["initial_prompt"] == "glossary terms"
     assert captured["beam_size"] == 1
-    assert captured["vad_filter"] is False
+    assert captured["vad_filter"] is True  # silence hallucinates "you" without it
     assert captured["word_timestamps"] is True
     assert captured["condition_on_previous_text"] is True
 

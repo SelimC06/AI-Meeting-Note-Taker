@@ -32,7 +32,7 @@ def transcribe_audio(
     initial_prompt=None,
     language=None,
     beam_size=1,
-    vad_filter=False,
+    vad_filter=True,
     word_timestamps=True,
     condition_on_previous_text=True,
 ):
@@ -50,11 +50,19 @@ def transcribe_audio(
     beam_size=1 (0.0706 vs 0.0691 WER with word_timestamps on, vs 0.0665 vs
     0.0675 with it off) -- so beam_size=1 is the better default once
     word_timestamps is mandatory, even though beam_size=5 alone measured
-    better in isolation. vad_filter defaults off because it measured no WER
-    or speed benefit on the available benchmark audio (no meaningful dead air
-    in either the LibriSpeech utterances or the synthetic speed clips) --
-    still exposed as a parameter for callers with real meeting audio to test
-    against.
+    better in isolation.
+
+    vad_filter defaults ON. It measured no WER or speed benefit on the
+    benchmark audio (no meaningful dead air in LibriSpeech or the synthetic
+    clips), but real meetings have plenty, and Whisper hallucinates on it:
+    given true digital silence -- exactly what a system-audio track records
+    while nothing plays -- every model size emits "you" (medium: "Thanks for
+    watching!"), with no_speech_prob 0.6-0.95 but avg_logprob above -1, so
+    Whisper's own no-speech heuristic doesn't drop it. Those phantom lines
+    landed on the "Others" side of a solo recording as a second speaker.
+    Silero VAD removes non-speech before decoding, so silent tracks and
+    silent pauses produce nothing. Timestamps stay in recording time
+    (faster-whisper maps them back).
 
     language=None lets Whisper auto-detect (the "auto" setting); a code
     ("en", "tr", ...) pins it, which skips detection and is what

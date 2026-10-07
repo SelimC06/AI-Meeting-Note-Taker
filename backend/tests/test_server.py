@@ -2554,7 +2554,7 @@ def test_process_fallback_whisper_uses_shared_transcribe_helper_defaults(client,
     wait_for_job(client, resp.json()["job_id"])
 
     assert captured["beam_size"] == 1
-    assert captured["vad_filter"] is False
+    assert captured["vad_filter"] is True  # silence hallucinates "you" without it
     assert captured["word_timestamps"] is True
 
 
