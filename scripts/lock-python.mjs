@@ -69,9 +69,14 @@ const compiled = fs.readFileSync(tmpPath, 'utf8').replace(/^(# GENERATED[\s\S]*?
 fs.rmSync(tmpPath, { force: true });
 const next = HEADER + compiled;
 
+// Line endings never count as a difference: a Windows checkout (CI's
+// windows-latest uses core.autocrlf=true) has CRLF while uv writes LF, and
+// pip reads either. .gitattributes also pins the lock to LF.
+const normalize = (text) => text.replace(/\r\n/g, '\n');
+
 if (check) {
     const current = fs.existsSync(lockPath) ? fs.readFileSync(lockPath, 'utf8') : '';
-    if (current !== next) {
+    if (normalize(current) !== normalize(next)) {
         console.error('requirements.lock is out of date with requirements*.txt -- run `npm run lock:python`.');
         process.exit(1);
     }

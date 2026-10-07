@@ -1,0 +1,4 @@
+# Generated lock file: always LF, on every checkout and platform, so it is
+# byte-identical everywhere and `npm run lock:python -- --check` compares
+# content (a Windows checkout would otherwise get CRLF via core.autocrlf).
+requirements.lock text eol=lf
