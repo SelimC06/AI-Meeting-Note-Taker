@@ -90,11 +90,16 @@ export function macArchProblem(remoteUrls, hostArch) {
 // turns `npm run release --check` into npm_config_check=true instead of
 // passing the flag on, so "just checking" silently ran a full build and
 // publish.
+//
+// npm exports an EMPTY value for an explicitly false flag (`--no-force-arch`,
+// `--force=false`), so only "true" may turn on the flags that skip a safety
+// check. An empty npm_config_check still means check-only: if in doubt, don't
+// publish.
 export function resolveFlags(argv, env) {
     const args = new Set(argv);
-    const fromNpm = (name) => env[`npm_config_${name}`] === 'true' || env[`npm_config_${name}`] === '';
+    const fromNpm = (name) => env[`npm_config_${name}`] === 'true';
     return {
-        checkOnly: args.has('--check') || fromNpm('check'),
+        checkOnly: args.has('--check') || fromNpm('check') || env.npm_config_check === '',
         force: args.has('--force') || fromNpm('force'),
         forceArch: args.has('--force-arch') || fromNpm('force_arch'),
     };

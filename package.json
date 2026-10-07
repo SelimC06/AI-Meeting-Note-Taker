@@ -21,8 +21,9 @@
     "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "fetch:llama": "node scripts/fetch-llama.mjs",
     "fetch:speaker-model": "node scripts/fetch-speaker-model.mjs",
+    "fetch:vendor": "npm run fetch:ffmpeg && npm run fetch:llama && npm run fetch:speaker-model",
     "build:backend": "node scripts/build-backend.mjs",
-    "dist": "npm run build && npm run build:backend && npm run fetch:ffmpeg && npm run fetch:llama && npm run fetch:speaker-model && electron-builder",
+    "dist": "npm run fetch:vendor && npm run build && npm run build:backend && electron-builder --publish never",
     "release": "node scripts/release.mjs",
     "deploy": "npm run build && wrangler deploy"
   },
@@ -83,6 +84,7 @@
         "NSMicrophoneUsageDescription": "DeskRecap needs microphone access to record your voice during meetings."
       }
     },
+    "beforePack": "scripts/check-extra-resources.mjs",
     "afterSign": "scripts/notarize.mjs",
     "publish": {
       "provider": "s3",

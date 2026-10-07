@@ -8,6 +8,14 @@ fastapi==0.141.1
 uvicorn[standard]==0.54.0
 python-multipart==0.0.32
 faster-whisper==1.2.1
+# Not imported directly, but pinned because a fresh install (every CI
+# release build starts from an empty .venv) otherwise resolves
+# faster-whisper's open-ended `av>=11` to PyAV 19, which removed the
+# `metadata_errors=` argument faster-whisper 1.2.1's decode_audio still
+# passes to av.open -- every transcription then fails with a TypeError.
+# 18.1.0 is what the 1.1.0 Mac and Windows builds shipped. Revisit when
+# faster-whisper is bumped.
+av==18.1.0
 pillow==12.3.0
 ollama==0.6.3
 httpx==0.28.1

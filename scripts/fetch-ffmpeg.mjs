@@ -88,20 +88,30 @@ const MAC_SOURCES = {
     },
 };
 
-// Records which arch the vendored binaries were fetched for, so a vendor/ directory
-// carried over from a different machine is re-fetched instead of silently packaged
-// into a build it can't run on. (Checked alongside the binaries' existence below.)
+// Records which arch the vendored binaries were fetched for AND the SHA-256 of the
+// pinned archive(s) they came from ("<arch> <sha256> [<sha256>]"), so a vendor/
+// directory carried over from a different machine, or fetched before a repin, is
+// re-fetched instead of silently packaged. (Checked alongside the binaries'
+// existence below.) An older arch-only stamp never matches, so such a directory
+// is re-fetched once.
 const archStampFile = path.join(vendorDir, '.arch');
 
 const wantedArch = isWin ? 'x64' : process.arch;
-const stampedArch = fs.existsSync(archStampFile) ? fs.readFileSync(archStampFile, 'utf8').trim() : null;
+const pinnedSha256 = isWin
+    ? FFMPEG_ZIP_SHA256
+    : `${MAC_SOURCES[wantedArch]?.ffmpeg.sha256} ${MAC_SOURCES[wantedArch]?.ffprobe.sha256}`;
+const wantedStamp = `${wantedArch} ${pinnedSha256}`;
+const stamp = fs.existsSync(archStampFile) ? fs.readFileSync(archStampFile, 'utf8').trim() : null;
+const stampedArch = stamp ? stamp.split(/\s+/)[0] : null;
 
-if (fs.existsSync(ffmpegExe) && fs.existsSync(ffprobeExe) && stampedArch === wantedArch) {
+if (fs.existsSync(ffmpegExe) && fs.existsSync(ffprobeExe) && stamp === wantedStamp) {
     console.log(`ffmpeg/ffprobe (${wantedArch}) already present at ${vendorDir}, skipping download.`);
     process.exit(0);
 }
 if (stampedArch && stampedArch !== wantedArch) {
     console.log(`Vendored ffmpeg/ffprobe are ${stampedArch}, but this machine needs ${wantedArch} — re-fetching.`);
+} else if (stamp && stamp !== wantedStamp) {
+    console.log('Vendored ffmpeg/ffprobe are not the pinned build — re-fetching.');
 }
 
 fs.mkdirSync(vendorDir, { recursive: true });
@@ -199,7 +209,7 @@ if (!isWin) {
     fs.chmodSync(ffmpegExe, 0o755);
     fs.chmodSync(ffprobeExe, 0o755);
 }
-fs.writeFileSync(archStampFile, `${wantedArch}\n`);
+fs.writeFileSync(archStampFile, `${wantedStamp}\n`);
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
 console.log(`ffmpeg/ffprobe (${wantedArch}) ready at ${vendorDir}`);

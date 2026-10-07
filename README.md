@@ -177,8 +177,9 @@ Two of the three bundled pieces are host-native and cannot cross-compile:
   build:backend`), and
 - ffmpeg/ffprobe, vendored as native static builds (`npm run fetch:ffmpeg`,
   which picks its download by `process.arch` and stamps `vendor/ffmpeg/.arch`
-  so a `vendor/` directory copied from another machine is re-fetched rather
-  than silently packaged), and likewise the llama.cpp server binary
+  with that arch and the pinned archive's checksum, so a `vendor/` directory
+  copied from another machine -- or fetched before a repin -- is re-fetched
+  rather than silently packaged), and likewise the llama.cpp server binary
   (`npm run fetch:llama`, same pinned-checksum + `.arch` stamp scheme into
   `vendor/llama`).
 
@@ -279,7 +280,8 @@ both must stay correct:
    the same version reaches nobody -- which is why the script refuses it.
 2. **Run the release** on the machine for the platform (and, on macOS, the
    architecture) you're shipping, with the R2 write credentials in the
-   environment -- never in `package.json` or a committed file.
+   environment -- never in `package.json` or a committed file. (Windows
+   can also be released from CI: see **Windows from CI** below.)
 
    Keep the keys in a file rather than typing them into the command line
    (where they end up in your shell history). `.env*` files are gitignored;
@@ -322,9 +324,13 @@ both must stay correct:
      architecture's files (see below; `--force-arch` overrides);
    - refuses if the R2 credentials aren't set, or if `UPDATE_FEED_URL` is
      set (it only redirects the app -- releases always go to production);
-   - then runs `npm run build`, `npm run build:backend`,
-     `npm run fetch:ffmpeg` and `electron-builder --publish never` (build
-     only, no upload);
+   - then runs `npm run fetch:vendor` (ffmpeg, llama-server and the
+     speaker-ID model), `npm run build`, `npm run build:backend` and
+     `electron-builder --publish never` (build only, no upload; its
+     `beforePack` hook, `scripts/check-extra-resources.mjs`, refuses to
+     package if any vendored directory is missing or empty);
+   - checks the published manifest again, in case the same version went out
+     while it was building;
    - uploads the installers and their `.blockmap`s with
      `scripts/upload-r2.mjs`, in 10 MB parts that are each retried on their
      own, and the manifest (`latest-mac.yml` / `latest.yml`) **last**, only
@@ -346,8 +352,25 @@ both must stay correct:
    is what turns a bug report's "which version are you on" into something you
    can check out and debug.
 
-For a release on both platforms, run it once on Windows and once on the Mac,
-with the same version.
+For a release on both platforms, run it once for Windows (on a Windows
+machine or from CI, below) and once on the Mac, with the same version.
+
+**Windows from CI.** The **Release (Windows)** workflow
+(`.github/workflows/release-windows.yml`) runs this same `npm run release`
+on a fresh `windows-latest` runner, so a Windows release doesn't need a
+Windows machine. It only starts by hand: from the **Actions** tab
+(**Release (Windows)** → **Run workflow**), or with
+`gh workflow run release-windows.yml --ref <branch-or-tag>` (without
+`--ref`, the default branch). It builds the tip of that branch or tag, and
+refuses anything but `master` or a `v*` tag, so push the version bump
+first and tag afterwards (step 3; the script prints the exact commit to
+tag). Runs are queued one at a time, so don't also run a local Windows
+release of the same version. It needs two repository secrets (Settings →
+Secrets and variables → Actions), `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` -- the same R2 write credentials as `.env.release`.
+Its **check** and **force** inputs are `--check` and `--force`. A failed
+run keeps the installer it built as a workflow artifact for 14 days, for
+re-uploading a single file by hand (below).
 
 **Big uploads on a flaky network.** The installers are ~240 MB, and
 electron-builder's own publisher sends each in a single request, which
@@ -358,9 +381,12 @@ completely uploaded *before* the manifest: a manifest pointing at a missing
 or truncated installer breaks both the updater and the website's download
 button. The script guarantees that order and stops before the manifest if
 any file fails, so users keep getting the previous version. Fix the network
-and run `npm run release -- --force` to upload that same version again. A
-single file can also be re-uploaded by hand:
-`node scripts/upload-r2.mjs release/<file>` (same credentials).
+and run `npm run release -- --force` (from CI: tick **force**) to upload
+that same version again. A single file can also be re-uploaded by hand:
+`node scripts/upload-r2.mjs release/<file>` (same credentials). After
+re-uploading an installer under the same name, purge it from the Cloudflare
+cache in front of the bucket: the CDN can otherwise keep serving the
+previous bytes for hours, which fail the new manifest's checksum.
 
 **One Mac architecture per manifest.** `latest-mac.yml` only lists the files
 of the architecture that published it, so publishing from an Apple Silicon
@@ -384,6 +410,8 @@ both sets of installers; the script doesn't do that.
 | `npm run setup:backend` | Create/refresh the Python `.venv` from `requirements-dev.txt` (runtime + test/lint tools). |
 | `npm run fetch:ffmpeg` | Download the ffmpeg/ffprobe binaries used by the backend. |
 | `npm run fetch:llama` | Download the llama.cpp `llama-server` binary used by the built-in AI provider. |
+| `npm run fetch:speaker-model` | Download the ONNX speaker-embedding model used for speaker identification (`backend/app/speaker_id.py`). |
+| `npm run fetch:vendor` | All three fetches above: everything `build.extraResources` packages from `vendor/`. |
 | `npm run build:backend` | Freeze the Python backend with PyInstaller for packaging. |
-| `npm run dist` | Full build + package for this platform into `release/` (`build`, `build:backend`, `fetch:ffmpeg`, `fetch:llama`, `electron-builder`). Never uploads. |
+| `npm run dist` | Full build + package for this platform into `release/` (`fetch:vendor`, `build`, `build:backend`, `electron-builder --publish never`). Never uploads. |
 | `npm run release` | Check, build and publish a release to the update bucket (see [Publishing a release](#publishing-a-release)). `-- --check` only runs the checks. |

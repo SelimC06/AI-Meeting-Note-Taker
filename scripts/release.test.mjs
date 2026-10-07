@@ -71,6 +71,17 @@ test('resolveFlags honours both `-- --check` and npm\'s npm_config_check (a forg
     assert.deepEqual(resolveFlags([], {}), { checkOnly: false, force: false, forceArch: false });
 });
 
+test('an explicitly false npm flag (exported as an empty value) never forces a release', async () => {
+    const { resolveFlags } = await import('./release-checks.mjs');
+    // `npm run release --no-force --no-force-arch`
+    assert.deepEqual(
+        resolveFlags([], { npm_config_force: '', npm_config_force_arch: '' }),
+        { checkOnly: false, force: false, forceArch: false },
+    );
+    // `--no-check` errs on the side of not publishing.
+    assert.equal(resolveFlags([], { npm_config_check: '' }).checkOnly, true);
+});
+
 test('prerelease versions are refused', async () => {
     const { prereleaseProblem } = await import('./release-checks.mjs');
     assert.match(prereleaseProblem('1.1.0-beta.1'), /prerelease/);

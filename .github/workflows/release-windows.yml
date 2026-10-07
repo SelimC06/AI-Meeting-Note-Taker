@@ -3,10 +3,13 @@ name: Release (Windows)
 # Builds and publishes the Windows installer to the R2 update bucket --
 # the Windows counterpart of running `npm run release` on a Mac. Manual
 # trigger only: releasing is a deliberate act, never a side effect of a
-# push. Run it from the Actions tab (or `gh workflow run release-windows`)
-# on the commit whose version you bumped; release.mjs itself refuses to
-# re-publish an already-published version, so a stray run can't clobber
-# anything.
+# push. Run it from the Actions tab, or with
+# `gh workflow run release-windows.yml` (the .yml matters: without it gh
+# looks the argument up as a workflow *name*). It builds the tip of the
+# branch or tag it runs on -- master, or the vX.Y.Z tag if that version is
+# already tagged -- so push the version bump first. release.mjs refuses to
+# re-publish an already-published version unless `force` is ticked, and
+# runs of this workflow are queued, never overlapped (see `concurrency`).
 #
 # Requires two repository secrets (Settings > Secrets and variables >
 # Actions): AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY -- the same R2
@@ -14,15 +17,47 @@ name: Release (Windows)
 
 on:
   workflow_dispatch:
+    inputs:
+      check:
+        description: Only run release.mjs's checks (--check); nothing is built or uploaded
+        type: boolean
+        default: false
+      force:
+        description: Re-publish the version that is already live (--force); ONLY to repair a broken upload of it
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+
+# One release at a time. release.mjs checks "already published?" before the
+# long build, so two overlapping runs would both pass it and then overwrite
+# each other's same-named installer, leaving latest.yml's sha512 describing
+# the other build -- every Windows auto-update would then fail its checksum.
+# Queue, never cancel: a run stopped between its .exe and latest.yml uploads
+# can leave the two mismatched.
+concurrency:
+  group: release-windows
+  cancel-in-progress: false
 
 jobs:
   release:
     name: Build and publish (Windows x64)
     runs-on: windows-latest
+    # A normal run takes ~10-20 min; this only stops a hung step long before
+    # GitHub's 6-hour default.
+    timeout-minutes: 60
     steps:
+      # The dispatched ref's own copy of this workflow and the scripts is what
+      # runs: a feature branch (or a stray "Use workflow from" pick) must never
+      # ship to auto-updating Windows users.
+      - name: Only master or a vX.Y.Z tag
+        if: github.ref != 'refs/heads/master' && !startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          echo "::error::Release (Windows) only runs on master or a v* tag, not $GITHUB_REF."
+          exit 1
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -30,22 +65,58 @@ jobs:
           node-version: 22
           cache: npm
 
+      - run: npm ci
+
+      # Fail fast: release.mjs's refusals (prerelease, version already
+      # published or older, feed unreachable, UPDATE_FEED_URL set) need only
+      # Node and node_modules, so they run before the Python install and the
+      # build. `--check` only warns about missing credentials, hence the
+      # explicit test. The inputs only ever expand to a fixed flag or nothing.
+      - name: Release checks
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+            echo "::error::The AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY repository secrets are not set."
+            exit 1
+          fi
+          npm run release -- --check ${{ inputs.force && '--force' || '' }}
+
       - uses: actions/setup-python@v5
+        if: ${{ !inputs.check }}
         with:
           # The version the release build is made with (.venv / PyInstaller),
           # same pin as CI.
           python-version-file: .python-version
           cache: pip
 
-      - run: npm ci
-
       # Creates the .venv release.mjs's build:backend step freezes from.
       - run: npm run setup:backend
+        if: ${{ !inputs.check }}
 
-      # release.mjs runs its own checks, then build -> build:backend ->
-      # fetch:ffmpeg/llama/speaker-model -> electron-builder -> upload ->
-      # verify. Nothing is uploaded unless every check passes.
-      - run: npm run release
+      # scripts/release.mjs re-runs its checks, fetches the vendored binaries,
+      # builds, uploads (latest.yml last) and verifies. Nothing is uploaded
+      # unless every step before the upload succeeded.
+      - run: npm run release -- ${{ inputs.force && '--force' || '' }}
+        if: ${{ !inputs.check }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      # After a failed run, the exact bytes it built (and maybe uploaded) exist
+      # only on this runner. Keep them, so one file can be re-uploaded by hand
+      # (`node scripts/upload-r2.mjs release/<file>`, see README) instead of
+      # rebuilding different bytes under the same name.
+      - name: Keep the installer of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+          if-no-files-found: ignore
+          retention-days: 14

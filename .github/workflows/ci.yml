@@ -106,8 +106,9 @@ jobs:
     runs-on: macos-14
     # Catches what the unit tests can't: a dependency that PyInstaller fails
     # to freeze, a missing file in the package, a frozen backend that dies
-    # on startup. Builds the real (ad-hoc signed, never published) app, then
-    # starts its bundled backend and waits for /health.
+    # on startup. Builds the real (ad-hoc signed, never published) app with
+    # the same vendored binaries a release ships, then starts its bundled
+    # backend and waits for /health.
     steps:
       - uses: actions/checkout@v4
 
@@ -122,9 +123,10 @@ jobs:
 
       - run: npm ci
       - run: npm run setup:backend
+      # The same fetch list as `dist` and release.mjs (package.json).
+      - run: npm run fetch:vendor
       - run: npm run build
       - run: npm run build:backend
-      - run: npm run fetch:ffmpeg
       - run: npx electron-builder --publish never
 
       - name: Start the frozen backend and check /health
@@ -135,9 +137,17 @@ jobs:
           PORT: "8765"
           GRAPH_INDEXING_DISABLED: "1"
         run: |
-          RES="release/mac-arm64/DeskRecap.app/Contents/Resources"
+          RES="$PWD/release/mac-arm64/DeskRecap.app/Contents/Resources"
+          for f in backend/app-backend ffmpeg/ffmpeg ffmpeg/ffprobe llama/llama-server speaker/speaker-embedding.onnx; do
+            [ -s "$RES/$f" ] || { echo "missing from the package: $RES/$f"; exit 1; }
+          done
+          # The backend only starts llama-server once its 2.5 GB model is
+          # downloaded, so /health never would: prove the bundled binary's
+          # dylibs, signature and arch load from inside the app.
+          "$RES/llama/llama-server" --version
           export APP_DATA_DIR="$RUNNER_TEMP/deskrecap-appdata"
           export FFMPEG_BIN="$RES/ffmpeg/ffmpeg" FFPROBE_BIN="$RES/ffmpeg/ffprobe"
+          export LLAMA_SERVER_BIN="$RES/llama/llama-server" SPEAKER_MODEL_PATH="$RES/speaker/speaker-embedding.onnx"
           mkdir -p "$APP_DATA_DIR"
           "$RES/backend/app-backend" > backend.log 2>&1 &
           PID=$!
@@ -146,8 +156,14 @@ jobs:
               echo
               echo "frozen backend healthy after ~${i}s"
               STATUS=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health")
+              # available:true needs both the packaged model and a frozen sherpa_onnx.
+              SPEAKER=$(curl -sS -m 5 -H "X-DeskRecap-Token: $DESKRECAP_API_TOKEN" "http://127.0.0.1:$PORT/speaker-profiles" || true)
               kill $PID
               if [ "$STATUS" != "401" ]; then echo "expected 401 without the token, got $STATUS"; exit 1; fi
+              case "$SPEAKER" in
+                *'"available":true'*) ;;
+                *) echo "speaker ID unavailable in the package: $SPEAKER"; cat backend.log; exit 1 ;;
+              esac
               exit 0
             fi
             if ! kill -0 $PID 2>/dev/null; then echo "frozen backend exited:"; cat backend.log; exit 1; fi

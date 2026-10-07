@@ -57,10 +57,18 @@ async function fetchManifest(url, { allowMissing = true } = {}) {
     return manifest;
 }
 
+// The R2 write keys are only for the upload this script does itself
+// (createR2Client below; electron-builder runs with --publish never), so
+// they're kept out of every child's environment, where any build-time
+// dependency (pip, PyInstaller hooks, vite plugins, electron-builder's
+// downloads) could read them. Case-insensitive: Windows env names are, and a
+// copy of process.env keeps whatever casing a variable was created with.
+const childEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^AWS_/i.test(name)));
+
 function run(command, commandArgs) {
     console.log(`\n$ ${command} ${commandArgs.join(' ')}`);
     try {
-        execFileSync(command, commandArgs, { cwd: root, stdio: 'inherit', shell: process.platform === 'win32' });
+        execFileSync(command, commandArgs, { cwd: root, stdio: 'inherit', shell: process.platform === 'win32', env: childEnv });
     } catch (err) {
         fail(`\`${command} ${commandArgs.join(' ')}\` failed (${err.status != null ? `exit ${err.status}` : err.message}). Nothing was uploaded.`);
     }
@@ -161,18 +169,29 @@ if (checkOnly) {
     process.exit(0);
 }
 
+// The vendored binaries first: fetching them is what can fail on the network
+// or a pinned checksum, and nothing in build/build:backend reads vendor/.
+// fetch:vendor (package.json, shared with `dist` and CI) runs every fetcher
+// behind a build.extraResources directory; each downloads unless vendor/
+// already holds its pinned files (for this machine's arch, where that
+// matters). If a directory is still missing or empty, electron-builder's
+// beforePack hook (scripts/check-extra-resources.mjs) refuses to package.
+run('npm', ['run', 'fetch:vendor']);
 run('npm', ['run', 'build']);
 run('npm', ['run', 'build:backend']);
-run('npm', ['run', 'fetch:ffmpeg']);
-// Vendored like ffmpeg and just as load-bearing: without these, a build
-// from a fresh clone packages WITHOUT the built-in AI's llama-server and
-// the speaker-ID model (a dev machine's already-populated vendor/ hid
-// this). Both fetchers are no-ops when the pinned files are present.
-run('npm', ['run', 'fetch:llama']);
-run('npm', ['run', 'fetch:speaker-model']);
 run('npx', ['electron-builder', '--publish', 'never']);
 
 const files = releaseFiles(manifestName, version);
+
+// The version check above ran before the build. If this version was
+// published meanwhile (another CI run, or a release from another machine),
+// uploading would overwrite that build's installer under the same name with
+// different bytes, and latest.yml's sha512 would no longer match it.
+if (!force) {
+    const latest = await fetchManifest(`${feedUrl}/${manifestName}`);
+    const lateProblem = versionProblem(version, latest?.version);
+    if (lateProblem) fail(`${lateProblem} (It was published while this build ran.) Nothing was uploaded.`);
+}
 console.log(`\nuploading ${files.length} files (${manifestName} last):`);
 const client = createR2Client({ ...r2ConfigFromPackageJson(pkg), accessKeyId, secretAccessKey });
 try {
@@ -183,4 +202,18 @@ try {
 
 await verifyPublished(feedUrl, manifestName, version);
 
-console.log(`\nrelease: ${version} published and verified. Tag it:\n  git tag v${version} && git push origin v${version}`);
+if (force && vProblem) {
+    console.warn(
+        `\nwarning (--force): the files were re-uploaded under the same names, and the CDN in front of ${feedUrl} ` +
+        'can keep serving copies it cached from the previous upload for hours (verification above only checks ' +
+        'sizes, at the origin). Purge them in Cloudflare so downloads match the new latest.yml.',
+    );
+}
+
+// In CI the commit that was built is GITHUB_SHA (what actions/checkout
+// checked out), which needn't be the maintainer's local HEAD -- tag that one.
+const builtCommit = process.env.GITHUB_ACTIONS === 'true' ? process.env.GITHUB_SHA : null;
+const tagCommand = builtCommit
+    ? `git fetch origin && git tag v${version} ${builtCommit} && git push origin v${version}`
+    : `git tag v${version} && git push origin v${version}`;
+console.log(`\nrelease: ${version} published and verified. Tag it:\n  ${tagCommand}`);

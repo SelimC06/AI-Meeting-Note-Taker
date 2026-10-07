@@ -8,11 +8,11 @@ import crypto from 'node:crypto';
 // into vendor/llama, following fetch-ffmpeg.mjs exactly: pinned versioned
 // GitHub release assets (never a rolling "latest"), SHA-256 verified before
 // extraction, and an .arch stamp so a vendor/ dir carried over from a
-// different machine is re-fetched instead of packaged into a build it
-// can't run on. The backend spawns this binary as the built-in AI provider
-// (backend/app/builtin_llm.py); electron-builder ships vendor/llama via
-// extraResources, and main.js points the backend at it with
-// LLAMA_SERVER_BIN.
+// different machine (or fetched before a repin) is re-fetched instead of
+// packaged into a build it can't run on. The backend spawns this binary
+// as the built-in AI provider (backend/app/builtin_llm.py);
+// electron-builder ships vendor/llama via extraResources, and main.js
+// points the backend at it with LLAMA_SERVER_BIN.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, '..');
@@ -20,6 +20,7 @@ const vendorDir = path.join(projectRoot, 'vendor', 'llama');
 const isWin = process.platform === 'win32';
 const exeSuffix = isWin ? '.exe' : '';
 const serverExe = path.join(vendorDir, `llama-server${exeSuffix}`);
+const licenseFile = path.join(vendorDir, 'LICENSE');
 
 // Pinned to llama.cpp release b11382 (ggml-org/llama.cpp). Release assets
 // are durable, versioned copies -- they stay on their release when newer
@@ -56,22 +57,37 @@ const SOURCES = {
     },
 };
 
+// llama.cpp's own MIT LICENSE from the same tag. The macOS archives include
+// it; the Windows zip only carries libomp's (LICENSE-LLVM-OpenMP), so it is
+// fetched from here when the archive has none. Byte-identical to the macOS
+// archives' copy (same `shasum -a 256`, 2026-10-07); re-pin it with LLAMA_TAG.
+const LICENSE_URL = `https://raw.githubusercontent.com/ggml-org/llama.cpp/${LLAMA_TAG}/LICENSE`;
+const LICENSE_SHA256 = '94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d';
+
 const archStampFile = path.join(vendorDir, '.arch');
 // Same rule as fetch-ffmpeg.mjs: Windows packages are only built x64, and a
 // mac package is only coherent when every native piece matches the build
 // machine's arch (the PyInstaller backend can't cross-compile).
 const wantedArch = isWin ? 'x64' : process.arch;
-const stampedArch = fs.existsSync(archStampFile) ? fs.readFileSync(archStampFile, 'utf8').trim() : null;
+const source = SOURCES[process.platform]?.[wantedArch];
+// The stamp is "<arch> <sha256 of the pinned archive>", so a vendor/llama
+// fetched on another arch OR before a repin (LLAMA_TAG and hashes moved
+// together) is re-fetched instead of packaged. An older arch-only stamp
+// never matches, so such a directory is re-fetched once.
+const wantedStamp = `${wantedArch} ${source?.sha256}`;
+const stamp = fs.existsSync(archStampFile) ? fs.readFileSync(archStampFile, 'utf8').trim() : null;
+const stampedArch = stamp ? stamp.split(/\s+/)[0] : null;
 
-if (fs.existsSync(serverExe) && stampedArch === wantedArch) {
-    console.log(`llama-server (${wantedArch}) already present at ${vendorDir}, skipping download.`);
+if (source && stamp === wantedStamp && fs.existsSync(serverExe) && fs.existsSync(licenseFile)) {
+    console.log(`llama-server ${LLAMA_TAG} (${wantedArch}) already present at ${vendorDir}, skipping download.`);
     process.exit(0);
 }
 if (stampedArch && stampedArch !== wantedArch) {
     console.log(`Vendored llama-server is ${stampedArch}, but this machine needs ${wantedArch} — re-fetching.`);
+} else if (stamp && stamp !== wantedStamp) {
+    console.log(`Vendored llama-server isn't the pinned ${LLAMA_TAG} build — re-fetching.`);
 }
 
-const source = SOURCES[process.platform]?.[wantedArch];
 if (!source) {
     console.error(
         `No pinned llama.cpp build for ${process.platform}/${wantedArch} `
@@ -137,9 +153,9 @@ extract(archivePath, source.archive, extractDir);
 // Keep only what llama-server needs at runtime: the binary itself, every
 // shared library beside it (libggml*/libllama*/ggml-*.dll etc. -- resolved
 // via @rpath on macOS and loader-directory lookup on Windows), and the
-// LICENSE. The archives also carry a dozen other llama-* tools (cli,
-// perplexity, bench...) that would roughly triple the shipped size for
-// nothing.
+// license files (LICENSE; LICENSE-LLVM-OpenMP for the Windows libomp.dll).
+// The archives also carry a dozen other llama-* tools (cli, perplexity,
+// bench...) that would roughly triple the shipped size for nothing.
 function collectFiles(dir, out) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
@@ -156,7 +172,7 @@ const wanted = (name) => {
     const lower = name.toLowerCase();
     return (
         lower === `llama-server${exeSuffix}` ||
-        lower === 'license' ||
+        lower.startsWith('license') ||
         lower.endsWith('.dylib') ||
         lower.endsWith('.dll')
     );
@@ -175,6 +191,10 @@ if (!fs.existsSync(serverExe)) {
     console.error(`Could not locate llama-server${exeSuffix} inside the downloaded archive.`);
     process.exit(1);
 }
+if (!fs.existsSync(licenseFile)) {
+    fs.copyFileSync(await downloadAndVerify(LICENSE_URL, LICENSE_SHA256, 'LICENSE'), licenseFile);
+    copied += 1;
+}
 if (!isWin) {
     // tar generally preserves the executable bit, but set it explicitly so
     // a repin to an archive that doesn't store it can't silently produce a
@@ -182,7 +202,7 @@ if (!isWin) {
     fs.chmodSync(serverExe, 0o755);
 }
 
-fs.writeFileSync(archStampFile, `${wantedArch}\n`);
+fs.writeFileSync(archStampFile, `${wantedStamp}\n`);
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
 console.log(`llama-server (${wantedArch}, ${copied} files) ready at ${vendorDir}`);
