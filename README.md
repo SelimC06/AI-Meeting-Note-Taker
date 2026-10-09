@@ -10,8 +10,6 @@ account, no bot joining your call.
 
 [**Download for Mac & Windows →**](https://deskrecap.com)
 
-<img src="docs/images/deskrecap.jpg" alt="DeskRecap showing a meeting's notes, with speakers and action items" width="820">
-
 </div>
 
 https://github.com/user-attachments/assets/87c7733a-5af9-4648-bae5-81ba61d201d9
