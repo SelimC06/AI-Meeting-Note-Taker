@@ -1,10 +1,37 @@
+<div align="center">
+
 # DeskRecap
 
-A local-first desktop app for recording meetings, transcribing them, summarizing
-the transcript, and chatting with an LLM about the notes afterward — all
-without your audio or text ever leaving your machine.
+**Meeting notes that never leave your machine.**
 
-## What it does
+Record any meeting, get live captions, clean notes and a searchable transcript,
+then ask questions about it. Everything runs on your computer: no cloud, no
+account, no bot joining your call.
+
+[**Download for Mac & Windows →**](https://deskrecap.com)
+
+<img src="docs/images/deskrecap.jpg" alt="DeskRecap showing a meeting's notes, with speakers and action items" width="820">
+
+</div>
+
+https://github.com/user-attachments/assets/87c7733a-5af9-4648-bae5-81ba61d201d9
+
+## Features
+
+- 🎙️ **Record any call:** Zoom, Meet, Teams or anything else, with **live captions** while you talk
+- 📝 **Clean notes:** key points, decisions and action items, with templates for 1:1s, standups, interviews and sales calls
+- 🗣️ **Knows who said what:** name a speaker once, and their voice is recognized in every later meeting
+- 🌍 **Multilingual:** handles meetings that switch languages partway through
+- 💬 **Ask your meetings:** chat with one meeting, or across all of them
+- 📂 **Import recordings** you already have, audio or video
+- 🔒 **Private by design:** built-in AI (llama.cpp), with optional Ollama or your own API
+
+**Requirements:** macOS 14+ (Apple silicon) or Windows 10/11 (x64). The AI model
+downloads once on first use (~2.5 GB); after that, everything works offline.
+
+---
+
+## How it works
 
 The core flow is **record → transcribe → summarize → chat**:
 
